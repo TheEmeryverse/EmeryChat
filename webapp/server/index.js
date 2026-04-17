@@ -1,8 +1,14 @@
 require('../env.js')
 const cors = require('cors')
+const passport = require('./middleware/passport.js')
+const {connectDatabase, corsOptions, database} = require('./connections.js')
+const authentication = require('./middleware/authentication.js')
+
+connectDatabase()
+while(!database.main) {}
+
 const express = require('express')
 const app = express()
-const {corsOptions} = require('./connections.js')
 
 const http = require('http').createServer(app)
 
@@ -25,7 +31,18 @@ if (process.env.NODE_ENV === 'prod') {
     app.set('trust proxy', 1)
 }
 
-app.use('/api', require('./routes/api.js'))
+require('./middleware/session.js').then(session => {
 
+    app.use(session)
+    app.use(passport.initialize())
+    app.use(passport.session())
+    
+    app.use('/user', require('./routes/user.js'))
 
-http.listen(3000, () => console.log('Server running on port 3000'))
+    app.use(authentication.required())
+
+    app.use('/api', require('./routes/api.js'))
+    
+    
+    http.listen(3000, () => console.log('Server running on port 3000'))
+})
