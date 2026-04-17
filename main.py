@@ -192,9 +192,9 @@ async def generate_image(prompt): # Generates an image based on the prompt using
 
 async def get_noaa_weather(): # Fetches the forecast
     logging.info("🛠️ TOOL EXECUTION: get_noaa_weather")
-    headers = {'User-Agent': '({MODEL_NAME}-bot, {NOAA_EMAIL})'}
+    headers = {'User-Agent': f'({MODEL_NAME}-bot, {NOAA_EMAIL})'}
     try:
-        r1 = await http_client.get("https://api.weather.gov/points/{NOAA_LAT},{NOAA_LONG}", headers=headers)
+        r1 = await http_client.get(f"https://api.weather.gov/points/{NOAA_LAT},{NOAA_LONG}", headers=headers)
         r2 = await http_client.get(r1.json()['properties']['forecast'], headers=headers)
         periods = r2.json()['properties']['periods']
         
