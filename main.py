@@ -489,7 +489,7 @@ if is_enabled("ENABLE_SEERR"): # Seerr
         "overseer_search_tv": overseer_search_tv,
         "overseer_request_tv_season": overseer_request_tv_season
     })
-    tools_schema.extend(
+    tools_schema.extend([
         {"type": "function", "function": {
         "name": "overseer_search_movie", 
         "description": "Search for a movie. Query MUST contain ONLY the title (no years/actors).", 
@@ -517,7 +517,7 @@ if is_enabled("ENABLE_SEERR"): # Seerr
             "required": ["tmdb_id", "season_number"]
         }
     }}
-    )
+    ])
 
 if is_enabled("ENABLE_WEATHER"): # NOAA Weather
     AVAILABLE_TOOLS["get_noaa_weather"] = get_noaa_weather
