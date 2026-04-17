@@ -421,7 +421,7 @@ async def overseer_search_tv(query: str) -> str:
     def sync_search():
         encoded_query = quote(query)
         url = f"{OVERSEER_URL}/search?query={encoded_query}"
-        headers = {"X-Api-Key": {OVERSEER_KEY}, "Accept": "application/json"}
+        headers = {"X-Api-Key": OVERSEER_KEY, "Accept": "application/json"}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         raw_data = response.json()
