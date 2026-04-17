@@ -13,3 +13,5 @@ Tools Built (So Far...)
 - Web Search with SearXNG
 - System Stats
 - Seerr integration, searching and requesting movies and TV shows on your behalf
+- Gemini Image generation
+- Vision capable
