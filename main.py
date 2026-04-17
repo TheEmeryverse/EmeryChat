@@ -608,13 +608,13 @@ if is_enabled("ENABLE_SYSTEM_STATS"): # System Stats
     })
 
 TOOL_STATUS_MESSAGES = {
-    "web_search": f"{MODEL_NAME} is searching the web...",
+    "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
-    "get_noaa_weather": f"{MODEL_NAME} is checking the forecast...",
+    "get_noaa_weather": f"{MODEL_NAME} is looking outside...",
     "generate_image": f"{MODEL_NAME} is painting a picture...",
     "get_news_headlines": f"{MODEL_NAME} is reading the morning news...",
-    "get_nasa_apod": f"{MODEL_NAME} is looking at the stars...",
-    "get_today_in_history": f"{MODEL_NAME} is looking through the archives...",
+    "get_nasa_apod": f"{MODEL_NAME} is studying the stars...",
+    "get_today_in_history": f"{MODEL_NAME} is dusting off the archives...",
     "speak_message": f"{MODEL_NAME} is recording a voice memo...",
     "overseer_search_movie": f"{MODEL_NAME} is searching for a movie...",
     "overseer_request_movie": f"{MODEL_NAME} is requesting a movie...",
