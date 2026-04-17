@@ -1,0 +1,12 @@
+@font-face {
+	font-family: 'MotivaSans';
+	src: url('../public/MotivaSans-Regular.ttf') format('truetype');
+    font-weight: normal;
+}
+
+@font-face {
+	font-family: 'MotivaSans';
+	src: url('../public/MotivaSans-Bold.ttf') format('truetype');
+    font-weight: bold;
+}
+
