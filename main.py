@@ -482,14 +482,14 @@ if is_enabled("ENABLE_CALENDAR"): # Calendar
         }
     })
 
-if is_enabled("ENABLE_OVERSEER"): # Seerr
+if is_enabled("ENABLE_SEERR"): # Seerr
     AVAILABLE_TOOLS.update({
         "overseer_search_movie": overseer_search_movie,
         "overseer_request_movie": overseer_request_movie,
         "overseer_search_tv": overseer_search_tv,
         "overseer_request_tv_season": overseer_request_tv_season
     })
-    tools_schema.append(
+    tools_schema.extend([
         {"type": "function", "function": {
         "name": "overseer_search_movie", 
         "description": "Search for a movie. Query MUST contain ONLY the title (no years/actors).", 
@@ -517,7 +517,7 @@ if is_enabled("ENABLE_OVERSEER"): # Seerr
             "required": ["tmdb_id", "season_number"]
         }
     }}
-    )
+    ])
 
 if is_enabled("ENABLE_WEATHER"): # NOAA Weather
     AVAILABLE_TOOLS["get_noaa_weather"] = get_noaa_weather
@@ -608,13 +608,13 @@ if is_enabled("ENABLE_SYSTEM_STATS"): # System Stats
     })
 
 TOOL_STATUS_MESSAGES = {
-    "web_search": f"{MODEL_NAME} is searching the web...",
+    "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
-    "get_noaa_weather": f"{MODEL_NAME} is checking the forecast...",
+    "get_noaa_weather": f"{MODEL_NAME} is looking outside...",
     "generate_image": f"{MODEL_NAME} is painting a picture...",
     "get_news_headlines": f"{MODEL_NAME} is reading the morning news...",
-    "get_nasa_apod": f"{MODEL_NAME} is looking at the stars...",
-    "get_today_in_history": f"{MODEL_NAME} is looking through the archives...",
+    "get_nasa_apod": f"{MODEL_NAME} is studying the stars...",
+    "get_today_in_history": f"{MODEL_NAME} is dusting off the archives...",
     "speak_message": f"{MODEL_NAME} is recording a voice memo...",
     "overseer_search_movie": f"{MODEL_NAME} is searching for a movie...",
     "overseer_request_movie": f"{MODEL_NAME} is requesting a movie...",
