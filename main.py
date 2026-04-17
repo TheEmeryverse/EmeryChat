@@ -482,7 +482,7 @@ if is_enabled("ENABLE_CALENDAR"): # Calendar
         }
     })
 
-if is_enabled("ENABLE_SEER"): # Seerr
+if is_enabled("ENABLE_SEERR"): # Seerr
     AVAILABLE_TOOLS.update({
         "overseer_search_movie": overseer_search_movie,
         "overseer_request_movie": overseer_request_movie,
