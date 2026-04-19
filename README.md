@@ -74,13 +74,14 @@
         </thead>
         <tbody>
           <tr><td>🌤 Live Weather</td><td>Real-time data with NOAA integration</td></tr>
-          <tr><td>📅 Google Calendar</td><td>Full scheduling and event integration</td></tr>
+          <tr><td>📅 Google Calendar</td><td>Emery can view your Google Calendar</td></tr>
           <tr><td>🎙 Text to Speech</td><td>Allows Emery to send outbound voice messages</td></tr>
-          <tr><td>🎧 Transcription</td><td>Using Open WebUI's STT for inbound voice</td></tr>
+          <tr><td>🎧 Transcription</td><td>Using Open WebUI's STT for your voice messages</td></tr>
           <tr><td>📡 RSS News</td><td>Custom feeds from any RSS source</td></tr>
           <tr><td>🚀 NASA Image</td><td>Daily space imagery and explanations</td></tr>
-          <tr><td>📜 History</td><td>"Today In History" historical context</td></tr>
+          <tr><td>📜 History</td><td>"Today In History" historical content</td></tr>
           <tr><td>🔍 Web Search</td><td>Integrated search powered by SearXNG</td></tr>
+          <tr><td>🔍 URL Fetching</td><td>Allows you to send links, and for Emery do to deep research</td></tr>
           <tr><td>💻 System Stats</td><td>Real-time CPU and RAM monitoring</td></tr>
           <tr><td>🎬 Seerr / Media</td><td>Request movies and TV shows via Seerr</td></tr>
           <tr><td>🖼 Image Gen</td><td>Generate images via Gemini or custom providers</td></tr>
