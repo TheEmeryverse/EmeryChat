@@ -406,7 +406,7 @@ async def overseer_search_movie(query: str) -> str:
 
 async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
     headers = {"X-Api-Key": OVERSEER_KEY, "Content-Type": "application/json"}
-    payload = {"mediaType": "movie", "mediaId": int(tmdb_id), "userId": OVERSEER_USER_ID, "is4k": False}
+    payload = {"mediaType": "movie", "mediaId": int(tmdb_id), "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
 
