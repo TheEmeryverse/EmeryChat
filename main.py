@@ -55,6 +55,7 @@ ENABLE_VOICE = os.getenv("ENABLE_VOICE", "false")
 ENABLE_IMAGEGEN = os.getenv("ENABLE_IMAGEGEN", "false")
 ENABLE_WEATHER = os.getenv("ENABLE_WEATHER", "false")
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
+ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
 OVERSEER_URL = os.getenv("OVERSEER_URL", "http://localhost:5055/api/v1") # URL address for Seerr
 OVERSEER_KEY = os.getenv("OVERSEER_KEY", "blank") # Seerr API key
 OVERSEER_USER_ID = os.getenv("OVERSEER_USER_ID", "1") # Your Overseerr ID, found using the API, documentation @ https://YOUR_SEERR_IP_ADDRESS/api-docs/. If you are the owner of the Seerr instance, it is most likely '1'
@@ -66,26 +67,18 @@ TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 
 # USER PROFILE
 USER_NAME = os.getenv("USER_NAME", "User") # What do you want the model to call you?
-USER_LOCATION = os.getenv("USER_LOCATION", "New York City, NY") # Where are you?
+USER_LOCATION = os.getenv("USER_LOCATION", "Earth") # Where are you?
 USER_TIMEZONE = pytz.timezone(os.getenv("USER_TIMEZONE", "America/New_York")) # TZ
-USER_BIRTHDAY = os.getenv("USER_BIRTHDAY", "January 1 1990") # When is your birthday?
+USER_BIRTHDAY = os.getenv("USER_BIRTHDAY", "UNKNOWN") # When is your birthday?
 USER_FAMILY = os.getenv("USER_FAMILY", "") # Who is in your family?
-USER_PROFESSION = os.getenv("USER_PROFESSION", "AI Enthusiast") # What do you do for a living?
+USER_PROFESSION = os.getenv("USER_PROFESSION", "Unemployed") # What do you do for a living?
 USER_BIO = f"""User's name: {USER_NAME}.
             {USER_NAME}'s location: {USER_LOCATION}.
             {USER_NAME}'s timezone: {USER_TIMEZONE}.
             {USER_NAME}'s birthday: {USER_BIRTHDAY}.
             {USER_NAME}'s family: {USER_FAMILY}.
             Only include birthday info if a birthday is within 5 days, otherwise IGNORE AND DO NOT MENTION.
-            {USER_NAME}'s profession: {USER_PROFESSION}.
-            
-            MEDIA REQUEST PROTOCOL (Used ONLY when the user makes a request for a movie or TV to be added or requested):
-            1. Search: Use overseer_search_movie or overseer_search_tv. Use ONLY the title in the query, do not add any additional information to the search query.
-            2. Movies: If the search result matches exactly one result, request it immediately using the appropriate movie request tool. Otherwise, ask the User to confirm the search result from a numbered list.
-            3. TV: User must provide the season number. If the search result matches exactly one result, request it immediately using the appropriate tv request tool. Otherwise, ask the User to confirm the search result from a numbered list.
-            4. Request the media using the ID found during the search process, passed as a clean integer.
-            5. Success: Confirm the title and request status, and provide a recommendation for a similar show (using web_search to find similar media).
-            """
+            {USER_NAME}'s profession: {USER_PROFESSION}."""
 
 # --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - [EMERYCHAT] - %(levelname)s - %(message)s', level=logging.INFO)
@@ -577,22 +570,22 @@ if is_enabled("ENABLE_SEERR"): # Seerr
     tools_schema.extend([
         {"type": "function", "function": {
         "name": "overseer_search_movie", 
-        "description": "Search for a movie. Query MUST contain ONLY the title (no years/actors).", 
+        "description": "Search for a movie. Query MUST contain ONLY the title (no years/actors). Use FIRST when the User asks you to add a movie or request a movie. Return the results in a numbered list, and DO NOT include the ID in the response.", 
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
     }},
     {"type": "function", "function": {
         "name": "overseer_request_movie", 
-        "description": "Request a movie using its TMDB ID.", 
+        "description": "Request a movie using its TMDB ID. Use AFTER the user selects a movie from the search results from overseer_search_movie. Call the tool using the ID from the search results.", 
         "parameters": {"type": "object", "properties": {"tmdb_id": {"type": "integer"}}, "required": ["tmdb_id"]}
     }},
     {"type": "function", "function": {
         "name": "overseer_search_tv", 
-        "description": "Search for a TV show. Query MUST contain ONLY the title.", 
+        "description": "Search for a TV show. Query MUST contain ONLY the title. Use FIRST when the User asks you to add a TV show or request a TV show. Return the results in a numbered list, and DO NOT include the ID in the response.", 
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
     }},
     {"type": "function", "function": {
         "name": "overseer_request_tv_season", 
-        "description": "Request a specific season of a TV show using ID.", 
+        "description": "Request a specific season of a TV show using ID. Use AFTER the user selects a TV show from the search results from overseer_search_tv. Call the tool using the ID from the search results.", 
         "parameters": {
             "type": "object", 
             "properties": {
