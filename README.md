@@ -52,10 +52,6 @@
         <div class="tool-card"><span class="tool-title">🖼 Image Generation</span><p class="tool-desc">Using Gemini or another provider</p></div>
         <div class="tool-card"><span class="tool-title">👁 Vision Capable</span><p class="tool-desc">Multimodal models or fast secondary (e.g., Gemma4:e2b)</p></div>
       </div>
-    </section>
-    <footer>
-      <p>EmeryChat © 2024 — Free. Open. Runs locally.</p>
-    </footer>
   </div>
 </body>
 </html>
