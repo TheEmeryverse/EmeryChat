@@ -12,20 +12,50 @@
       <p>All models have been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
     </section>
     <section class="benchmarks">
-      <h2>Tested Models & Performance</h2>
-      <table class="bench-table">
-        <thead>
-          <tr><th>Model</th><th>Context / Notes</th><th>Grade</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Gemini 3 Flash (Cloud-based API)</td><td>—</td><td><span class="grade A">A</span></td></tr>
-          <tr><td>Gemma4:26b MoE</td><td>64k context, thinking ON</td><td><span class="grade A">A+</span></td></tr>
-          <tr><td>Qwen3.6:35b MoE</td><td>64k context, thinking OFF</td><td><span class="grade A">A</span></td></tr>
-          <tr><td>Gemma4:e4b</td><td>64k context, thinking ON</td><td><span class="grade B">B+</span></td></tr>
-          <tr><td>Qwen3.5:9b</td><td>64k context, thinking ON</td><td><span class="grade B">B</span></td></tr>
-        </tbody>
-      </table>
-    </section>
+  <h2>Tested Models & Performance</h2>
+  <table class="bench-table">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Context/Logic</th>
+        <th>Grade</th>
+        <th>Explanation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Gemini 3 Flash</td>
+        <td>Cloud API</td>
+        <td><span class="grade A">A</span></td>
+        <td>You get what you pay for. In this case excellent quality and instant responses. Overkill for EmeryChat.</td>
+      </tr>
+      <tr>
+        <td>Gemma4:26b MoE</td>
+        <td>64k, Thinking ON</td>
+        <td><span class="grade A">A+</span></td>
+        <td>Quick responses, intelligent tool usage. Tends to be a bit "lazy", favoring short responses even when asked to go in depth.</td>
+      </tr>
+      <tr>
+        <td>Qwen3.6:35b MoE</td>
+        <td>64k, Thinking OFF</td>
+        <td><span class="grade A">A</span></td>
+        <td>Quick responses, excellent tool calling. Will easily generate long breakdowns and research reports. Tends to be to "pleasing", and may call tools a bit proactively without direct prompting.</td>
+      </tr>
+      <tr>
+        <td>Gemma4:e4b</td>
+        <td>64k, Thinking ON</td>
+        <td><span class="grade B">B+</span></td>
+        <td>Extremely efficient; runs on almost any hardware but occasionally misses nuanced logic. Very strong tool usage.</td>
+      </tr>
+      <tr>
+        <td>Qwen3.5:9b</td>
+        <td>64k, Thinking ON</td>
+        <td><span class="grade B">B</span></td>
+        <td>Solid entry-level model; great for basic tasks but has a tendency to deliver long responses that lack depth and contain hallucinated or incorrect information.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
     <section class="hardware">
       <h2>Testing Hardware</h2>
       <p>All models have been tested on:</p>
