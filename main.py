@@ -12,6 +12,8 @@ import subprocess
 import asyncio
 import io
 import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 from dotenv import load_dotenv
 from urllib.parse import quote
 from datetime import datetime, time
@@ -406,7 +408,7 @@ async def overseer_search_movie(query: str) -> str:
 
 async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
     headers = {"X-Api-Key": OVERSEER_KEY, "Content-Type": "application/json"}
-    payload = {"mediaType": "movie", "mediaId": int(tmdb_id), "userId": int(OVERSEER_USER_ID), "is4k": False}
+    payload = {"mediaType": "movie", "mediaId": int(float(tmdb_id)), "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
 
@@ -464,13 +466,87 @@ async def overseer_search_tv(query: str) -> str:
 
 async def overseer_request_tv_season(tmdb_id, season_number): # Requests a specific TV season through Seerr
     headers = {"X-Api-Key": OVERSEER_KEY, "Content-Type": "application/json"}
-    payload = {"mediaType": "tv", "mediaId": int(tmdb_id), "seasons": [int(season_number)], "userId": OVERSEER_USER_ID, "is4k": False}
+    payload = {"mediaType": "tv", "mediaId": int(float(tmdb_id)), "seasons": [int(season_number)], "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
+        logging.info(f"Overseer status: {r.status_code}")
+        logging.info(f"Overseer response body: {r.text}")
         if r.status_code == 409: return f"Season {season_number} is already available or pending."
         return f"SUCCESS: Season {season_number} requested for user."
-    except Exception as e: return f"Request failed: {e}"
+    except Exception as e:
+        logging.error(f"Overseerr TV Season Request Failed: {e}")
+        return f"Request failed: {e}"
 
+async def fetch_web_content(url: str, max_chars: int = 8000) -> dict:
+    """
+    Optimized for LLM agents following a SearXNG search.
+    Removes boilerplate and preserves structural context.
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
+
+    try:
+        # Use a longer timeout for specific site fetches (some sites are slow)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            response = await client.get(url, headers=headers)
+            
+            # If we hit a 403 or 401, the model needs to know it's a permission issue (paywall/bot detection)
+            if response.status_code != 200:
+                return {
+                    "success": False, 
+                    "status": response.status_code, 
+                    "error": f"Site returned status code {response.status_code}. It might be blocking scrapers or require a subscription."
+                }
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # 1. Strip non-content noise
+            for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'form', 'noscript', 'svg', 'iframe']):
+                element.decompose()
+
+            # 2. Extract title and description
+            title = soup.title.string.strip() if soup.title else "No Title"
+            
+            # 3. Preserving "Meaningful" Structure
+            # We use markers so the LLM understands headers vs body
+            for tag in soup.find_all(['h1', 'h2', 'h3']):
+                tag.insert_before("\n[HEADER: ")
+                tag.insert_after("]\n")
+            
+            for li in soup.find_all('li'):
+                li.insert_before("\n- ")
+
+            # 4. Content Extraction
+            # Using separator='\n' prevents text from different divs slamming together
+            text = soup.get_text(separator='\n')
+            
+            # Clean up whitespace: remove triple+ newlines, but keep double newlines for paragraphs
+            cleaned_text = re.sub(r'\n{3,}', '\n\n', text).strip()
+            cleaned_text = re.sub(r' +', ' ', cleaned_text) # Remove multiple spaces
+
+            # 5. Smart Truncation
+            if len(cleaned_text) > max_chars:
+                cleaned_text = cleaned_text[:max_chars] + "... [Content truncated for length]"
+
+            # If after cleaning we have almost no text, it was likely a JS-heavy app
+            if len(cleaned_text) < 200:
+                return {
+                    "success": False,
+                    "error": "The page yielded very little text. It may require JavaScript to render or be a login wall."
+                }
+
+            return {
+                "success": True,
+                "title": title,
+                "url": url,
+                "content": cleaned_text
+            }
+
+    except Exception as e:
+        return {"success": False, "error": f"Connection Error: {str(e)}"}
 # Create empty containers first
 AVAILABLE_TOOLS = {}
 tools_schema = []
@@ -616,6 +692,17 @@ if is_enabled("ENABLE_SYSTEM_STATS"): # System Stats
         }
     })
 
+if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
+    AVAILABLE_TOOLS["fetch_web_content"] = fetch_web_content
+    tools_schema.append({
+        "type": "function", 
+        "function": {
+            "name": "fetch_web_content", 
+            "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long).", 
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }
+    })
+
 TOOL_STATUS_MESSAGES = {
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
@@ -628,7 +715,8 @@ TOOL_STATUS_MESSAGES = {
     "overseer_search_movie": f"{MODEL_NAME} is searching for a movie...",
     "overseer_request_movie": f"{MODEL_NAME} is requesting a movie...",
     "overseer_search_tv": f"{MODEL_NAME} is searching for a TV show...",
-    "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season..."
+    "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
+    "fetch_web_content": f"{MODEL_NAME} is fetching a website..."
 }
 
 # --- THE UNIFIED ENGINE ---
