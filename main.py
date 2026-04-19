@@ -43,6 +43,7 @@ NOAA_LONG = os.getenv("NOAA_LONG", "74.0060") # For NOAA weather API
 NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com") # For NOAA weather API
 raw_cal_string = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
 calendar_ids = [c.strip() for c in raw_cal_string.split(",")]
+TOOL_LOOP=os.getenv("TOOL_LOOP", "15") # How many 'turns' the model can take calling tools before generating a response, prevents looping behavior
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
@@ -731,7 +732,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     # Flag to track if voice was already sent via tool
     voice_sent_via_tool = False
     
-    for loop_count in range(15):
+    for loop_count in range(TOOL_LOOP):
         full_context = [system_msg] + list(history_buffer)
         logging.info(f"🧠 CONTEXT INJECTED (Total messages: {len(full_context)}): {json.dumps(full_context, indent=2)}")
         
