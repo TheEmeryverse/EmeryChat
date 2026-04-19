@@ -38,20 +38,25 @@
     </section>
     <section class="tools">
       <h2>Tools Built (So Far...)</h2>
-      <div class="tools-grid">
-        <div class="tool-card"><span class="tool-title">🌤 Live Weather Data</span><p class="tool-desc">With NOAA integration</p></div>
-        <div class="tool-card"><span class="tool-title">📅 Google Calendar</span><p class="tool-desc">Full scheduling integration</p></div>
-        <div class="tool-card"><span class="tool-title">🎙 Text to Speech</span><p class="tool-desc">Allows Emery to send voice messages</p></div>
-        <div class="tool-card"><span class="tool-title">🎧 Voice Transcription</span><p class="tool-desc">Using Open WebUI's STT for inbound messages</p></div>
-        <div class="tool-card"><span class="tool-title">📡 RSS News Feeds</span><p class="tool-desc">Pull from any custom RSS source</p></div>
-        <div class="tool-card"><span class="tool-title">🚀 NASA Image of the Day</span><p class="tool-desc">Daily space imagery & explanations</p></div>
-        <div class="tool-card"><span class="tool-title">📜 Today In History</span><p class="tool-desc">Historical context on command</p></div>
-        <div class="tool-card"><span class="tool-title">🔍 Web Search</span><p class="tool-desc">Powered by SearXNG</p></div>
-        <div class="tool-card"><span class="tool-title">💻 System Stats</span><p class="tool-desc">Real-time CPU & RAM monitoring</p></div>
-        <div class="tool-card"><span class="tool-title">🎬 Seerr Integration</span><p class="tool-desc">Search & request movies/TV shows</p></div>
-        <div class="tool-card"><span class="tool-title">🖼 Image Generation</span><p class="tool-desc">Using Gemini or another provider</p></div>
-        <div class="tool-card"><span class="tool-title">👁 Vision Capable</span><p class="tool-desc">Multimodal models or fast secondary (e.g., Gemma4:e2b)</p></div>
-      </div>
+      <table class="bench-table">
+        <thead>
+          <tr><th>Feature</th><th>Description / Integration</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>🌤 Live Weather</td><td>Real-time data with NOAA integration</td></tr>
+          <tr><td>📅 Google Calendar</td><td>Full scheduling and event integration</td></tr>
+          <tr><td>🎙 Text to Speech</td><td>Allows Emery to send outbound voice messages</td></tr>
+          <tr><td>🎧 Transcription</td><td>Using Open WebUI's STT for inbound voice</td></tr>
+          <tr><td>📡 RSS News</td><td>Custom feeds from any RSS source</td></tr>
+          <tr><td>🚀 NASA Image</td><td>Daily space imagery and explanations</td></tr>
+          <tr><td>📜 History</td><td>"Today In History" historical context</td></tr>
+          <tr><td>🔍 Web Search</td><td>Integrated search powered by SearXNG</td></tr>
+          <tr><td>💻 System Stats</td><td>Real-time CPU and RAM monitoring</td></tr>
+          <tr><td>🎬 Seerr / Media</td><td>Request movies and TV shows via Seerr</td></tr>
+          <tr><td>🖼 Image Gen</td><td>Generate images via Gemini or custom providers</td></tr>
+          <tr><td>👁 Vision</td><td>Multimodal support or fast secondary vision models</td></tr>
+        </tbody>
+      </table>
+    </section>
   </div>
 </body>
-</html>
