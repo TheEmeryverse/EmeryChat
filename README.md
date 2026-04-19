@@ -1,30 +1,4 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EmeryChat</title>
-  <style>
-    :root {
-      --bg: #0b0f19;
-      --card: #131a2b;
-      --border: #233045;
-      --text: #e6edf3;
-      --muted: #8b9bb4;
-      --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.15);
-      --grade-a: #22c55e;
-      --grade-b: #f59e0b;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      line-height: 1.65;
-      padding: 2rem 1rem;
-    }
-    .wrapper { max-width: 820px; margin: 0 auto; }
     
     header { text-align: center; margin-bottom: 2rem; }
     h1 {
