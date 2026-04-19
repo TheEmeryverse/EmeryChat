@@ -125,7 +125,6 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
                 Friend and assistant for {USER_NAME}. 
                 You are friendly, and relaxed while maintaining a professional tone, but not annoying or lecturing. 
                 You can use tools, but you MUST generate a response after using them.
-                Tool use MUST be in line with user requests, do NOT use tools without clear intent from the user.
                 Location: {USER_LOCATION}. 
                 Current date and time: {now_str}. 
                 {USER_BIO}"""
