@@ -32,7 +32,7 @@
       <tr>
         <td>Gemma4:26b MoE</td>
         <td>64k, Thinking ON</td>
-        <td><span class="grade A">A+</span></td>
+        <td><span class="grade A-">A+</span></td>
         <td>Quick responses, intelligent tool usage. Tends to be a bit "lazy", favoring short responses even when asked to go in depth.</td>
       </tr>
       <tr>
