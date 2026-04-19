@@ -413,9 +413,13 @@ async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
         logging.info(f"Overseer status: {r.status_code}")
         logging.info(f"Overseer response body: {r.text}")
 
+        if r.status_code == 201 or r.status_code == 200:
+            return "SUCCESS: Movie requested for user."
         if r.status_code == 409:
             return "ALREADY_AVAILABLE_OR_PENDING"
-        return f"SUCCESS: Movie requested for user."
+        
+        return f"FAILED: Overseer returned {r.status_code}"
+
     except Exception as e:
         logging.error(f"Overseerr Movie Request Failed: {e}")
         return f"Request failed: {e}"
