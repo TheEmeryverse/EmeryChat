@@ -1,4 +1,3 @@
-</head>
 <body>
   <div class="wrapper">
     <header class="hero">
@@ -6,14 +5,12 @@
       <p class="tagline">A Telegram wrapper for AI models with advanced tool use.</p>
       <p class="lead">Many assistant AI agent wrappers require massive context, hugely powerful cloud models, and massive token usage. EmeryChat aims to change that, trading the "self-learning" and "It's Alive!!" hype for real, solid, consistent performance that is achievable on normal consumer hardware. No ridiculously complex setup, no CLI, and no cloud API costs. Run EmeryChat for FREE, on your hardware.</p>
     </header>
-
     <section class="philosophy">
       <h2>How It Works</h2>
       <p>EmeryChat operates under a simple idea. <span class="highlight">Speed doesn't matter, much.</span></p>
       <p>It uses Telegram as the chat interface, and much of the core functionality comes from scheduled jobs that allow the model to operate overnight on complex tasks. If you are chatting during the day, speed will be quick enough and the same as if you are texting a real person.</p>
       <p>All models have been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
     </section>
-
     <section class="benchmarks">
       <h2>Tested Models & Performance</h2>
       <table class="bench-table">
@@ -29,7 +26,6 @@
         </tbody>
       </table>
     </section>
-
     <section class="hardware">
       <h2>Testing Hardware</h2>
       <p>All models have been tested on:</p>
@@ -40,7 +36,6 @@
       </div>
       <p style="margin-top:0.8rem;">Smaller models have been tested on a base M4 Mac Mini (16GB Unified Memory) utilizing the MLX framework.</p>
     </section>
-
     <section class="tools">
       <h2>Tools Built (So Far...)</h2>
       <div class="tools-grid">
@@ -58,7 +53,6 @@
         <div class="tool-card"><span class="tool-title">👁 Vision Capable</span><p class="tool-desc">Multimodal models or fast secondary (e.g., Gemma4:e2b)</p></div>
       </div>
     </section>
-
     <footer>
       <p>EmeryChat © 2024 — Free. Open. Runs locally.</p>
     </footer>
