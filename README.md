@@ -7,9 +7,9 @@
     </header>
     <section class="philosophy">
       <h2>How It Works</h2>
-      <p>EmeryChat operates under a simple idea. <span class="highlight">Speed doesn't matter, much.</span></p>
+      <p>EmeryChat operates under a simple idea. <span class="highlight">Speed doesn't matter most.</span></p>
       <p>It uses Telegram as the chat interface, and much of the core functionality comes from scheduled jobs that allow the model to operate overnight on complex tasks. If you are chatting during the day, speed will be quick enough and the same as if you are texting a real person.</p>
-      <p>All models have been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
+      <p>All models have also been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
     </section>
     <section class="benchmarks">
   <h2>Tested Models & Performance</h2>
@@ -32,7 +32,7 @@
       <tr>
         <td>Gemma4:26b MoE</td>
         <td>64k, Thinking ON</td>
-        <td><span class="grade A">A+</span></td>
+        <td><span class="grade A-">A-</span></td>
         <td>Quick responses, intelligent tool usage. Tends to be a bit "lazy", favoring short responses even when asked to go in depth.</td>
       </tr>
       <tr>
@@ -62,7 +62,7 @@
       <div class="specs">
         <span>32GB DDR4 RAM,</span>
         <span>AMD 5950x CPU,</span>
-        <span>Intel Arc B580 GPU (12GB VRAM)</span>
+        <span>Intel Arc B580 GPU (12GB VRAM) with Ollama</span>
       </div>
       <p style="margin-top:0.8rem;">Smaller models have been tested on a base M4 Mac Mini (16GB Unified Memory) utilizing the MLX framework.</p>
     </section>
@@ -74,13 +74,14 @@
         </thead>
         <tbody>
           <tr><td>🌤 Live Weather</td><td>Real-time data with NOAA integration</td></tr>
-          <tr><td>📅 Google Calendar</td><td>Full scheduling and event integration</td></tr>
+          <tr><td>📅 Google Calendar</td><td>Emery can view your Google Calendar</td></tr>
           <tr><td>🎙 Text to Speech</td><td>Allows Emery to send outbound voice messages</td></tr>
-          <tr><td>🎧 Transcription</td><td>Using Open WebUI's STT for inbound voice</td></tr>
+          <tr><td>🎧 Transcription</td><td>Using Open WebUI's STT for your voice messages</td></tr>
           <tr><td>📡 RSS News</td><td>Custom feeds from any RSS source</td></tr>
           <tr><td>🚀 NASA Image</td><td>Daily space imagery and explanations</td></tr>
-          <tr><td>📜 History</td><td>"Today In History" historical context</td></tr>
+          <tr><td>📜 History</td><td>"Today In History" historical content</td></tr>
           <tr><td>🔍 Web Search</td><td>Integrated search powered by SearXNG</td></tr>
+          <tr><td>🔍 URL Fetching</td><td>Allows you to send links, and for Emery do to deep research</td></tr>
           <tr><td>💻 System Stats</td><td>Real-time CPU and RAM monitoring</td></tr>
           <tr><td>🎬 Seerr / Media</td><td>Request movies and TV shows via Seerr</td></tr>
           <tr><td>🖼 Image Gen</td><td>Generate images via Gemini or custom providers</td></tr>
