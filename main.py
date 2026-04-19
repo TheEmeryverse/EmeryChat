@@ -410,14 +410,14 @@ async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
 
-        logger.info(f"Overseer status: {r.status_code}")
-        logger.info(f"Overseer response body: {r.text}")
+        logging.info(f"Overseer status: {r.status_code}")
+        logging.info(f"Overseer response body: {r.text}")
 
         if r.status_code == 409:
             return "ALREADY_AVAILABLE_OR_PENDING"
         return f"SUCCESS: Movie requested for user."
     except Exception as e:
-        logger.error(f"Overseerr Movie Request Failed: {e}")
+        logging.error(f"Overseerr Movie Request Failed: {e}")
         return f"Request failed: {e}"
 
 async def overseer_search_tv(query: str) -> str:
