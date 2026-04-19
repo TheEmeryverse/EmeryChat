@@ -9,7 +9,7 @@
       <h2>How It Works</h2>
       <p>EmeryChat operates under a simple idea. <span class="highlight">Speed doesn't matter, much.</span></p>
       <p>It uses Telegram as the chat interface, and much of the core functionality comes from scheduled jobs that allow the model to operate overnight on complex tasks. If you are chatting during the day, speed will be quick enough and the same as if you are texting a real person.</p>
-      <p>All models have been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
+      <p>All models have also been tested using <strong>ONLY the CPU</strong> for inference, as part of the overarching goal of making EmeryChat usable on consumer hardware.</p>
     </section>
     <section class="benchmarks">
   <h2>Tested Models & Performance</h2>
