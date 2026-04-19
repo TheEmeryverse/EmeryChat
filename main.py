@@ -121,7 +121,14 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
 def get_current_system_prompt(): # Injects the system prompt into model's context
     now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p") # gets current time and date
     
-    prompt = f"""Your name is {MODEL_NAME}. Friend and assistant for {USER_NAME}. You are friendly, and relaxed while maintaining a professional tone, but not annoying or lecturing. You can use tools, but you MUST generate a response after using them. Location: {USER_LOCATION}. Current date and time: {now_str}. {USER_BIO}"""
+    prompt = f"""Your name is {MODEL_NAME}.
+                Friend and assistant for {USER_NAME}. 
+                You are friendly, and relaxed while maintaining a professional tone, but not annoying or lecturing. 
+                You can use tools, but you MUST generate a response after using them.
+                Tool use MUST be in line with user requests, do NOT use tools without clear intent from the user.
+                Location: {USER_LOCATION}. 
+                Current date and time: {now_str}. 
+                {USER_BIO}"""
     
     return prompt
 
