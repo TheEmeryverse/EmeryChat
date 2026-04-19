@@ -154,9 +154,7 @@ async def speak_message(text): # What the model calls to create a voice message 
 
 async def generate_image(prompt): # Generates an image based on the prompt using Gemini API
     logging.info(f"🛠️ TOOL EXECUTION: generate_image | Prompt: '{prompt}'")
-    API_KEY = "{GEMINI_API_KEY}"
-    MODEL = "{IMAGE_MODEL}"
-    URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
+    URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
     }
