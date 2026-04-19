@@ -211,8 +211,13 @@ async def web_search(query):
     try:
         r = await http_client.get(SEARXNG_URL, params={'q': query, 'format': 'json'})
         res = r.json().get('results', [])
-        return "\n\n".join([f"Source: {i['title']}\n{i['content']}" for i in res[:3]])
-    except Exception: return "Search failed."
+        return "\n\n".join([
+            f"Title: {i['title']}\nURL: {i['url']}\nSnippet: {i['content']}" 
+            for i in res[:5]
+        ])
+    except Exception as e: 
+        logging.error(f"Search error: {e}")
+        return "Search failed."
 
 async def get_news_headlines(): # Fetches news headlines from various RSS feeds
 
@@ -698,7 +703,7 @@ if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long).", 
+            "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long). Use AFTER web_search to do deep research, a deep dive, a report, etc. if needed. MUST pass only the URL as a string. Do not pass any other arguments.", 
             "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
         }
     })
@@ -833,11 +838,11 @@ async def run_brief(c, prompt, label):
     await c.bot.send_message(TARGET_CHAT_ID, f"🛡️ <b>EMERYCHAT JOB: {label}</b>\n\n{emery_format(res_text)}", parse_mode="HTML")
 
 # --- SCHEDULED JOBS ---
-async def job_morning_briefing(c): await run_brief(c, "Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search. Put all of it in a voice memo, and then also put everything in your text response.", "Morning Briefing")
+async def job_morning_briefing(c): await run_brief(c, "Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search and fetch_web_content (if needed). Put all of it in a voice memo, and then also put everything in your text response.", "Morning Briefing")
 async def job_morning_weather(c): await run_brief(c, "Look up weather with the get_NOAA_weather tool and give clothing recommendations.", "Today's Weather")
 async def job_nasa(c): await run_brief(c, "Use get_nasa_apod. Provide title, explanation, and MUST provide image URL link.", "Today In Space")
 async def job_calendar(c): await run_brief(c, "Check User's calendar with get_calendar_events for any events the User has today and list them chronologically.", "Daily Planner")
-async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and give a small report on them at the end of your response.", "Today In History")
+async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
 
 
 if __name__ == '__main__':
