@@ -60,8 +60,8 @@
       <h2>Testing Hardware</h2>
       <p>All models have been tested on:</p>
       <div class="specs">
-        <span>32GB DDR4 RAM</span>
-        <span>AMD 5950x CPU</span>
+        <span>32GB DDR4 RAM,</span>
+        <span>AMD 5950x CPU,</span>
         <span>Intel Arc B580 GPU (12GB VRAM)</span>
       </div>
       <p style="margin-top:0.8rem;">Smaller models have been tested on a base M4 Mac Mini (16GB Unified Memory) utilizing the MLX framework.</p>
