@@ -726,7 +726,17 @@ TOOL_STATUS_MESSAGES = {
 
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):
-    headers = {"Authorization": f"Bearer {OPEN_WEBUI_KEY}", "Content-Type": "application/json"}
+    key = str(OPEN_WEBUI_KEY or "").strip().strip('"').strip("'")
+    
+    if not key or key == "None":
+        logging.error("❌ BRAIN ERROR: OPEN_WEBUI_KEY is empty! Check your .env file.")
+        return "My API key is missing. Please check the logs.", False
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     
     voice_sent_via_tool = False
