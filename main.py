@@ -43,7 +43,7 @@ NOAA_LONG = os.getenv("NOAA_LONG", "74.0060") # For NOAA weather API
 NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com") # For NOAA weather API
 raw_cal_string = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
 calendar_ids = [c.strip() for c in raw_cal_string.split(",")]
-TOOL_LOOP=os.getenv("TOOL_LOOP", "15") # How many 'turns' the model can take calling tools before generating a response, prevents looping behavior
+TOOL_LOOP=int(os.getenv("TOOL_LOOP", "15")) # How many 'turns' the model can take calling tools before generating a response, prevents looping behavior
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
