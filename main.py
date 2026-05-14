@@ -729,37 +729,55 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     headers = {"Authorization": f"Bearer {OPEN_WEBUI_KEY}", "Content-Type": "application/json"}
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     
-    # Flag to track if voice was already sent via tool
     voice_sent_via_tool = False
     
     for loop_count in range(TOOL_LOOP):
         full_context = [system_msg] + list(history_buffer)
-        logging.info(f"🧠 CONTEXT INJECTED (Total messages: {len(full_context)}): {json.dumps(full_context, indent=2)}")
         
-        payload = {"model": model_to_use, "messages": full_context, "tools": tools_schema, "tool_choice": "auto"}
+        # --- SAFE PAYLOAD LOGIC ---
+        # Open WebUI often crashes if 'tools' is empty. We only add it if tools exist.
+        payload = {"model": model_to_use, "messages": full_context}
+        if tools_schema:
+            payload["tools"] = tools_schema
+            payload["tool_choice"] = "auto"
+        # --------------------------
         
         try:
             logging.info(f"⏳ MODEL STATUS: Thinking... (Model: {model_to_use} | Tool Loop: {loop_count+1})")
             r = await http_client.post(OPEN_WEBUI_URL, headers=headers, json=payload)
+            
+            # --- VERBOSE LOGGING ---
+            logging.info(f"📡 API RESPONSE: HTTP {r.status_code}")
+            if r.status_code != 200:
+                logging.error(f"❌ RAW ERROR BODY: {r.text}")
+            # -----------------------
+
             res = r.json()
             
-            if isinstance(res, list) and len(res) > 0: res = res[0]
+            # Catch Open WebUI specific 'detail' errors
+            if 'detail' in res:
+                logging.error(f"❌ OPEN WEBUI DETAIL ERROR: {res['detail']}")
+                return f"Brain Error: {res['detail']}", False
+
+            if isinstance(res, list) and len(res) > 0: res = res
             if 'error' in res or 'choices' not in res:
-                logging.error(f"❌ API Failure: {res}"); return "Brain link error.", False
+                logging.error(f"❌ API Failure JSON: {res}")
+                return "Brain link error.", False
                 
-            msg = res['choices'][0]['message']
+            msg = res['choices']['message']
             
             if msg.get("tool_calls"):
                 history_buffer.append(msg)
                 for tc in msg['tool_calls']:
                     fn, t_id = tc['function']['name'], tc.get('id')
-
-                    status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...") # Send message to user about tool calls
+                    
+                    # Status message for user
+                    status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                     await application_bot.send_message(chat_id=TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
 
                     args = json.loads(tc['function'].get('arguments', '{}'))
-                    
                     logging.info(f"🛠️ ENGINE CALL: Tool '{fn}' requested with args: {args}")
+                    
                     if fn == "speak_message": voice_sent_via_tool = True
                     
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
@@ -773,7 +791,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             return final_text, voice_sent_via_tool
             
         except Exception as e:
-            logging.error(f"🔥 ENGINE CRASH: {e}"); return "Processing loop failure.", False
+            logging.error(f"🔥 ENGINE CRASH: {e}")
+            return "Processing loop failure.", False
+            
     return "Timeout.", False
 
 # --- HANDLERS ---
