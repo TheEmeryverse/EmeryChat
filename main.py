@@ -744,6 +744,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         
         try:
             logging.info(f"⏳ MODEL STATUS: Thinking... (Model: {model_to_use} | Tool Loop: {loop_count+1})")
+            logging.info(f"📤 DEBUG PAYLOAD: {json.dumps(payload)[:500]}")
             r = await http_client.post(OPEN_WEBUI_URL, headers=headers, json=payload)
             
             # --- VERBOSE LOGGING ---
