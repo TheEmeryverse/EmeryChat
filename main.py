@@ -29,9 +29,9 @@ load_dotenv() # Load docker env variables
 
 # --- GLOBAL CONFIGURATION ---
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery") # The name of the model to use for responses
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "blank") # Generated using @BotFather on Telegram
-OPEN_WEBUI_URL = os.getenv("OPEN_WEBUI_URL", "localhost:3000/api/v1/chat/completions")
-OPEN_WEBUI_KEY = os.getenv("OPEN_WEBUI_KEY", "blank")
+OLLAMA_NUM_CTX=os.getenv("OLLAMA_NUM_CTX", "8192") # Context length for Ollama models
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Open WebUI URL
+OLLAMA_KEY = os.getenv("OLLAMA_KEY", "blank")
 MODEL_ID = os.getenv("MODEL_ID", "gemma4:26B")  # The Model ID of the main model for response and text generation, through Open WebUI
 VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Open WebUI
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG query URL
@@ -44,6 +44,7 @@ NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com") # For NOAA weather A
 raw_cal_string = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
 calendar_ids = [c.strip() for c in raw_cal_string.split(",")]
 TOOL_LOOP=int(os.getenv("TOOL_LOOP", "15")) # How many 'turns' the model can take calling tools before generating a response, prevents looping behavior
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "blank") # Generated using @BotFather on Telegram
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
@@ -726,84 +727,70 @@ TOOL_STATUS_MESSAGES = {
 
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):
-    key = str(OPEN_WEBUI_KEY or "").strip().strip('"').strip("'")
-    
-    if not key or key == "None":
-        logging.error("❌ BRAIN ERROR: OPEN_WEBUI_KEY is empty! Check your .env file.")
-        return "My API key is missing. Please check the logs.", False
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
+    # Ollama doesn't need an API key by default
+    url = os.getenv("OLLAMA_URL", "http://192.168.1.121:11434/api/chat")
+    ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
     
     system_msg = {"role": "system", "content": get_current_system_prompt()}
-    
     voice_sent_via_tool = False
     
     for loop_count in range(TOOL_LOOP):
         full_context = [system_msg] + list(history_buffer)
         
-        # --- SAFE PAYLOAD LOGIC ---
-        # Open WebUI often crashes if 'tools' is empty. We only add it if tools exist.
-        payload = {"model": model_to_use, "messages": full_context}
+        # Ollama Native Payload
+        payload = {
+            "model": model_to_use,
+            "messages": full_context,
+            "stream": false,
+            "options": {
+                "num_ctx": ctx_size,
+                "temperature": 0.8, # Good for "Thinking" models
+                "top_p": 0.9
+            }
+        }
+        
+        # Add tools if enabled
         if tools_schema:
             payload["tools"] = tools_schema
-            payload["tool_choice"] = "auto"
-        # --------------------------
-        
+
         try:
-            logging.info(f"⏳ MODEL STATUS: Thinking... (Model: {model_to_use} | Tool Loop: {loop_count+1})")
-            logging.info(f"📤 DEBUG PAYLOAD: {json.dumps(payload)[:500]}")
-            r = await http_client.post(OPEN_WEBUI_URL, headers=headers, json=payload)
+            logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
+            r = await http_client.post(url, json=payload, timeout=300)
             
-            # --- VERBOSE LOGGING ---
-            logging.info(f"📡 API RESPONSE: HTTP {r.status_code}")
             if r.status_code != 200:
-                logging.error(f"❌ RAW ERROR BODY: {r.text}")
-            # -----------------------
+                logging.error(f"❌ Ollama Error {r.status_code}: {r.text}")
+                return "Ollama connection error.", False
 
             res = r.json()
+            msg = res.get('message', {})
             
-            # Catch Open WebUI specific 'detail' errors
-            if 'detail' in res:
-                logging.error(f"❌ OPEN WEBUI DETAIL ERROR: {res['detail']}")
-                return f"Brain Error: {res['detail']}", False
-
-            if isinstance(res, list) and len(res) > 0: res = res
-            if 'error' in res or 'choices' not in res:
-                logging.error(f"❌ API Failure JSON: {res}")
-                return "Brain link error.", False
-                
-            msg = res['choices']['message']
-            
+            # 1. Handle Tool Calls (Ollama format)
             if msg.get("tool_calls"):
                 history_buffer.append(msg)
                 for tc in msg['tool_calls']:
-                    fn, t_id = tc['function']['name'], tc.get('id')
+                    # Ollama tools are slightly different: 'function' is at top level
+                    fn = tc['function']['name']
+                    args = tc['function'].get('arguments', {})
                     
-                    # Status message for user
                     status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                     await application_bot.send_message(chat_id=TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
-
-                    args = json.loads(tc['function'].get('arguments', '{}'))
-                    logging.info(f"🛠️ ENGINE CALL: Tool '{fn}' requested with args: {args}")
                     
+                    logging.info(f"🛠️ OLLAMA TOOL: {fn} | Args: {args}")
                     if fn == "speak_message": voice_sent_via_tool = True
                     
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
-                    logging.info(f"✅ TOOL RESULT: {fn} returned: {str(result)[:100]}...")
                     
-                    history_buffer.append({"role": "tool", "tool_call_id": t_id, "name": fn, "content": str(result)})
+                    history_buffer.append({"role": "tool", "content": str(result)})
                 continue
             
+            # 2. Handle Text Response
             final_text = msg.get('content', "")
-            logging.info(f"✨ MODEL RESPONSE: {final_text[:200]}...")
+            logging.info(f"✨ OLLAMA RESPONSE: {final_text[:200]}...")
             return final_text, voice_sent_via_tool
             
         except Exception as e:
-            logging.error(f"🔥 ENGINE CRASH: {e}")
-            return "Processing loop failure.", False
+            logging.error(f"🔥 OLLAMA CRASH: {e}")
+            return "Ollama engine failure.", False
             
     return "Timeout.", False
 
