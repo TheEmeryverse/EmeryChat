@@ -29,11 +29,9 @@ load_dotenv() # Load docker env variables
 
 # --- GLOBAL CONFIGURATION ---
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery") # The name of the model to use for responses
-OLLAMA_NUM_CTX=os.getenv("OLLAMA_NUM_CTX", "8192") # Context length for Ollama models
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Open WebUI URL
-OLLAMA_KEY = os.getenv("OLLAMA_KEY", "blank")
-MODEL_ID = os.getenv("MODEL_ID", "gemma4:26B")  # The Model ID of the main model for response and text generation, through Open WebUI
-VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Open WebUI
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Ollama URL
+MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # The Model ID of the main model for response and text generation, through Ollama
+VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Ollama
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG query URL
 NASA_API_KEY = os.getenv("NASA_API_KEY", "blank") # For NASA's Image of the Day
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "blank") # For Nano Banana Pro image generation
@@ -728,7 +726,7 @@ TOOL_STATUS_MESSAGES = {
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     # Ollama doesn't need an API key by default
-    url = os.getenv("OLLAMA_URL", "http://192.168.1.121:11434/api/chat")
+    url = OLLAMA_URL
     ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
     
     system_msg = {"role": "system", "content": get_current_system_prompt()}
@@ -741,7 +739,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         payload = {
             "model": model_to_use,
             "messages": full_context,
-            "stream": false,
+            "stream": False,
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 0.8, # Good for "Thinking" models
