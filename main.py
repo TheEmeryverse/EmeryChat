@@ -12,6 +12,7 @@ import subprocess
 import asyncio
 import io
 import requests
+import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from dotenv import load_dotenv
@@ -92,22 +93,48 @@ TARGET_CHAT_ID = None
 http_client = httpx.AsyncClient(timeout=300, verify=False, follow_redirects=True)
 
 # --- HELPERS ---
-def emery_format(text): # Handle formatting for Telegram, which has a very limited HTML support. Models tend to respond in Markdown, so this converts it.
+
+def emery_format(text): 
     try:
-        # Convert Markdown to HTML
+        think_html = ""
+        
+        # We build the tags dynamically so they don't break markdown rendering
+        start_tag = "<" + "think" + ">"
+        end_tag = "</" + "think" + ">"
+        
+        # 1. Look for the thinking block in the text
+        pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+        think_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        
+        if think_match:
+            thinking_content = think_match.group(1).strip()
+            
+            # Remove the thinking process from the main response text
+            text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+            
+            # Format the thinking content into a collapsed "Tap to Reveal" spoiler block
+            think_html = (
+                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
+                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>\n\n"
+            )
+
+        # 2. Convert the actual response Markdown to HTML
         html_content = markdown.markdown(text, extensions=['extra', 'sane_lists'])
         
         # Replace list tags with simple text equivalents that Telegram likes
-        # This prevents the "disappearing text" issue
         html_content = html_content.replace("<ul>", "").replace("</ul>", "")
         html_content = html_content.replace("<ol>", "").replace("</ol>", "")
         html_content = html_content.replace("<li>", "• ").replace("</li>", "<br/>")
         
-        # Now let TgHTML clean up the rest
-        return TgHTML(html_content).parsed
+        # 3. Combine the parsed thinking block with the parsed markdown content
+        final_html = think_html + html_content
+        
+        # Now let TgHTML clean up the combined HTML safely
+        return TgHTML(final_html).parsed
+        
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
-        # If formatting fails, return text with basic bolding replaced manually as a fallback
+        # Fallback to basic bolding formatting if anything goes wrong
         return text.replace("**", "<b>").replace("**", "</b>") 
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription
@@ -782,7 +809,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             
             # 2. Handle Text Response
             final_text = msg.get('content', "")
-            logging.info(f"✨ OLLAMA RESPONSE: {final_text[:200]}...")
+            logging.info(f"✨ EMERYCHAT RESPONSE: {final_text[:200]}...")
             return final_text, voice_sent_via_tool
             
         except Exception as e:
