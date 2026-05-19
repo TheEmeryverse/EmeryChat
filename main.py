@@ -31,6 +31,7 @@ load_dotenv() # Load docker env variables
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery") # The name of the model to use for responses
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Ollama URL
 OPEN_WEBUI_KEY=os.getenv("OPEN_WEBUI_KEY", "blank") # Open WebUI API Key
+THINK=os.getenv("THINK", "false") # Toggles the thinking engine
 MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # The Model ID of the main model for response and text generation, through Ollama
 VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Ollama
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG query URL
@@ -44,6 +45,12 @@ raw_cal_string = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
 calendar_ids = [c.strip() for c in raw_cal_string.split(",")]
 TOOL_LOOP=int(os.getenv("TOOL_LOOP", "15")) # How many 'turns' the model can take calling tools before generating a response, prevents looping behavior
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "blank") # Generated using @BotFather on Telegram
+OVERSEER_URL = os.getenv("OVERSEER_URL", "http://localhost:5055/api/v1") # URL address for Seerr
+OVERSEER_KEY = os.getenv("OVERSEER_KEY", "blank") # Seerr API key
+OVERSEER_USER_ID = os.getenv("OVERSEER_USER_ID", "1") # Your Overseerr ID, found using the API, documentation @ https://YOUR_SEERR_IP_ADDRESS/api-docs/. If you are the owner of the Seerr instance, it is most likely '1'
+STT_URL = os.getenv("STT_URL", "http://localhost:3000/api/v1/audio/transcriptions") # For Open WebUI STT transcription
+TTS_URL = os.getenv("TTS_URL", "http://localhost:8880/v1/audio/speech") # For Kokoro TTS engine
+TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
@@ -57,14 +64,6 @@ ENABLE_IMAGEGEN = os.getenv("ENABLE_IMAGEGEN", "false")
 ENABLE_WEATHER = os.getenv("ENABLE_WEATHER", "false")
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
 ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
-OVERSEER_URL = os.getenv("OVERSEER_URL", "http://localhost:5055/api/v1") # URL address for Seerr
-OVERSEER_KEY = os.getenv("OVERSEER_KEY", "blank") # Seerr API key
-OVERSEER_USER_ID = os.getenv("OVERSEER_USER_ID", "1") # Your Overseerr ID, found using the API, documentation @ https://YOUR_SEERR_IP_ADDRESS/api-docs/. If you are the owner of the Seerr instance, it is most likely '1'
-
-# VOICE CONFIGURATION
-STT_URL = os.getenv("STT_URL", "http://localhost:3000/api/v1/audio/transcriptions") # For Open WebUI STT transcription
-TTS_URL = os.getenv("TTS_URL", "http://localhost:8880/v1/audio/speech") # For Kokoro TTS engine
-TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 
 # USER PROFILE
 USER_NAME = os.getenv("USER_NAME", "User") # What do you want the model to call you?
@@ -125,6 +124,7 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     prompt = f"""Your name is {MODEL_NAME}.
                 Friend and assistant for {USER_NAME}. 
                 You are friendly, and relaxed while maintaining a professional tone, but not annoying or lecturing. 
+                Periodically ask yourself questions during your thought process to help guide your responses and tool usage.
                 You can use tools, but you MUST generate a response after using them.
                 Location: {USER_LOCATION}. 
                 Current date and time: {now_str}. 
@@ -206,7 +206,7 @@ async def get_noaa_weather(): # Fetches the forecast
         logging.error(f"Weather error: {e}")
         return "Weather unavailable."
 
-async def web_search(query):
+async def web_search(query): # Searches the internet
     logging.info(f"🛠️ TOOL EXECUTION: web_search | Query: '{query}'")
     try:
         r = await http_client.get(SEARXNG_URL, params={'q': query, 'format': 'json'})
@@ -219,12 +219,7 @@ async def web_search(query):
         logging.error(f"Search error: {e}")
         return "Search failed."
 
-async def get_news_headlines(): # Fetches news headlines from various RSS feeds
-
-    raw_feeds = os.getenv("NEWS_FEEDS", "")
-    
-    # 2. Parse the string into a dictionary
-    # This looks for "Name|URL" and splits them
+async def get_news_headlines(): # Fetches news headlines from RSS feeds
     FEEDS = {}
     if raw_feeds:
         for item in raw_feeds.split(","):
@@ -637,7 +632,7 @@ if is_enabled("ENABLE_NASA"): # NASA
         "type": "function", 
         "function": {
             "name": "get_nasa_apod", 
-            "description": "Get NASA APOD.", 
+            "description": "Get NASA APOD. You ***MUST*** include the RAW URL in the response. Do NOT use an embed URL.", 
             "parameters": {}
         }
     })
@@ -648,7 +643,7 @@ if is_enabled("ENABLE_HISTORY"): # History
         "type": "function", 
         "function": {
             "name": "get_today_in_history", 
-            "description": "Get today in history.", 
+            "description": "Get events from history for today.", 
             "parameters": {}
         }
     })
@@ -659,7 +654,7 @@ if is_enabled("ENABLE_SEARCH"): # Search
         "type": "function", 
         "function": {
             "name": "web_search", 
-            "description": "Search web, use when needing a deep dive, research, or a query you lack knowledge about.", 
+            "description": "Search web, use when needing a deep dive, research, or a query you lack knowledge about. After you receive the results, ask youself if you need to perform another search. If the results are not sufficent, call this tool again with a more specific query. You can and should also use the fetch_web_content tool to get the content of specific results if needed. ***DO NOT INCLUDE URLS IN YOUR RESPONSE***", 
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
         }
     })
@@ -670,7 +665,7 @@ if is_enabled("ENABLE_IMAGEGEN"): # Image Generation
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "Generate an image", 
+            "description": "Generate an image. Enhance the prompt with as much detail as possible to get the best results, while staying true to the original request. ***DO NOT INCLUDE URLS IN YOUR RESPONSE***", 
             "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]}
         }
     })
@@ -742,6 +737,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             "messages": full_context,
             "stream": False,
             "keep_alive": -1,
+            "think": THINK,
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 0.8, # Good for "Thinking" models
@@ -856,8 +852,8 @@ async def run_brief(c, prompt, label):
     await c.bot.send_message(TARGET_CHAT_ID, f"🛡️ <b>EMERYCHAT JOB: {label}</b>\n\n{emery_format(res_text)}", parse_mode="HTML")
 
 # --- SCHEDULED JOBS ---
-async def job_morning_briefing(c): await run_brief(c, "Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search and fetch_web_content (if needed). Put all of it in a voice memo, and then also put everything in your text response.", "Morning Briefing")
-async def job_morning_weather(c): await run_brief(c, "Look up weather with the get_NOAA_weather tool and give clothing recommendations.", "Today's Weather")
+async def job_morning_briefing(c): await run_brief(c, "Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search and fetch_web_content (if needed). Put all of it in a voice memo, and then also put everything in your text response. Do ***NOT*** include any sports news, and assess bias of any sources and inform the user with a quick qualifier, such as 'Left leaning' or 'Right leaning'.", "Morning Briefing")
+async def job_morning_weather(c): await run_brief(c, "Look up weather with the get_NOAA_weather tool and give clothing recommendations while keeping in mind the User Bio.", "Today's Weather")
 async def job_nasa(c): await run_brief(c, "Use get_nasa_apod. Provide title, explanation, and MUST provide image URL link.", "Today In Space")
 async def job_calendar(c): await run_brief(c, "Check User's calendar with get_calendar_events for any events the User has today and list them chronologically.", "Daily Planner")
 async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
@@ -867,13 +863,13 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application_bot = application.bot
     # Schedule the jobs
-    application.job_queue.run_daily(job_morning_briefing, time=time(4, 0, tzinfo=USER_TIMEZONE))
-    application.job_queue.run_daily(job_morning_weather, time=time(4, 5, tzinfo=USER_TIMEZONE))
-    application.job_queue.run_daily(job_calendar, time=time(4, 10, tzinfo=USER_TIMEZONE))
+    application.job_queue.run_daily(job_morning_briefing, time=time(3, 0, tzinfo=USER_TIMEZONE))
+    application.job_queue.run_daily(job_morning_weather, time=time(3, 5, tzinfo=USER_TIMEZONE))
+    application.job_queue.run_daily(job_calendar, time=time(3, 10, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_nasa, time=time(21, 0, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_today_in_history, time=time(21, 5, tzinfo=USER_TIMEZONE))
 
-    application.add_handler(CommandHandler("clear", lambda u, c: chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Starting fresh.")))
+    application.add_handler(CommandHandler("clear", lambda u, c: chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
     
     logging.info("🚀 EMERYCHAT IS ONLINE...")
