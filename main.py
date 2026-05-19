@@ -737,11 +737,11 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             "messages": full_context,
             "stream": False,
             "keep_alive": -1,
-            "think": THINK,
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 0.8, # Good for "Thinking" models
-                "top_p": 0.9
+                "top_p": 0.9,
+                "think": THINK
             }
         }
         
