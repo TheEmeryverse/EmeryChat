@@ -51,6 +51,7 @@ OVERSEER_USER_ID = os.getenv("OVERSEER_USER_ID", "1") # Your Overseerr ID, found
 STT_URL = os.getenv("STT_URL", "http://localhost:3000/api/v1/audio/transcriptions") # For Open WebUI STT transcription
 TTS_URL = os.getenv("TTS_URL", "http://localhost:8880/v1/audio/speech") # For Kokoro TTS engine
 TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
+NEWS_FEEDS=os.getenv("NEWS_FEEDS", "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, FOX|http://feeds.foxnews.com/foxnews/latest, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en, LOCAL|https://news.google.com/rss/search?q=when:24h+Milwaukee+Wisconsin&hl=en-US&gl=US&ceid=US:en")
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
@@ -221,8 +222,8 @@ async def web_search(query): # Searches the internet
 
 async def get_news_headlines(): # Fetches news headlines from RSS feeds
     FEEDS = {}
-    if raw_feeds:
-        for item in raw_feeds.split(","):
+    if NEWS_FEEDS:
+        for item in NEWS_FEEDS.split(","):
             if "|" in item:
                 name, url = item.split("|")
                 FEEDS[name.strip().lower()] = url.strip()
@@ -785,8 +786,8 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             return final_text, voice_sent_via_tool
             
         except Exception as e:
-            logging.error(f"🔥 OLLAMA CRASH: {e}")
-            return "Ollama engine failure.", False
+            logging.error(f"🔥 EMERYCHAT CRASH: {e}")
+            return "EMERYCHAT engine failure.", False
             
     return "Timeout.", False
 
