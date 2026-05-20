@@ -32,7 +32,7 @@ load_dotenv() # Load docker env variables
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery") # The name of the model to use for responses
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Ollama URL
 OPEN_WEBUI_KEY=os.getenv("OPEN_WEBUI_KEY", "blank") # Open WebUI API Key
-THINK=os.getenv("THINK", "false") # Toggles the thinking engine
+THINK=os.getenv("THINK", "true") # Toggles the thinking engine
 MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # The Model ID of the main model for response and text generation, through Ollama
 VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Ollama
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG query URL
@@ -765,11 +765,11 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             "messages": full_context,
             "stream": False,
             "keep_alive": -1,
+            "think": THINK,
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 0.8, # Good for "Thinking" models
                 "top_p": 0.9,
-                "think": THINK
             }
         }
         
