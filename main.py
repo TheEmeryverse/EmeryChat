@@ -93,26 +93,9 @@ TARGET_CHAT_ID = None
 http_client = httpx.AsyncClient(timeout=300, verify=False, follow_redirects=True)
 
 # --- HELPERS ---
-
-import re
-
 def emery_format(text): 
     try:
-        thinking_content = ""
-        
-        start_tag = "<" + "think" + ">"
-        end_tag = "</" + "think" + ">"
-        
-        # 1. Look for the thinking block in the text
-        pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-        think_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        
-        if think_match:
-            thinking_content = think_match.group(1).strip()
-            # Clean up the main body text by removing the thinking blocks
-            text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-        # 2. Convert only the body Markdown to HTML
+        # Convert Markdown to HTML
         html_content = markdown.markdown(text, extensions=['extra', 'sane_lists'])
         
         # Replace list tags with simple text equivalents that Telegram likes
@@ -120,22 +103,11 @@ def emery_format(text):
         html_content = html_content.replace("<ol>", "").replace("</ol>", "")
         html_content = html_content.replace("<li>", "• ").replace("</li>", "<br/>")
         
-        # Parse the clean body using your TgHTML library
-        parsed_body = TgHTML(html_content).parsed
-        
-        # 3. Prepend the raw HTML spoiler (Bypassing the strict TgHTML parser completely)
-        if thinking_content:
-            think_html = (
-                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
-                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>\n\n"
-            )
-            return think_html + parsed_body
-            
-        return parsed_body
-        
+        # Now let TgHTML clean up the rest
+        return TgHTML(html_content).parsed
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
-        return text.replace("**", "<b>").replace("**", "</b>") 
+        return text.replace("**", "<b>").replace("**", "</b>")
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription
     logging.info("👂 VOICE: Transcribing...")
@@ -839,46 +811,74 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     is_input_voice = False
     model_to_use = MODEL_ID # Default model
-
-    now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p")
     
-    if update.message.voice: # If user sends voice message
+    # Capture the current time for this specific message
+    now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p")
+
+    if update.message.voice:
         is_input_voice = True
         v_file = await update.message.voice.get_file()
-        content = await transcribe_audio(await v_file.download_as_bytearray())
-        if not content: return
-    elif update.message.photo: # If user sends photo
+        transcription = await transcribe_audio(await v_file.download_as_bytearray())
+        if not transcription: return
+        content = f"[{now_str}] {transcription}"
+    elif update.message.photo:
         model_to_use = VISION_MODEL_ID # Switch to vision model
         p_file = await update.message.photo[-1].get_file()
         b64 = base64.b64encode(await p_file.download_as_bytearray()).decode('utf-8')
-        content = [{"type": "text", "text": update.message.caption or "Describe this image in detail."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]
-    else: # If user sends text message
-        content = f"[{now_str}] {update.message.text}" # Inject date and time here
-
+        content = [
+            {"type": "text", "text": f"Current Time: {now_str}"},
+            {"type": "text", "text": update.message.caption or "Describe this image in detail."}, 
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        ]
+    else:
+        content = f"[{now_str}] {update.message.text}"
+        
     logging.info(f"👤 USER PROMPT (Chat: {chat_id}): {content}")
     chat_histories[chat_id].append({"role": "user", "content": content})
     
+    # Get response from the engine
     response_text, voice_sent_via_tool = await emery_engine(chat_histories[chat_id], model_to_use=model_to_use)
     
-    # Save the assistant text to history
+    # Save the assistant text (with raw think tags intact) to history so the model retains its memory
     if update.message.photo:
-        # Replace the base64 image data with a simple text description for future context
         description = update.message.caption or "an image"
         chat_histories[chat_id][-1]["content"] = f"[User sent an image: {description}]"
         
     chat_histories[chat_id].append({"role": "assistant", "content": response_text})
     
-    # Logic to prevent double-voice or sending text if tool handled the voice
+    # --- THINKING SPLITTER LOGIC ---
+    start_tag = "<" + "think" + ">"
+    end_tag = "</" + "think" + ">"
+    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+    
+    clean_response = response_text
+    
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+        # Clean the main response text
+        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+        # Send the thinking process as a separate, raw HTML message to prevent TgHTML from stripping it
+        if thinking_content:
+            thinking_msg = (
+                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
+                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>"
+            )
+            await update.message.reply_text(thinking_msg, parse_mode="HTML")
+    # -------------------------------
+    
+    # Send the main reply (voice or text)
     if is_input_voice and not voice_sent_via_tool:
-        # User sent voice, so we respond with voice automatically
         await update.message.reply_chat_action("record_voice")
-        v_out = await get_voice_audio(response_text)
-        if v_out: await update.message.reply_voice(voice=v_out, caption="Voice message")
-        else: await update.message.reply_text(emery_format(response_text), parse_mode="HTML")
+        v_out = await get_voice_audio(clean_response)
+        if v_out: 
+            await update.message.reply_voice(voice=v_out, caption="Voice message")
+        else: 
+            await update.message.reply_text(emery_format(clean_response), parse_mode="HTML")
     else:
-        # Standard text reply (or the brief confirmation after a speak_message tool call)
-        if response_text:
-            await update.message.reply_text(emery_format(response_text), parse_mode="HTML")
+        if clean_response:
+            await update.message.reply_text(emery_format(clean_response), parse_mode="HTML")
 
 # --- AUTOMATED JOBS ---
 
