@@ -859,11 +859,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Clean the main response text
         clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
         
-        # Send the thinking process as a separate, raw HTML message to prevent TgHTML from stripping it
+        # Send the thinking process as an expandable text block without the blur
         if thinking_content:
             thinking_msg = (
-                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
-                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>"
+                f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+                f"<blockquote expandable><i>{thinking_content}</i></blockquote>"
             )
             await update.message.reply_text(thinking_msg, parse_mode="HTML")
     # -------------------------------
