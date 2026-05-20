@@ -94,11 +94,12 @@ http_client = httpx.AsyncClient(timeout=300, verify=False, follow_redirects=True
 
 # --- HELPERS ---
 
+import re
+
 def emery_format(text): 
     try:
-        think_html = ""
+        thinking_content = ""
         
-        # We build the tags dynamically so they don't break markdown rendering
         start_tag = "<" + "think" + ">"
         end_tag = "</" + "think" + ">"
         
@@ -108,17 +109,10 @@ def emery_format(text):
         
         if think_match:
             thinking_content = think_match.group(1).strip()
-            
-            # Remove the thinking process from the main response text
+            # Clean up the main body text by removing the thinking blocks
             text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-            
-            # Format the thinking content into a collapsed "Tap to Reveal" spoiler block
-            think_html = (
-                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
-                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>\n\n"
-            )
 
-        # 2. Convert the actual response Markdown to HTML
+        # 2. Convert only the body Markdown to HTML
         html_content = markdown.markdown(text, extensions=['extra', 'sane_lists'])
         
         # Replace list tags with simple text equivalents that Telegram likes
@@ -126,15 +120,21 @@ def emery_format(text):
         html_content = html_content.replace("<ol>", "").replace("</ol>", "")
         html_content = html_content.replace("<li>", "• ").replace("</li>", "<br/>")
         
-        # 3. Combine the parsed thinking block with the parsed markdown content
-        final_html = think_html + html_content
+        # Parse the clean body using your TgHTML library
+        parsed_body = TgHTML(html_content).parsed
         
-        # Now let TgHTML clean up the combined HTML safely
-        return TgHTML(final_html).parsed
+        # 3. Prepend the raw HTML spoiler (Bypassing the strict TgHTML parser completely)
+        if thinking_content:
+            think_html = (
+                f"🧠 <b>Emery's Thought Process</b> (Tap to reveal):\n"
+                f"<tg-spoiler><i>{thinking_content}</i></tg-spoiler>\n\n"
+            )
+            return think_html + parsed_body
+            
+        return parsed_body
         
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
-        # Fallback to basic bolding formatting if anything goes wrong
         return text.replace("**", "<b>").replace("**", "</b>") 
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription
@@ -749,7 +749,6 @@ TOOL_STATUS_MESSAGES = {
 
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):
-    # Ollama doesn't need an API key by default
     url = OLLAMA_URL
     ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
     
@@ -759,21 +758,19 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     for loop_count in range(TOOL_LOOP):
         full_context = [system_msg] + list(history_buffer)
         
-        # Ollama Native Payload
         payload = {
             "model": model_to_use,
             "messages": full_context,
             "stream": False,
             "keep_alive": -1,
-            "think": THINK,
+            "think": True, # <-- Forced to True to guarantee Ollama calculates reasoning
             "options": {
                 "num_ctx": ctx_size,
-                "temperature": 0.8, # Good for "Thinking" models
+                "temperature": 0.8,
                 "top_p": 0.9,
             }
         }
         
-        # Add tools if enabled
         if tools_schema:
             payload["tools"] = tools_schema
 
@@ -788,11 +785,12 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             res = r.json()
             msg = res.get('message', {})
             
-            # 1. Handle Tool Calls (Ollama format)
+            # DIAGNOSTIC LOG: Let's verify what keys Ollama returned
+            logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
+            
             if msg.get("tool_calls"):
                 history_buffer.append(msg)
                 for tc in msg['tool_calls']:
-                    # Ollama tools are slightly different: 'function' is at top level
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
                     
@@ -803,20 +801,15 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     if fn == "speak_message": voice_sent_via_tool = True
                     
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
-                    
                     history_buffer.append({"role": "tool", "content": str(result)})
                 continue
             
-            # 2. Handle Text Response (and capture the reasoning field)
             content = msg.get('content', "")
             reasoning = msg.get('reasoning', "")
             
             if reasoning:
-                # We build the tags by combining letters so Open WebUI doesn't try to render them here
                 start_think_tag = "<" + "think" + ">"
                 end_think_tag = "</" + "think" + ">"
-                
-                # Combine the thinking block and final response back together
                 final_text = f"{start_think_tag}\n{reasoning}\n{end_think_tag}\n{content}"
             else:
                 final_text = content
