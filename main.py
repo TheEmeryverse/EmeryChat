@@ -807,9 +807,21 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     history_buffer.append({"role": "tool", "content": str(result)})
                 continue
             
-            # 2. Handle Text Response
-            final_text = msg.get('content', "")
-            logging.info(f"✨ EMERYCHAT RESPONSE: {final_text[:200]}...")
+            # 2. Handle Text Response (and capture the reasoning field)
+            content = msg.get('content', "")
+            reasoning = msg.get('reasoning', "")
+            
+            if reasoning:
+                # We build the tags by combining letters so Open WebUI doesn't try to render them here
+                start_think_tag = "<" + "think" + ">"
+                end_think_tag = "</" + "think" + ">"
+                
+                # Combine the thinking block and final response back together
+                final_text = f"{start_think_tag}\n{reasoning}\n{end_think_tag}\n{content}"
+            else:
+                final_text = content
+
+            logging.info(f"✨ OLLAMA RESPONSE: {final_text[:200]}...")
             return final_text, voice_sent_via_tool
             
         except Exception as e:
