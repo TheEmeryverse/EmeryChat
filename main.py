@@ -734,13 +734,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             "model": model_to_use,
             "messages": full_context,
             "stream": False,
-            "keep_alive": -1,
             "think": True, # <-- Forced to True to guarantee Ollama calculates reasoning
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 1.0,
                 "top_p": 0.95,
                 "top_k": 64,
+                "keep_alive": -1,
+                "num_gpu": 0
             }
         }
         
