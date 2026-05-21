@@ -841,14 +841,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get response from the engine
     response_text, voice_sent_via_tool = await emery_engine(chat_histories[chat_id], model_to_use=model_to_use)
     
-    # Save the assistant text (with raw think tags intact) to history so the model retains its memory
+    # Save the assistant text (with raw think tags intact) to history
     if update.message.photo:
         description = update.message.caption or "an image"
         chat_histories[chat_id][-1]["content"] = f"[User sent an image: {description}]"
         
     chat_histories[chat_id].append({"role": "assistant", "content": response_text})
     
-    # --- THINKING SPLITTER LOGIC ---
+    # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
     start_tag = "<" + "think" + ">"
     end_tag = "</" + "think" + ">"
     pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
@@ -861,14 +861,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Clean the main response text
         clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
         
-        # Send the thinking process as an expandable text block without the blur
         if thinking_content:
-            thinking_msg = (
-                f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
-                f"<blockquote expandable><i>{thinking_content}</i></blockquote>"
-            )
-            await update.message.reply_text(thinking_msg, parse_mode="HTML")
-    # -------------------------------
+            # Split the thinking process into pieces of 3,900 characters to leave a buffer for tags
+            CHUNK_SIZE = 3900
+            chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
+            
+            for idx, chunk in enumerate(chunks):
+                # If there are multiple chunks, label them clearly (e.g. Part 1/2)
+                if len(chunks) > 1:
+                    header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+                else:
+                    header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+                
+                thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
+                await update.message.reply_text(thinking_msg, parse_mode="HTML")
+    # ---------------------------------------------------------
     
     # Send the main reply (voice or text)
     if is_input_voice and not voice_sent_via_tool:
@@ -877,11 +884,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if v_out: 
             await update.message.reply_voice(voice=v_out, caption="Voice message")
         else: 
-            await update.message.reply_text(emery_format(clean_response), parse_mode="HTML")
+            await send_safe_large_message(update, emery_format(clean_response))
     else:
         if clean_response:
-            await update.message.reply_text(emery_format(clean_response), parse_mode="HTML")
+            await send_safe_large_message(update, emery_format(clean_response))
 
+# --- HELPER: SAFE LONG MESSAGE SENDER ---
+async def send_safe_large_message(update: Update, text: str):
+    """
+    Splits extremely long final responses at natural line breaks 
+    to prevent Telegram's 4096 character limit crash.
+    """
+    MAX_LIMIT = 4000
+    if len(text) <= MAX_LIMIT:
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    # Loop and send chunks safely
+    while len(text) > 0:
+        if len(text) <= MAX_LIMIT:
+            await update.message.reply_text(text, parse_mode="HTML")
+            break
+            
+        # Try to break at a natural newline rather than cutting mid-sentence
+        split_index = text.rfind('\n', 0, MAX_LIMIT)
+        if split_index == -1 or split_index < 3000:
+            split_index = MAX_LIMIT  # Fallback to hard cut if no clean newline exists
+            
+        chunk = text[:split_index]
+        await update.message.reply_text(chunk, parse_mode="HTML")
+        text = text[split_index:].strip()
 # --- AUTOMATED JOBS ---
 
 # --- JOB TOOL ---
