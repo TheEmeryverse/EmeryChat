@@ -741,7 +741,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 "temperature": 1.0,
                 "top_p": 0.95,
                 "top_k": 64,
-                "keep_alive": -1
             }
         }
         
