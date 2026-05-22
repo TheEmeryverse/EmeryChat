@@ -593,7 +593,7 @@ if is_enabled("ENABLE_SEERR"): # Seerr
     }},
     {"type": "function", "function": {
         "name": "overseer_request_movie", 
-        "description": "Request a movie using its TMDB ID. Use AFTER the user selects a movie from the search results from overseer_search_movie. Call the tool using the ID from the search results.", 
+        "description": "Request a movie to the User's media server using its TMDB ID. Use AFTER the user selects a movie from the search results from overseer_search_movie. Call the tool using the ID from the search results.", 
         "parameters": {"type": "object", "properties": {"tmdb_id": {"type": "integer"}}, "required": ["tmdb_id"]}
     }},
     {"type": "function", "function": {
@@ -603,7 +603,7 @@ if is_enabled("ENABLE_SEERR"): # Seerr
     }},
     {"type": "function", "function": {
         "name": "overseer_request_tv_season", 
-        "description": "Request a specific season of a TV show using ID. Use AFTER the user selects a TV show from the search results from overseer_search_tv. Call the tool using the ID from the search results.", 
+        "description": "Request a specific season of a TV show to the User's media server using its TMDB ID. Use AFTER the user selects a TV show from the search results from overseer_search_tv. Call the tool using the ID from the search results.", 
         "parameters": {
             "type": "object", 
             "properties": {
