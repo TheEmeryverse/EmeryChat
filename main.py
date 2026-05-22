@@ -738,14 +738,49 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     voice_sent_via_tool = False
     
+    # --- OLLAMA MULTIMODAL CONVERTER ---
+    # Convert OpenAI-style photo payloads into Ollama-native format
+    ollama_history = []
+    for msg in history_buffer:
+        clean_msg = {"role": msg["role"]}
+        
+        # If content is a list (which happens for photos)
+        if isinstance(msg.get("content"), list):
+            text_parts = []
+            image_parts = []
+            
+            for part in msg["content"]:
+                if part.get("type") == "text":
+                    text_parts.append(part["text"])
+                elif part.get("type") == "image_url":
+                    # Extract the raw base64 data from the data URI
+                    raw_url = part["image_url"]["url"]
+                    if "," in raw_url:
+                        b64_data = raw_url.split(",")
+                    else:
+                        b64_data = raw_url
+                    image_parts.append(b64_data)
+            
+            clean_msg["content"] = " ".join(text_parts)
+            if image_parts:
+                clean_msg["images"] = image_parts
+        else:
+            # Standard text message
+            clean_msg["content"] = msg.get("content", "")
+            
+        ollama_history.append(clean_msg)
+    # -----------------------------------
+    
     for loop_count in range(TOOL_LOOP):
-        full_context = [system_msg] + list(history_buffer)
+        # Inject system message at the start of Ollama history
+        full_context = [system_msg] + ollama_history
         
         payload = {
             "model": model_to_use,
             "messages": full_context,
             "stream": False,
-            "think": True, # <-- Forced to True to guarantee Ollama calculates reasoning
+            "keep_alive": -1,
+            "think": True,
             "options": {
                 "num_ctx": ctx_size,
                 "temperature": 1.0,
@@ -788,7 +823,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     history_buffer.append({"role": "tool", "content": str(result)})
                 continue
             
-            # 2. Handle Text Response (and capture the reasoning field)
             content = msg.get('content', "")
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             
