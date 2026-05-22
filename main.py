@@ -24,6 +24,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 
 load_dotenv() # Load docker env variables
@@ -368,6 +369,12 @@ async def get_calendar_events(): # Fetches User's Google Calendars
             
         return "\n\n".join(lines)
 
+    except RefreshError as e:
+        logging.error(f"❌ Calendar Token Refresh Error: {e}")
+        return ("Calendar error: Google token expired and cannot be refreshed. "
+                "This usually happens if your Google Cloud app is in 'Testing' mode (tokens expire after 7 days) "
+                "or if the token was revoked. Please run `python generate_google_token.py` to re-authenticate, "
+                "and set your OAuth consent screen to 'In production' to prevent this from happening again.")
     except Exception as e:
         logging.error(f"❌ Calendar Tool Error: {e}")
         return "The system encountered an error trying to read the calendars."
