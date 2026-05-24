@@ -137,6 +137,29 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     
     return prompt
 
+async def get_image_description(b64_data: str, user_caption: str) -> str:
+    logging.info("👁️ VISION: Requesting image description...")
+    try:
+        payload = {
+            "model": VISION_MODEL_ID,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is this image? " + (user_caption or ""),
+                    "images": [b64_data]
+                }
+            ],
+            "stream": False
+        }
+        r = await http_client.post(OLLAMA_URL, json=payload, timeout=300)
+        if r.status_code != 200:
+            logging.error(f"❌ Vision Error {r.status_code}: {r.text}")
+            return "Failed to describe the image due to a model error."
+        return r.json().get('message', {}).get('content', "No description generated.")
+    except Exception as e:
+        logging.error(f"❌ Vision Crash: {e}")
+        return "Vision engine failure."
+
 # --- TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
     logging.info("🎙️ VOICE: Generating audio...")
@@ -753,38 +776,8 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     voice_sent_via_tool = False
     
     for loop_count in range(TOOL_LOOP):
-        # --- OLLAMA MULTIMODAL & TOOL CONVERTER (Inside the Loop!) ---
-        # Converts history dynamically on every iteration to capture new tool outputs
-        ollama_history = []
-        for msg in history_buffer:
-            # We copy the message to preserve keys like 'role' and 'tool_calls'
-            clean_msg = msg.copy()
-            
-            # If content is a list (which happens for photos)
-            if isinstance(msg.get("content"), list):
-                text_parts = []
-                image_parts = []
-                
-                for part in msg["content"]:
-                    if part.get("type") == "text":
-                        text_parts.append(part["text"])
-                    elif part.get("type") == "image_url":
-                        raw_url = part["image_url"]["url"]
-                        if "," in raw_url:
-                            b64_data = raw_url.split(",", 1)[1]
-                        else:
-                            b64_data = raw_url
-                        image_parts.append(b64_data)
-                
-                clean_msg["content"] = " ".join(text_parts)
-                if image_parts:
-                    clean_msg["images"] = image_parts
-            
-            ollama_history.append(clean_msg)
-        # -------------------------------------------------------------
-        
         # Inject system message at the start of Ollama history
-        full_context = [system_msg] + ollama_history
+        full_context = [system_msg] + list(history_buffer)
         
         payload = {
             "model": model_to_use,
@@ -1011,14 +1004,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not transcription: return
         content = f"[{now_str}] {transcription}"
     elif update.message.photo:
-        model_to_use = VISION_MODEL_ID # Switch to vision model
         p_file = await update.message.photo[-1].get_file()
         b64 = base64.b64encode(await p_file.download_as_bytearray()).decode('utf-8')
-        content = [
-            {"type": "text", "text": f"Current Time: {now_str}"},
-            {"type": "text", "text": update.message.caption or "Describe this image in detail."}, 
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-        ]
+        caption = update.message.caption or ""
+        
+        await update.message.reply_chat_action("typing")
+        description = await get_image_description(b64, caption)
+        
+        content_text = "User sent an image."
+        if caption:
+            content_text += f" User's caption: {caption}"
+        content_text += f"\nImage Description: {description}"
+        
+        content = f"[{now_str}] {content_text}"
     else:
         content = f"[{now_str}] {update.message.text}"
         
@@ -1051,10 +1049,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await typing_task
 
     # Save the assistant text (with raw think tags intact) to history
-    if update.message.photo:
-        description = update.message.caption or "an image"
-        chat_histories[chat_id][-1]["content"] = f"[User sent an image: {description}]"
-        
     chat_histories[chat_id].append({"role": "assistant", "content": response_text})
     
     # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
