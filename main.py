@@ -803,6 +803,18 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
+            # --- DEBUG LOGGING ---
+            debug_payload = {k: v for k, v in payload.items()}
+            debug_messages = []
+            for m in payload.get("messages", []):
+                m_copy = m.copy()
+                if "images" in m_copy and isinstance(m_copy["images"], list):
+                    m_copy["images"] = [f"<base64_data_length_{len(img)}>" for img in m_copy["images"]]
+                debug_messages.append(m_copy)
+            debug_payload["messages"] = debug_messages
+            logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
+            # ---------------------
+
             logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
             r = await http_client.post(url, json=payload, timeout=300)
             
