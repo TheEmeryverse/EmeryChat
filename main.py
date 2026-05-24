@@ -821,6 +821,30 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         logging.error(f"❌ Reolink Tool Analysis/Send Crash: {e}", exc_info=True)
         return f"Successfully grabbed the image via {successful_protocol}, but failed to analyze/send it: {e}"
 
+async def get_available_cameras() -> str:
+    """
+    Returns a clean, human-readable list of all configured home security cameras.
+    """
+    logging.info("🛠️ TOOL EXECUTION: get_available_cameras")
+    raw_cams = os.getenv("REOLINK_CAMERAS", "")
+    
+    if not raw_cams:
+        return "No security cameras are currently configured in the system."
+        
+    camera_names = []
+    for item in raw_cams.split(","):
+        colon_idx = item.find(":")
+        if colon_idx != -1:
+            # Safe string slice (guaranteed not to cause list attribute errors!)
+            camera_name_only = item[:colon_idx]
+            camera_names.append(camera_name_only.strip())
+            
+    if not camera_names:
+        return "The camera configuration is empty or formatted incorrectly."
+        
+    formatted_list = ", ".join([f"'{c}'" for c in camera_names])
+    return f"The following security cameras are online and available: {formatted_list}"
+
 # Create empty containers first
 AVAILABLE_TOOLS = {}
 tools_schema = []
@@ -979,38 +1003,50 @@ if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
 
 if is_enabled("ENABLE_REOLINK"): # Reolink Security
     AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
+    AVAILABLE_TOOLS["get_available_cameras"] = get_available_cameras
     
     # Dynamically extract real camera names from your environment configurations
     raw_cams = os.getenv("REOLINK_CAMERAS", "")
     camera_names = []
     for item in raw_cams.split(","):
-        # Find the position of the colon in the string
         colon_idx = item.find(":")
         if colon_idx != -1:
-            # Slice the string directly (guaranteed to be a string, not a list)
             camera_name_only = item[:colon_idx]
             camera_names.append(camera_name_only.strip())
             
     # Format list as a readable array string: "'front', 'frontdoor', 'backyard'"
     camera_list_str = ", ".join([f"'{c}'" for c in camera_names]) if camera_names else "'front', 'frontdoor'"
     
-    tools_schema.append({
-        "type": "function",
-        "function": {
-            "name": "get_reolink_snapshot",
-            "description": "Get a live image stream and AI analysis from a home security camera. Use whenever the user asks to check, look at, view, or patrol a camera location.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "camera_name": {
-                        "type": "string",
-                        "description": f"The exact name of the camera to check. You MUST choose exactly one option from this list: {camera_list_str}."
-                    }
-                },
-                "required": ["camera_name"]
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_reolink_snapshot",
+                "description": "Get a live image stream and AI analysis from a home security camera. Use whenever the user asks to check, look at, view, or patrol a camera location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_name": {
+                            "type": "string",
+                            "description": f"The exact name of the camera to check. You MUST choose exactly one option from this list: {camera_list_str}."
+                        }
+                    },
+                    "required": ["camera_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_available_cameras",
+                "description": "Get a list of all configured and online home security camera names. Use when the user asks what cameras they have, what camera feeds are available, or lists of security cameras.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         }
-    })
+    ])
 
 TOOL_STATUS_MESSAGES = {
     "web_search": f"{MODEL_NAME} is surfing the web...",
@@ -1026,7 +1062,8 @@ TOOL_STATUS_MESSAGES = {
     "overseer_search_tv": f"{MODEL_NAME} is searching for a TV show...",
     "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
     "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
-    "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night..."
+    "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night...",
+    "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration..."
 }
 
 # --- THE UNIFIED ENGINE ---
