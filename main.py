@@ -671,7 +671,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         b64_image = base64.b64encode(r.content).decode('utf-8')
         
         logging.info("👁️ REOLINK: Analyzing secure camera frame with vision model...")
-        description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera.")
+        description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera at {USER_NAME}'s home. Please describe the image and assess for anything strange or unusual. Focus especially on any persons, vehicles, or seemingly out of place objects, or anything else that could be suspicious and report it to the user.")
         
         # 4. Send the physical snapshot photo to Telegram
         if TARGET_CHAT_ID:
@@ -847,7 +847,6 @@ if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
 
 if os.getenv("ENABLE_REOLINK", "false").lower() == "true":
     AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
-    TOOL_STATUS_MESSAGES["get_reolink_snapshot"] = f"{MODEL_NAME} is connecting to your security cameras..."
     tools_schema.append({
         "type": "function",
         "function": {
@@ -879,7 +878,8 @@ TOOL_STATUS_MESSAGES = {
     "overseer_request_movie": f"{MODEL_NAME} is requesting a movie...",
     "overseer_search_tv": f"{MODEL_NAME} is searching for a TV show...",
     "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
-    "fetch_web_content": f"{MODEL_NAME} is fetching a website..."
+    "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
+    "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night..."
 }
 
 # --- THE UNIFIED ENGINE ---
