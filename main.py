@@ -786,8 +786,8 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
                 parse_mode="HTML"
             )
             
-            return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the filtered security report: {concise_report}"
-            
+            return f"SUCCESS: Live photo sent directly to user. Security report was: '{concise_report}'. You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."            
+        
         return "Failed to send photo: Chat context lost."
         
     except Exception as e:
@@ -1108,7 +1108,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     TARGET_CHAT_ID = chat_id
     
-    if chat_id not in chat_histories: chat_histories[chat_id] = deque(maxlen=20)
+    if chat_id not in chat_histories: 
+        chat_histories[chat_id] = deque(maxlen=20)
     
     is_input_voice = False
     model_to_use = MODEL_ID # Default model
@@ -1120,7 +1121,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_input_voice = True
         v_file = await update.message.voice.get_file()
         transcription = await transcribe_audio(await v_file.download_as_bytearray())
-        if not transcription: return
+        if not transcription: 
+            return
         content = f"[{now_str}] {transcription}"
     elif update.message.photo:
         p_file = await update.message.photo[-1].get_file()
@@ -1143,19 +1145,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_histories[chat_id].append({"role": "user", "content": content})
     
     # --- TYPING INDICATOR LOOP ---
-    # We create an event to tell the loop when to stop
     typing_stop = asyncio.Event()
 
     async def keep_typing():
         while not typing_stop.is_set():
             try:
-                # Telegram clears typing after 5 seconds, so we send it every 4 seconds
                 await update.message.reply_chat_action("typing")
             except Exception as e:
                 logging.debug(f"Typing action failed: {e}")
             await asyncio.sleep(4)
 
-    # Start the typing task in the background
     typing_task = asyncio.create_task(keep_typing())
     # -----------------------------
 
@@ -1163,12 +1162,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Run the engine
         response_text, voice_sent_via_tool = await emery_engine(chat_histories[chat_id], model_to_use=model_to_use)
     finally:
-        # Crucial: Stop the typing loop once the engine is finished
+        # Stop the typing loop once the engine is finished
         typing_stop.set()
         await typing_task
 
     # Save the assistant text (with raw think tags intact) to history
     chat_histories[chat_id].append({"role": "assistant", "content": response_text})
+
+    # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
+    start_tag = "<" + "think" + ">"
+    end_tag = "</" + "think" + ">"
+    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+
+    clean_response = response_text
+    thinking_content = ""
+
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+        # Clean the main response text
+        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # --- SILENT HANDSHAKE DETECTION ---
+    # Strip any potential punctuation (e.g., "DONE.", "done!") to see if only the handshake remain
+    handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
+    
+    if handshake_check == "DONE":
+        logging.info("🤫 HANDSHAKE: Suppressing final text message because camera photo was already delivered.")
+        return  # Silent exit! Prevents double-texting
+
+    # If not suppressing, display the thinking block (if one exists)
+    if think_match and thinking_content:
+        CHUNK_SIZE = 3900
+        chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
+
+        for idx, chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+            else:
+                header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+
+            thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
+            await update.message.reply_text(thinking_msg, parse_mode="HTML")
+    # ---------------------------------------------------------
+
+    # Send the main reply (voice or text)
+    if is_input_voice and not voice_sent_via_tool:
+        await update.message.reply_chat_action("record_voice")
+        v_out = await get_voice_audio(clean_response)
+        if v_out:
+            await update.message.reply_voice(voice=v_out, caption="Voice message")
+        else:
+            await send_safe_large_message(update, emery_format(clean_response))
+    else:
+        if clean_response:
+            await send_safe_large_message(update, emery_format(clean_response))
     
     # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
     start_tag = "<" + "think" + ">"
