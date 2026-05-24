@@ -140,7 +140,7 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
 async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info("👁️ VISION: Requesting image description from Open WebUI...")
     try:
-        url = "http://192.168.1.121:3000/api/chat/completions"
+        url = "http://192.168.1.121:3000/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {OPEN_WEBUI_KEY}",
             "Content-Type": "application/json"
