@@ -140,42 +140,35 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
 async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info("👁️ VISION: Requesting image description directly from Ollama...")
     try:
-        # Send the request directly to Ollama (bypassing Open WebUI's wrapper)
-        url = OLLAMA_URL  # This uses http://localhost:11434/api/chat from your config
+        url = OLLAMA_URL  # Uses http://localhost:11434/api/chat
         
+        # Ensure no header metadata remains in the base64 payload
+        clean_b64 = b64_data.split(",")[-1] if "," in b64_data else b64_data
+
         payload = {
             "model": VISION_MODEL_ID,
             "messages": [
                 {
                     "role": "user",
                     "content": f"Describe this image as best as you can. {user_caption}".strip(),
-                    # Ollama expects an array of raw base64 strings (no "data:image/jpeg;base64," prefix)
-                    "images": [b64_data] 
+                    "images": [clean_b64] 
                 }
             ],
             "stream": False
         }
         
-        logging.info(f"👁️ VISION: Sending request to Ollama using model: {VISION_MODEL_ID}...")
         r = await http_client.post(url, json=payload, timeout=120)
-        
         if r.status_code != 200:
             logging.error(f"❌ Ollama Vision API Error {r.status_code}: {r.text}")
             return "Failed to describe the image due to an Ollama API error."
             
         data = r.json()
-        description = data.get('message', {}).get('content', "").strip()
-        
-        if not description:
-            logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty text string.")
-            return "No description generated."
-            
-        logging.info(f"👁️ VISION: Successfully got description ({len(description)} chars)")
-        return description
+        return data.get('message', {}).get('content', "No description generated.").strip()
         
     except Exception as e:
         logging.error(f"❌ Ollama Vision Crash: {e}", exc_info=True)
         return "Vision engine failure."
+        
 # --- TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
     logging.info("🎙️ VOICE: Generating audio...")
@@ -791,9 +784,42 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     voice_sent_via_tool = False
     
+    # --- OLLAMA MULTIMODAL CONVERTER ---
+    # Convert OpenAI-style photo payloads into clean Ollama-native format
+    ollama_history = []
+    for msg in history_buffer:
+        clean_msg = {"role": msg["role"]}
+        
+        # If content is already formatted as an OpenAI multimodal list (images + text)
+        if isinstance(msg.get("content"), list):
+            text_parts = []
+            image_parts = []
+            
+            for part in msg["content"]:
+                if part.get("type") == "text":
+                    text_parts.append(part["text"])
+                elif part.get("type") == "image_url":
+                    raw_url = part["image_url"]["url"]
+                    if isinstance(raw_url, str) and "," in raw_url:
+                        # Extract only the base64 part, discarding "data:image/jpeg;base64,"
+                        b64_data = raw_url.split(",", 1)
+                    else:
+                        b64_data = raw_url
+                    image_parts.append(b64_data)
+            
+            clean_msg["content"] = " ".join(text_parts)
+            if image_parts:
+                clean_msg["images"] = image_parts
+        else:
+            # Handle standard text-only messages
+            clean_msg["content"] = msg.get("content", "")
+            
+        ollama_history.append(clean_msg)
+    # -----------------------------------
+    
     for loop_count in range(TOOL_LOOP):
-        # Inject system message at the start of Ollama history
-        full_context = [system_msg] + list(history_buffer)
+        # Inject the updated system message at the beginning of each turn
+        full_context = [system_msg] + ollama_history
         
         payload = {
             "model": model_to_use,
@@ -812,7 +838,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
-            # --- DEBUG LOGGING ---
+            # --- SAFE DEBUG LOGGING (Prevents terminal flooding) ---
             debug_payload = {k: v for k, v in payload.items()}
             debug_messages = []
             for m in payload.get("messages", []):
@@ -822,7 +848,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 debug_messages.append(m_copy)
             debug_payload["messages"] = debug_messages
             logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
-            # ---------------------
+            # --------------------------------------------------------
 
             logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
             r = await http_client.post(url, json=payload, timeout=300)
@@ -834,11 +860,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             res = r.json()
             msg = res.get('message', {})
             
-            # DIAGNOSTIC LOG: Let's verify what keys Ollama returned
             logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
             
+            # --- TOOL CALLING LOGIC ---
             if msg.get("tool_calls"):
+                # Append assistant's tool-use choice to both history contexts
                 history_buffer.append(msg)
+                ollama_history.append(msg)
+                
                 for tc in msg['tool_calls']:
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
@@ -847,12 +876,19 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     await application_bot.send_message(chat_id=TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
                     
                     logging.info(f"🛠️ OLLAMA TOOL: {fn} | Args: {args}")
-                    if fn == "speak_message": voice_sent_via_tool = True
+                    if fn == "speak_message": 
+                        voice_sent_via_tool = True
                     
+                    # Execute tool
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
-                    history_buffer.append({"role": "tool", "content": str(result)})
+                    
+                    # Append tool execution results back to tracking histories
+                    tool_response_msg = {"role": "tool", "content": str(result)}
+                    history_buffer.append(tool_response_msg)
+                    ollama_history.append(tool_response_msg)
                 continue
             
+            # --- RAW CONTENT PARSING ---
             content = msg.get('content', "")
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             
@@ -876,125 +912,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             return final_text, voice_sent_via_tool
             
         except Exception as e:
-            logging.error(f"🔥 EMERYCHAT CRASH: {e}")
-            return "EMERYCHAT engine failure.", False
-            
-    return "Timeout.", False
-    url = OLLAMA_URL
-    ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
-    
-    system_msg = {"role": "system", "content": get_current_system_prompt()}
-    voice_sent_via_tool = False
-    
-    # --- OLLAMA MULTIMODAL CONVERTER ---
-    # Convert OpenAI-style photo payloads into Ollama-native format
-    ollama_history = []
-    for msg in history_buffer:
-        clean_msg = {"role": msg["role"]}
-        
-        # If content is a list (which happens for photos)
-        if isinstance(msg.get("content"), list):
-            text_parts = []
-            image_parts = []
-            
-            for part in msg["content"]:
-                if part.get("type") == "text":
-                    text_parts.append(part["text"])
-                elif part.get("type") == "image_url":
-                    # Extract the raw base64 data from the data URL
-                    raw_url = part["image_url"]["url"]
-                    if "," in raw_url:
-                        b64_data = raw_url.split(",")
-                    else:
-                        b64_data = raw_url
-                    image_parts.append(b64_data)
-            
-            clean_msg["content"] = " ".join(text_parts)
-            if image_parts:
-                clean_msg["images"] = image_parts
-        else:
-            # Standard text message
-            clean_msg["content"] = msg.get("content", "")
-            
-        ollama_history.append(clean_msg)
-    # -----------------------------------
-    
-    for loop_count in range(TOOL_LOOP):
-        # Inject system message at the start of Ollama history
-        full_context = [system_msg] + ollama_history
-        
-        payload = {
-            "model": model_to_use,
-            "messages": full_context,
-            "stream": False,
-            "keep_alive": -1,
-            "think": True,
-            "options": {
-                "num_ctx": ctx_size,
-                "temperature": 1.0,
-                "top_p": 0.95,
-                "top_k": 64,
-                "num_gpu": 0
-            }
-        }
-        
-        if tools_schema:
-            payload["tools"] = tools_schema
-
-        try:
-            logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
-            r = await http_client.post(url, json=payload, timeout=300)
-            
-            if r.status_code != 200:
-                logging.error(f"❌ Ollama Error {r.status_code}: {r.text}")
-                return "Ollama connection error.", False
-
-            res = r.json()
-            msg = res.get('message', {})
-            
-            # DIAGNOSTIC LOG: Let's verify what keys Ollama returned
-            logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
-            
-            if msg.get("tool_calls"):
-                history_buffer.append(msg)
-                for tc in msg['tool_calls']:
-                    fn = tc['function']['name']
-                    args = tc['function'].get('arguments', {})
-                    
-                    status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
-                    await application_bot.send_message(chat_id=TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
-                    
-                    logging.info(f"🛠️ OLLAMA TOOL: {fn} | Args: {args}")
-                    if fn == "speak_message": voice_sent_via_tool = True
-                    
-                    result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
-                    history_buffer.append({"role": "tool", "content": str(result)})
-                continue
-            
-            content = msg.get('content', "")
-            reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
-            
-            # ======== RAW OLLAMA DIAGNOSTIC LOGS ========
-            logging.info("==================================================")
-            logging.info("🚨 RAW UNEDITED OLLAMA RESPONSE RECEIVED:")
-            logging.info(f"🔑 Keys in message payload: {list(msg.keys())}")
-            logging.info(f"🧠 Raw Reasoning Block (Length: {len(reasoning)} chars):\n{reasoning}")
-            logging.info(f"💬 Raw Content Block (Length: {len(content)} chars):\n{content}")
-            logging.info("==================================================")
-            # ============================================
-
-            if reasoning:
-                start_think_tag = "<" + "think" + ">"
-                end_think_tag = "</" + "think" + ">"
-                final_text = f"{start_think_tag}\n{reasoning}\n{end_think_tag}\n{content}"
-            else:
-                final_text = content
-
-            logging.info(f"✨ OLLAMA RESPONSE SENT TO SPLITTER: {final_text[:150]}...")
-            return final_text, voice_sent_via_tool
-            
-        except Exception as e:
-            logging.error(f"🔥 EMERYCHAT CRASH: {e}")
+            logging.error(f"🔥 EMERYCHAT CRASH: {e}", exc_info=True)
             return "EMERYCHAT engine failure.", False
             
     return "Timeout.", False
