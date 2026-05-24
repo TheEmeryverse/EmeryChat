@@ -686,7 +686,7 @@ Detailed Visual Input:
         logging.error(f"❌ Reolink security filter crash: {e}", exc_info=True)
         return "Activity detected, but security filtering encountered an error."
 
-async def get_reolink_snapshot(camera_name: str) -> str:
+async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from a Reolink camera
     """
     Grabs a live snapshot from a specified Reolink camera channel.
     Attempts HTTPS, falls back to HTTP, and uses a highly disciplined single-stage 
