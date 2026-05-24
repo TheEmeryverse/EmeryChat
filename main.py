@@ -633,6 +633,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
     """
     Grabs a live snapshot from a specified Reolink camera channel.
     Attempts HTTPS first, automatically falling back to HTTP if connection is refused.
+    Gracefully splits long AI descriptions to prevent Telegram caption-limit crashes.
     """
     logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
     
@@ -679,13 +680,12 @@ async def get_reolink_snapshot(camera_name: str) -> str:
                     logging.info(f"✅ REOLINK: Securely fetched snapshot using {proto['name']}!")
                     break
                 else:
-                    # It's an API text error rather than a socket connection error
                     error_msg = r.content.decode('utf-8', errors='ignore')
                     logging.warning(f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {error_msg}")
             else:
                 logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
                 
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError) as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
             logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed, blocked, or offline)")
         except Exception as e:
             logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
@@ -702,14 +702,35 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         logging.info("👁️ REOLINK: Analyzing camera frame with vision model...")
         description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera.")
         
-        # 4. Send the photo to Telegram
+        # 4. Send the photo to Telegram (with strict character limit protection)
         if TARGET_CHAT_ID:
-            await application_bot.send_photo(
-                chat_id=TARGET_CHAT_ID,
-                photo=response_content,
-                caption=f"📸 Live feed: {camera_name.upper()} ({successful_protocol})\n\n<i>{description}</i>",
-                parse_mode="HTML"
-            )
+            caption_header = f"📸 Live feed: {camera_name.upper()} ({successful_protocol})\n\n"
+            full_caption = f"{caption_header}<i>{description}</i>"
+            
+            # Telegram caption limit is 1024 characters
+            if len(full_caption) <= 1010:
+                # Description is short, send everything as a photo caption
+                await application_bot.send_photo(
+                    chat_id=TARGET_CHAT_ID,
+                    photo=response_content,
+                    caption=full_caption,
+                    parse_mode="HTML"
+                )
+            else:
+                # Description is too long. Send the photo with a brief caption first...
+                await application_bot.send_photo(
+                    chat_id=TARGET_CHAT_ID,
+                    photo=response_content,
+                    caption=f"📸 Live feed: {camera_name.upper()} ({successful_protocol})",
+                    parse_mode="HTML"
+                )
+                # ...then follow up with the full detailed description as a standard text message
+                await application_bot.send_message(
+                    chat_id=TARGET_CHAT_ID,
+                    text=f"👁️ <b>AI Security Analysis ({camera_name.upper()})</b>:\n\n<i>{description}</i>",
+                    parse_mode="HTML"
+                )
+                
             return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the description: {description}"
             
         return "Failed to send photo: Chat context lost."
