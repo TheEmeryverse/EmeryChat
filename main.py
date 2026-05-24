@@ -986,7 +986,8 @@ if is_enabled("ENABLE_REOLINK"): # Reolink Security
     for item in raw_cams.split(","):
         if ":" in item:
             # Safer one-liner: Split and immediately grab the first string, then strip it
-            camera_names.append(item.split(":").strip())
+            camera_name_only = item.split(":")
+            camera_names.append(camera_name_only.strip())
             
     # Format list as a readable array string: "'front', 'frontdoor', 'backyard'"
     camera_list_str = ", ".join([f"'{c}'" for c in camera_names]) if camera_names else "'front', 'frontdoor'"
