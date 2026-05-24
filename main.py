@@ -138,35 +138,39 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     return prompt
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info("👁️ VISION: Requesting image description directly from Ollama...")
+    logging.info("👁️ VISION: Requesting image description directly from Ollama /api/chat...")
     try:
-        # Convert the configured OLLAMA_URL (/api/chat) to the direct /api/generate endpoint
-        if "/api/chat" in OLLAMA_URL:
-            url = OLLAMA_URL.replace("/api/chat", "/api/generate")
-        else:
-            url = OLLAMA_URL.rstrip("/") + "/api/generate"
+        # Match the endpoint to OLLAMA_URL (ensuring it ends with /api/chat)
+        url = OLLAMA_URL
+        if not url.endswith("/api/chat"):
+            url = url.rstrip("/")
+            if not url.endswith("/api"):
+                url += "/api"
+            url += "/chat"
         
-        # Strip out any web metadata headers if they are present
-        clean_b64 = b64_data.split(",")[-1] if "," in b64_data else b64_data
+        # Strip out newlines/carriage returns and data headers (equivalent to tr -d '\n')
+        clean_b64 = b64_data.replace("\n", "").replace("\r", "").strip()
+        if "," in clean_b64:
+            clean_b64 = clean_b64.split(",", 1)
 
-        # CRUCIAL FOR GEMMA/GOOGLE MULTIMODAL MODELS:
-        # Natively multimodal models require the '<image>' token anchor inside the prompt string.
-        # This acts as the explicit insertion coordinates for the model's vision projector.
-        prompt = "<image>\nAnalyze this image and describe what you see in detail. Focus on key elements, context, and any text present."
+        prompt_text = "What is in this image?"
         if user_caption:
-            prompt += f" Additional context from user: {user_caption}"
+            prompt_text += f" Additional context from user: {user_caption}"
 
+        # EXACT payload mapping from your working curl example:
         payload = {
             "model": VISION_MODEL_ID,
-            "prompt": prompt,
-            "images": [clean_b64],
-            "stream": False,
-            "options": {
-                "temperature": 0.2
-            }
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt_text,
+                    "images": [clean_b64]
+                }
+            ],
+            "stream": False
         }
         
-        logging.info(f"👁️ VISION: Sending image payload to Ollama ({url}) with model {VISION_MODEL_ID}...")
+        logging.info(f"👁️ VISION: Sending payload to {url} using model {VISION_MODEL_ID}...")
         logging.info(f"👁️ VISION: Clean Base64 payload length: {len(clean_b64)} characters.")
         
         r = await http_client.post(url, json=payload, timeout=180)
@@ -176,18 +180,10 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             return "Failed to describe the image due to an Ollama processing error."
             
         data = r.json()
-        description = data.get('response', "").strip()
-        
-        # Fallback check: if the visual anchor was stripped, try once without it
-        if not description:
-            logging.warning("⚠️ Vision model returned empty response with visual anchor. Retrying with fallback prompt...")
-            payload["prompt"] = f"Describe this image as best as you can. {user_caption or ''}".strip()
-            r = await http_client.post(url, json=payload, timeout=120)
-            if r.status_code == 200:
-                description = r.json().get('response', "").strip()
+        description = data.get('message', {}).get('content', "").strip()
         
         if not description:
-            logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty text string.")
+            logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty response.")
             return "No description generated."
             
         logging.info(f"👁️ VISION: Successfully got description ({len(description)} chars)")
@@ -812,37 +808,28 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     voice_sent_via_tool = False
     
-    # --- AUTOMATIC HISTORY SANITIZER ---
-    # Heals history by stripping out any giant base64 strings or complex structures
+    # Ensure history buffer is passed as clean text only
     ollama_history = []
     for msg in history_buffer:
         clean_msg = {"role": msg["role"]}
         content = msg.get("content", "")
         
-        # 1. If content is a structured list (OpenAI-style multimodal payload)
+        # If the content contains raw dictionary objects or lists, flatten them to strings
         if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part["text"])
+            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
             clean_msg["content"] = " ".join(text_parts) if text_parts else "[Sent an image]"
-            
-        # 2. If content is a string containing a raw, un-scrubbed base64 text stream
         elif isinstance(content, str):
-            # If a single string has no spaces in a 2000-char block, it's a base64 sequence
+            # Scrub base64 artifacts if any are left over
             if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
-                logging.warning("🧹 SANITIZER: Detected and scrubbed legacy base64 text block from chat history!")
-                clean_msg["content"] = "[Image base64 data removed for stability]"
+                clean_msg["content"] = "[Image base64 data removed]"
             else:
                 clean_msg["content"] = content
         else:
             clean_msg["content"] = str(content)
             
         ollama_history.append(clean_msg)
-    # -----------------------------------
     
     for loop_count in range(TOOL_LOOP):
-        # Inject the system prompt at the beginning
         full_context = [system_msg] + ollama_history
         
         payload = {
@@ -862,10 +849,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
-            # --- SAFE DEBUG LOGGING ---
+            # Safe terminal logging (excludes raw image dumps)
             debug_payload = {k: v for k, v in payload.items()}
             logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
-            # --------------------------
 
             logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
             r = await http_client.post(url, json=payload, timeout=300)
@@ -879,7 +865,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             
             logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
             
-            # --- TOOL CALL PROCESSOR ---
+            # Tool Executions
             if msg.get("tool_calls"):
                 history_buffer.append(msg)
                 ollama_history.append(msg)
@@ -901,7 +887,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     ollama_history.append(tool_response)
                 continue
             
-            # --- RESPONSE CONSTRUTOR ---
             content = msg.get('content', "")
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             
@@ -912,7 +897,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             logging.info(f"🧠 Raw Reasoning Block (Length: {len(reasoning)} chars):\n{reasoning}")
             logging.info(f"💬 Raw Content Block (Length: {len(content)} chars):\n{content}")
             logging.info("==================================================")
-            # ============================================
 
             if reasoning:
                 start_think_tag = "<" + "think" + ">"
