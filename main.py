@@ -629,10 +629,11 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
 
-async def filter_security_description(raw_description: str, camera_name: str) -> str: # Filters Reolink descriptions for threats
+async def filter_security_description(raw_description: str, camera_name: str) -> str:
     """
     Uses the main text model to filter the verbose raw vision description,
     extracting only active entities, security details, and threats.
+    Accommodates large models on CPU with an extended 300-second timeout.
     """
     logging.info("🧠 REOLINK: Filtering raw visual data through main text model...")
     try:
@@ -665,11 +666,13 @@ Detailed Visual Input:
             }
         }
 
-        r = await http_client.post(url, json=payload, timeout=60)
+        # Increased timeout to 300 seconds to give CPU-bound local models plenty of time to respond
+        r = await http_client.post(url, json=payload, timeout=300)
+        
         if r.status_code == 200:
             summary = r.json().get('message', {}).get('content', '').strip()
             
-            # Safely strip out reasoning blocks without using literal tag strings
+            # Safely strip reasoning blocks if the model uses them
             summary = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', summary, flags=re.DOTALL).strip()
             summary = re.sub(r'</?[tT]hink>', '', summary).strip()
             
@@ -680,7 +683,7 @@ Detailed Visual Input:
         return "Unusual activity detected, but analysis failed."
         
     except Exception as e:
-        logging.error(f"❌ Reolink security filter crash: {e}")
+        logging.error(f"❌ Reolink security filter crash: {e}", exc_info=True)
         return "Activity detected, but security filtering encountered an error."
 
 async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from a Reolink camera
