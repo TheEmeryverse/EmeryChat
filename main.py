@@ -449,7 +449,7 @@ async def get_calendar_events(): # Fetches User's Google Calendars
         logging.error(f"❌ Calendar Tool Error: {e}")
         return "The system encountered an error trying to read the calendars."
 
-async def overseer_search_movie(query: str) -> str:
+async def overseer_search_movie(query: str) -> str: # Searches for movies in Overseer
     logging.info(f"🎬 SEARCH MOVIE: {query}")
     def sync_search():
         encoded_query = quote(query)
@@ -507,7 +507,7 @@ async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
         logging.error(f"Overseerr Movie Request Failed: {e}")
         return f"Request failed: {e}"
 
-async def overseer_search_tv(query: str) -> str:
+async def overseer_search_tv(query: str) -> str: # Searches for TV shows in Overseer
     logging.info(f"📺 SEARCH TV: {query}")
 
     def sync_search():
@@ -558,7 +558,7 @@ async def overseer_request_tv_season(tmdb_id, season_number): # Requests a speci
         logging.error(f"Overseerr TV Season Request Failed: {e}")
         return f"Request failed: {e}"
 
-async def fetch_web_content(url: str, max_chars: int = 8000) -> dict:
+async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches website content
     """
     Optimized for LLM agents following a SearXNG search.
     Removes boilerplate and preserves structural context.
@@ -629,11 +629,65 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict:
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
 
-async def get_reolink_snapshot(camera_name: str) -> str:
+async def filter_security_description(raw_description: str, camera_name: str) -> str: # Filters Reolink descriptions for threats
+    """
+    Uses the main text model to filter the verbose raw vision description,
+    extracting only active entities, security details, and threats.
+    """
+    logging.info("🧠 REOLINK: Filtering raw visual data through main text model...")
+    try:
+        url = OLLAMA_URL
+        prompt = f"""You are a professional home security monitoring system.
+Review this raw visual description of the live '{camera_name}' security camera feed.
+
+Extract and report ONLY active entities, security hazards, or items of interest:
+- People (exact clothing, appearance, behavior)
+- Vehicles (type, color, position)
+- Deliveries, packages, or tools left out of place
+- Animals or unexpected objects on walkways
+
+STRICT SECURITY FILTER RULES:
+1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
+2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up your driveway" or "A dark silver SUV is parked at the curb").
+3. Keep your output extremely concise (exactly 1 or 2 sentences max).
+4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the description, respond EXACTLY with: "No active threats or activity detected."
+
+Detailed Visual Input:
+{raw_description}"""
+
+        payload = {
+            "model": MODEL_ID,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_ctx": 4096
+            }
+        }
+
+        r = await http_client.post(url, json=payload, timeout=60)
+        if r.status_code == 200:
+            summary = r.json().get('message', {}).get('content', '').strip()
+            
+            # Safely strip out reasoning blocks without using literal tag strings
+            summary = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', summary, flags=re.DOTALL).strip()
+            summary = re.sub(r'</?[tT]hink>', '', summary).strip()
+            
+            logging.info(f"🧠 REOLINK: Filtered security summary: '{summary}'")
+            return summary
+            
+        logging.error(f"❌ Reolink summary generation failed with status: {r.status_code}")
+        return "Unusual activity detected, but analysis failed."
+        
+    except Exception as e:
+        logging.error(f"❌ Reolink security filter crash: {e}")
+        return "Activity detected, but security filtering encountered an error."
+
+async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from a Reolink camera
     """
     Grabs a live snapshot from a specified Reolink camera channel.
-    Attempts HTTPS first, automatically falling back to HTTP if connection is refused.
-    Gracefully splits long AI descriptions to prevent Telegram caption-limit crashes.
+    Attempts HTTPS, falls back to HTTP, analyzes with vision, filters threats via main LLM,
+    and sends the photo to Telegram with a concise, actionable security report.
     """
     logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
     
@@ -657,7 +711,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         available_cams = ", ".join(camera_map.keys())
         return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
         
-    # We will try secure HTTPS first, then fallback to standard HTTP
+    # Protocols to attempt sequentially
     protocols = [
         {"name": "HTTPS", "url": f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"},
         {"name": "HTTP", "url": f"http://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"}
@@ -699,39 +753,34 @@ async def get_reolink_snapshot(camera_name: str) -> str:
     # 3. Analyze the snapshot using your local vision model
     try:
         b64_image = base64.b64encode(response_content).decode('utf-8')
-        logging.info("👁️ REOLINK: Analyzing camera frame with vision model...")
-        description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera.")
+        logging.info("👁️ REOLINK: Requesting threat analysis from vision model...")
         
-        # 4. Send the photo to Telegram (with strict character limit protection)
+        # Security focused prompt instructs the vision model to look for threats/activity
+        security_prompt = (
+            f"This is a live feed from the {camera_name} camera. "
+            "Please analyze for any threats, vehicles, or people and describe them in detail. "
+            "Look for anything suspicious, seemingly out of place, or posing a potential threat."
+        )
+        
+        raw_description = await get_image_description(b64_image, security_prompt)
+        
+        # 4. Filter description through main model to extract clean, concise threats
+        concise_report = await filter_security_description(raw_description, camera_name)
+        
+        # 5. Send the photo to Telegram captioned with the clean security report
         if TARGET_CHAT_ID:
-            caption_header = f"📸 Live feed: {camera_name.upper()} ({successful_protocol})\n\n"
-            full_caption = f"{caption_header}<i>{description}</i>"
+            telegram_caption = f"📸 <b>Live: {camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             
-            # Telegram caption limit is 1024 characters
-            if len(full_caption) <= 1010:
-                # Description is short, send everything as a photo caption
-                await application_bot.send_photo(
-                    chat_id=TARGET_CHAT_ID,
-                    photo=response_content,
-                    caption=full_caption,
-                    parse_mode="HTML"
-                )
-            else:
-                # Description is too long. Send the photo with a brief caption first...
-                await application_bot.send_photo(
-                    chat_id=TARGET_CHAT_ID,
-                    photo=response_content,
-                    caption=f"📸 Live feed: {camera_name.upper()} ({successful_protocol})",
-                    parse_mode="HTML"
-                )
-                # ...then follow up with the full detailed description as a standard text message
-                await application_bot.send_message(
-                    chat_id=TARGET_CHAT_ID,
-                    text=f"👁️ <b>AI Security Analysis ({camera_name.upper()})</b>:\n\n<i>{description}</i>",
-                    parse_mode="HTML"
-                )
-                
-            return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the description: {description}"
+            # Send photo with concise threat summary
+            await application_bot.send_photo(
+                chat_id=TARGET_CHAT_ID,
+                photo=response_content,
+                caption=telegram_caption,
+                parse_mode="HTML"
+            )
+            
+            # Return the concise report to the outer Emery loop so she knows what she sent you
+            return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the filtered security report: {concise_report}"
             
         return "Failed to send photo: Chat context lost."
         
