@@ -628,6 +628,67 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict:
 
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
+
+async def get_reolink_snapshot(camera_name: str) -> str:
+    """
+    Grabs a live snapshot from a specified Reolink camera channel via secure HTTPS,
+    sends it to the Telegram chat, and describes it using the vision engine.
+    """
+    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
+    
+    # 1. Parse configuration
+    host = os.getenv("REOLINK_HOST")
+    user = os.getenv("REOLINK_USER")
+    password = os.getenv("REOLINK_PASSWORD")
+    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
+    
+    # Map camera names to channel IDs
+    camera_map = {}
+    for item in cameras_raw.split(","):
+        if ":" in item:
+            name, channel = item.split(":")
+            camera_map[name.strip().lower()] = channel.strip()
+            
+    target_name = camera_name.lower().strip()
+    channel = camera_map.get(target_name)
+    
+    if not channel:
+        available_cams = ", ".join(camera_map.keys())
+        return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
+        
+    # 2. Query Reolink CGI API over secure HTTPS (ignores self-signed cert validation via verify=False)
+    snap_url = f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"
+    
+    try:
+        logging.info(f"📹 REOLINK: Securely fetching snapshot from channel {channel}...")
+        r = await http_client.get(snap_url, timeout=15)
+        
+        if r.status_code != 200 or len(r.content) < 1000:
+            logging.error(f"❌ Reolink API returned status {r.status_code} or unexpected payload size.")
+            return f"Failed to get snapshot from {camera_name}. Verify that HTTPS API is enabled on your Reolink device."
+            
+        # 3. Analyze the snapshot using your local vision model
+        b64_image = base64.b64encode(r.content).decode('utf-8')
+        
+        logging.info("👁️ REOLINK: Analyzing secure camera frame with vision model...")
+        description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera.")
+        
+        # 4. Send the physical snapshot photo to Telegram
+        if TARGET_CHAT_ID:
+            await application_bot.send_photo(
+                chat_id=TARGET_CHAT_ID,
+                photo=r.content,
+                caption=f"📸 Live feed: {camera_name.upper()}\n\n<i>{description}</i>",
+                parse_mode="HTML"
+            )
+            return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the description: {description}"
+            
+        return "Failed to send photo: Chat context lost."
+        
+    except Exception as e:
+        logging.error(f"❌ Reolink Tool Crash: {e}", exc_info=True)
+        return f"Error communicating with the security system over HTTPS: {e}"
+
 # Create empty containers first
 AVAILABLE_TOOLS = {}
 tools_schema = []
@@ -781,6 +842,27 @@ if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
             "name": "fetch_web_content", 
             "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long). Use AFTER web_search to do deep research, a deep dive, a report, etc. if needed. MUST pass only the URL as a string. Do not pass any other arguments.", 
             "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }
+    })
+
+if os.getenv("ENABLE_REOLINK", "false").lower() == "true":
+    AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
+    TOOL_STATUS_MESSAGES["get_reolink_snapshot"] = f"{MODEL_NAME} is connecting to your security cameras..."
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "get_reolink_snapshot",
+            "description": "Get a live image stream and AI analysis from a home security camera. Use whenever the user asks to check, look at, view, or patrol a camera location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_name": {
+                        "type": "string",
+                        "description": "The name of the camera to check (e.g., 'driveway', 'backyard', 'frontdoor', 'garage')."
+                    }
+                },
+                "required": ["camera_name"]
+            }
         }
     })
 
