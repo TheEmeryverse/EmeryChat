@@ -141,7 +141,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info("👁️ VISION: Requesting image description directly from Ollama /api/chat...")
     try:
         # Match the endpoint to OLLAMA_URL (ensuring it ends with /api/chat)
-        url = OLLAMA_URL
+        url = "http://192.168.1.129:11434/api/chat"
         if not url.endswith("/api/chat"):
             url = url.rstrip("/")
             if not url.endswith("/api"):
@@ -842,6 +842,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 "num_ctx": ctx_size,
                 "temperature": 0.8,
                 "top_p": 0.9,
+                "num_gpu": 0
             }
         }
         
