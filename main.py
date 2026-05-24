@@ -985,6 +985,36 @@ if is_enabled("ENABLE_REOLINK"): # Reolink Security
     camera_names = []
     for item in raw_cams.split(","):
         if ":" in item:
+            # Safer one-liner: Split and immediately grab the first string, then strip it
+            camera_names.append(item.split(":").strip())
+            
+    # Format list as a readable array string: "'front', 'frontdoor', 'backyard'"
+    camera_list_str = ", ".join([f"'{c}'" for c in camera_names]) if camera_names else "'front', 'frontdoor'"
+    
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "get_reolink_snapshot",
+            "description": "Get a live image stream and AI analysis from a home security camera. Use whenever the user asks to check, look at, view, or patrol a camera location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_name": {
+                        "type": "string",
+                        "description": f"The exact name of the camera to check. You MUST choose exactly one option from this list: {camera_list_str}."
+                    }
+                },
+                "required": ["camera_name"]
+            }
+        }
+    })
+    AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
+    
+    # Dynamically extract real camera names from your environment configurations
+    raw_cams = os.getenv("REOLINK_CAMERAS", "")
+    camera_names = []
+    for item in raw_cams.split(","):
+        if ":" in item:
             parts = item.split(":")
             # Select the first element of the split list, then strip whitespace
             camera_names.append(parts.strip())
