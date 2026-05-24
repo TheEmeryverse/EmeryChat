@@ -138,24 +138,33 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     return prompt
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info("👁️ VISION: Requesting image description...")
+    logging.info("👁️ VISION: Requesting image description from Open WebUI...")
     try:
+        url = "http://192.168.1.121:3000/api/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPEN_WEBUI_KEY}",
+            "Content-Type": "application/json"
+        }
         payload = {
             "model": VISION_MODEL_ID,
             "messages": [
                 {
                     "role": "user",
-                    "content": "What is this image? " + (user_caption or ""),
-                    "images": [b64_data]
+                    "content": [
+                        {"type": "text", "text": "What is this image? " + (user_caption or "")},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}}
+                    ]
                 }
             ],
             "stream": False
         }
-        r = await http_client.post(OLLAMA_URL, json=payload, timeout=300)
+        r = await http_client.post(url, headers=headers, json=payload, timeout=300)
         if r.status_code != 200:
             logging.error(f"❌ Vision Error {r.status_code}: {r.text}")
             return "Failed to describe the image due to a model error."
-        return r.json().get('message', {}).get('content', "No description generated.")
+            
+        data = r.json()
+        return data.get('choices', [{}])[0].get('message', {}).get('content', "No description generated.")
     except Exception as e:
         logging.error(f"❌ Vision Crash: {e}")
         return "Vision engine failure."
