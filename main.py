@@ -686,13 +686,13 @@ Detailed Visual Input:
         logging.error(f"❌ Reolink security filter crash: {e}", exc_info=True)
         return "Activity detected, but security filtering encountered an error."
 
-async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from a Reolink camera
+async def get_reolink_snapshot(camera_name: str) -> str:
     """
     Grabs a live snapshot from a specified Reolink camera channel.
     Attempts HTTPS, falls back to HTTP, and uses a highly disciplined single-stage 
-    vision prompt to get a concise, threat-focused security report in under 45 seconds.
+    vision prompt to get a concise, threat-focused security report.
     """
-    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
+    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera Input: {camera_name}")
     
     # 1. Parse configuration
     host = os.getenv("REOLINK_HOST")
@@ -707,9 +707,38 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
             name, channel = item.split(":")
             camera_map[name.strip().lower()] = channel.strip()
             
+    # Normalize target input string
     target_name = camera_name.lower().strip()
-    channel = camera_map.get(target_name)
+    for word in ["camera", "feed", "view", "stream"]:
+        target_name = target_name.replace(word, "").strip()
+        
+    cleaned_target = target_name.replace(" ", "").replace("_", "").replace("-", "")
     
+    channel = None
+    matched_camera_name = None
+
+    # --- STRICT PASS 1: Cleaned Exact Match ---
+    for key, val in camera_map.items():
+        cleaned_key = key.replace(" ", "").replace("_", "").replace("-", "")
+        if cleaned_key == cleaned_target:
+            channel = val
+            matched_camera_name = key
+            logging.info(f"📹 REOLINK: Exact Match Found! Key: '{key}' maps to Channel: {channel}")
+            break
+            
+    # --- FALLBACK PASS 2: Substring Match (Only if exact match failed) ---
+    if not channel:
+        # Sort keys by length descending so longer keys (like "frontdoor") 
+        # are evaluated before shorter ones (like "front") to prevent greedy collisions
+        sorted_keys = sorted(camera_map.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            cleaned_key = key.replace(" ", "").replace("_", "").replace("-", "")
+            if cleaned_target in cleaned_key or cleaned_key in cleaned_target:
+                channel = camera_map[key]
+                matched_camera_name = key
+                logging.info(f"📹 REOLINK: Fallback Substring Match! Key: '{key}' maps to Channel: {channel}")
+                break
+
     if not channel:
         available_cams = ", ".join(camera_map.keys())
         return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
@@ -743,7 +772,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
                 logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
                 
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
-            logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed, blocked, or offline)")
+            logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed or offline)")
         except Exception as e:
             logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
 
@@ -758,8 +787,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
         b64_image = base64.b64encode(response_content).decode('utf-8')
         logging.info("👁️ REOLINK: Requesting threat analysis from vision model...")
         
-        # This highly disciplined prompt forces the vision model to filter background noise natively
-        security_prompt = f"""You are a professional home security monitoring system checking the live '{camera_name}' camera feed.
+        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
             - Vehicles (type, color, position)
@@ -772,12 +800,11 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
             3. Keep your output extremely concise (exactly 1 or 2 sentences max).
             4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
         
-        # Get the clean, concise description directly in one step
         concise_report = await get_image_description(b64_image, security_prompt)
         
         # 4. Send the photo to Telegram captioned with the clean security report
         if TARGET_CHAT_ID:
-            telegram_caption = f"📸 <b>Live: {camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
+            telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             
             await application_bot.send_photo(
                 chat_id=TARGET_CHAT_ID,
@@ -786,8 +813,8 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
                 parse_mode="HTML"
             )
             
-            return f"SUCCESS: Live photo sent directly to user. Security report was: '{concise_report}'. You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."            
-        
+            return f"SUCCESS: Live photo sent directly to user. Security report was: '{concise_report}'. You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."
+            
         return "Failed to send photo: Chat context lost."
         
     except Exception as e:
@@ -950,8 +977,19 @@ if is_enabled("ENABLE_WEB_SCRAPING"): # Web Scraping
         }
     })
 
-if os.getenv("ENABLE_REOLINK", "false").lower() == "true":
+if is_enabled("ENABLE_REOLINK"): # Reolink Security
     AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
+    
+    # Dynamically extract real camera names from your environment configurations
+    raw_cams = os.getenv("REOLINK_CAMERAS", "")
+    camera_names = []
+    for item in raw_cams.split(","):
+        if ":" in item:
+            camera_names.append(item.split(":").strip())
+            
+    # Format list as a readable array string: "'front', 'frontdoor', 'backyard'"
+    camera_list_str = ", ".join([f"'{c}'" for c in camera_names]) if camera_names else "'front', 'frontdoor'"
+    
     tools_schema.append({
         "type": "function",
         "function": {
@@ -962,7 +1000,7 @@ if os.getenv("ENABLE_REOLINK", "false").lower() == "true":
                 "properties": {
                     "camera_name": {
                         "type": "string",
-                        "description": "The name of the camera to check (e.g., 'driveway', 'backyard', 'frontdoor', 'garage')."
+                        "description": f"The exact name of the camera to check. You MUST choose exactly one option from this list: {camera_list_str}."
                     }
                 },
                 "required": ["camera_name"]
