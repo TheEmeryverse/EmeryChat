@@ -140,32 +140,35 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
 async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info("👁️ VISION: Requesting image description directly from Ollama...")
     try:
-        url = OLLAMA_URL  # Uses http://localhost:11434/api/chat
+        # Convert the configured OLLAMA_URL (/api/chat) to the direct /api/generate endpoint
+        if "/api/chat" in OLLAMA_URL:
+            url = OLLAMA_URL.replace("/api/chat", "/api/generate")
+        else:
+            url = OLLAMA_URL.rstrip("/") + "/api/generate"
         
-        # Strip out any web metadata headers if they somehow slipped in
+        # Strip out any web metadata headers if they are present
         clean_b64 = b64_data.split(",")[-1] if "," in b64_data else b64_data
 
-        prompt = "Analyze this image and describe what you see in detail. Focus on key elements, context, and any text present."
+        # CRUCIAL FOR GEMMA/GOOGLE MULTIMODAL MODELS:
+        # Natively multimodal models require the '<image>' token anchor inside the prompt string.
+        # This acts as the explicit insertion coordinates for the model's vision projector.
+        prompt = "<image>\nAnalyze this image and describe what you see in detail. Focus on key elements, context, and any text present."
         if user_caption:
             prompt += f" Additional context from user: {user_caption}"
 
-        # Pure Ollama local multimodal chat payload
         payload = {
             "model": VISION_MODEL_ID,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [clean_b64]
-                }
-            ],
+            "prompt": prompt,
+            "images": [clean_b64],
             "stream": False,
             "options": {
-                "temperature": 0.3
+                "temperature": 0.2
             }
         }
         
-        logging.info(f"👁️ VISION: Sending image payload to Ollama using model {VISION_MODEL_ID}...")
+        logging.info(f"👁️ VISION: Sending image payload to Ollama ({url}) with model {VISION_MODEL_ID}...")
+        logging.info(f"👁️ VISION: Clean Base64 payload length: {len(clean_b64)} characters.")
+        
         r = await http_client.post(url, json=payload, timeout=180)
         
         if r.status_code != 200:
@@ -173,7 +176,15 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             return "Failed to describe the image due to an Ollama processing error."
             
         data = r.json()
-        description = data.get('message', {}).get('content', "").strip()
+        description = data.get('response', "").strip()
+        
+        # Fallback check: if the visual anchor was stripped, try once without it
+        if not description:
+            logging.warning("⚠️ Vision model returned empty response with visual anchor. Retrying with fallback prompt...")
+            payload["prompt"] = f"Describe this image as best as you can. {user_caption or ''}".strip()
+            r = await http_client.post(url, json=payload, timeout=120)
+            if r.status_code == 200:
+                description = r.json().get('response', "").strip()
         
         if not description:
             logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty text string.")
