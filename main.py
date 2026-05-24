@@ -138,37 +138,44 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     return prompt
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info("👁️ VISION: Requesting image description from Open WebUI...")
+    logging.info("👁️ VISION: Requesting image description directly from Ollama...")
     try:
-        url = "http://192.168.1.121:3000/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPEN_WEBUI_KEY}",
-            "Content-Type": "application/json"
-        }
+        # Send the request directly to Ollama (bypassing Open WebUI's wrapper)
+        url = OLLAMA_URL  # This uses http://localhost:11434/api/chat from your config
+        
         payload = {
             "model": VISION_MODEL_ID,
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": "What is this image? " + (user_caption or "")},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}}
-                    ]
+                    "content": f"Describe this image as best as you can. {user_caption}".strip(),
+                    # Ollama expects an array of raw base64 strings (no "data:image/jpeg;base64," prefix)
+                    "images": [b64_data] 
                 }
             ],
             "stream": False
         }
-        r = await http_client.post(url, headers=headers, json=payload, timeout=300)
+        
+        logging.info(f"👁️ VISION: Sending request to Ollama using model: {VISION_MODEL_ID}...")
+        r = await http_client.post(url, json=payload, timeout=120)
+        
         if r.status_code != 200:
-            logging.error(f"❌ Vision Error {r.status_code}: {r.text}")
-            return "Failed to describe the image due to a model error."
+            logging.error(f"❌ Ollama Vision API Error {r.status_code}: {r.text}")
+            return "Failed to describe the image due to an Ollama API error."
             
         data = r.json()
-        return data.get('choices', [{}])[0].get('message', {}).get('content', "No description generated.")
+        description = data.get('message', {}).get('content', "").strip()
+        
+        if not description:
+            logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty text string.")
+            return "No description generated."
+            
+        logging.info(f"👁️ VISION: Successfully got description ({len(description)} chars)")
+        return description
+        
     except Exception as e:
-        logging.error(f"❌ Vision Crash: {e}")
+        logging.error(f"❌ Ollama Vision Crash: {e}", exc_info=True)
         return "Vision engine failure."
-
 # --- TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
     logging.info("🎙️ VOICE: Generating audio...")
@@ -894,7 +901,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 if part.get("type") == "text":
                     text_parts.append(part["text"])
                 elif part.get("type") == "image_url":
-                    # Extract the raw base64 data from the data URI
+                    # Extract the raw base64 data from the data URL
                     raw_url = part["image_url"]["url"]
                     if "," in raw_url:
                         b64_data = raw_url.split(",")
