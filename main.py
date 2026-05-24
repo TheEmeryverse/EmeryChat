@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from dotenv import load_dotenv
 from urllib.parse import quote
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from collections import deque
 from tghtml import TgHTML
 from telegram import Update
@@ -340,14 +340,28 @@ async def get_calendar_events(): # Fetches User's Google Calendars
                 
                 if is_all_day:
                     s_dt = datetime.strptime(s_raw, '%Y-%m-%d').date()
-                    time_label = "Ongoing" if s_dt < now.date() else "All Day"
+                    e_dt = datetime.strptime(e_raw, '%Y-%m-%d').date()
+                    inclusive_end = e_dt - timedelta(days=1)
+                    
+                    if s_dt < now.date():
+                        time_label = f"Ongoing (ends {inclusive_end.strftime('%b %d')})"
+                    else:
+                        if (e_dt - s_dt).days > 1:
+                            time_label = f"All Day (ends {inclusive_end.strftime('%b %d')})"
+                        else:
+                            time_label = "All Day"
                 else:
                     s_dt = datetime.fromisoformat(s_raw).astimezone(USER_TIMEZONE)
                     e_dt = datetime.fromisoformat(e_raw).astimezone(USER_TIMEZONE)
+                    
+                    end_str = ""
+                    if e_dt.date() > s_dt.date() or e_dt.date() > now.date():
+                        end_str = f" on {e_dt.strftime('%b %d')}"
+                        
                     if s_dt < start_of_day:
-                        time_label = f"Ongoing (until {e_dt.strftime('%I:%M %p')})"
+                        time_label = f"Ongoing (until {e_dt.strftime('%I:%M %p')}{end_str})"
                     else:
-                        time_label = f"{s_dt.strftime('%I:%M %p')} - {e_dt.strftime('%I:%M %p')}"
+                        time_label = f"{s_dt.strftime('%I:%M %p')} - {e_dt.strftime('%I:%M %p')}{end_str}"
                 
                 all_events.append({
                     'summary': item.get('summary', 'No Title'),
@@ -757,7 +771,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     elif part.get("type") == "image_url":
                         raw_url = part["image_url"]["url"]
                         if "," in raw_url:
-                            b64_data = raw_url.split(",")
+                            b64_data = raw_url.split(",", 1)[1]
                         else:
                             b64_data = raw_url
                         image_parts.append(b64_data)
@@ -966,6 +980,109 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
 
 # --- HANDLERS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global TARGET_CHAT_ID
+    chat_id = update.effective_chat.id
+    TARGET_CHAT_ID = chat_id
+    
+    if chat_id not in chat_histories: chat_histories[chat_id] = deque(maxlen=20)
+    
+    is_input_voice = False
+    model_to_use = MODEL_ID # Default model
+    
+    # Capture the current time for this specific message
+    now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p")
+
+    if update.message.voice:
+        is_input_voice = True
+        v_file = await update.message.voice.get_file()
+        transcription = await transcribe_audio(await v_file.download_as_bytearray())
+        if not transcription: return
+        content = f"[{now_str}] {transcription}"
+    elif update.message.photo:
+        model_to_use = VISION_MODEL_ID # Switch to vision model
+        p_file = await update.message.photo[-1].get_file()
+        b64 = base64.b64encode(await p_file.download_as_bytearray()).decode('utf-8')
+        content = [
+            {"type": "text", "text": f"Current Time: {now_str}"},
+            {"type": "text", "text": update.message.caption or "Describe this image in detail."}, 
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        ]
+    else:
+        content = f"[{now_str}] {update.message.text}"
+        
+    logging.info(f"👤 USER PROMPT (Chat: {chat_id}): {content}")
+    chat_histories[chat_id].append({"role": "user", "content": content})
+    
+    # --- TYPING INDICATOR LOOP ---
+    # We create an event to tell the loop when to stop
+    typing_stop = asyncio.Event()
+
+    async def keep_typing():
+        while not typing_stop.is_set():
+            try:
+                # Telegram clears typing after 5 seconds, so we send it every 4 seconds
+                await update.message.reply_chat_action("typing")
+            except Exception as e:
+                logging.debug(f"Typing action failed: {e}")
+            await asyncio.sleep(4)
+
+    # Start the typing task in the background
+    typing_task = asyncio.create_task(keep_typing())
+    # -----------------------------
+
+    try:
+        # Run the engine
+        response_text, voice_sent_via_tool = await emery_engine(chat_histories[chat_id], model_to_use=model_to_use)
+    finally:
+        # Crucial: Stop the typing loop once the engine is finished
+        typing_stop.set()
+        await typing_task
+
+    # Save the assistant text (with raw think tags intact) to history
+    if update.message.photo:
+        description = update.message.caption or "an image"
+        chat_histories[chat_id][-1]["content"] = f"[User sent an image: {description}]"
+        
+    chat_histories[chat_id].append({"role": "assistant", "content": response_text})
+    
+    # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
+    start_tag = "<" + "think" + ">"
+    end_tag = "</" + "think" + ">"
+    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+    
+    clean_response = response_text
+    
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+        # Clean the main response text
+        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+        if thinking_content:
+            CHUNK_SIZE = 3900
+            chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
+            
+            for idx, chunk in enumerate(chunks):
+                if len(chunks) > 1:
+                    header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+                else:
+                    header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+                
+                thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
+                await update.message.reply_text(thinking_msg, parse_mode="HTML")
+    # ---------------------------------------------------------
+    
+    # Send the main reply (voice or text)
+    if is_input_voice and not voice_sent_via_tool:
+        await update.message.reply_chat_action("record_voice")
+        v_out = await get_voice_audio(clean_response)
+        if v_out: 
+            await update.message.reply_voice(voice=v_out, caption="Voice message")
+        else: 
+            await send_safe_large_message(update, emery_format(clean_response))
+    else:
+        if clean_response:
+            await send_safe_large_message(update, emery_format(clean_response))
     global TARGET_CHAT_ID
     chat_id = update.effective_chat.id
     TARGET_CHAT_ID = chat_id
