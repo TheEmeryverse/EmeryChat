@@ -629,7 +629,7 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
 
-async def filter_security_description(raw_description: str, camera_name: str) -> str:
+
     """
     Uses the main text model to filter the verbose raw vision description,
     extracting only active entities, security details, and threats.
@@ -686,11 +686,11 @@ Detailed Visual Input:
         logging.error(f"❌ Reolink security filter crash: {e}", exc_info=True)
         return "Activity detected, but security filtering encountered an error."
 
-async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from a Reolink camera
+async def get_reolink_snapshot(camera_name: str) -> str:
     """
     Grabs a live snapshot from a specified Reolink camera channel.
-    Attempts HTTPS, falls back to HTTP, analyzes with vision, filters threats via main LLM,
-    and sends the photo to Telegram with a concise, actionable security report.
+    Attempts HTTPS, falls back to HTTP, and uses a highly disciplined single-stage 
+    vision prompt to get a concise, threat-focused security report in under 45 seconds.
     """
     logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
     
@@ -758,23 +758,27 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
         b64_image = base64.b64encode(response_content).decode('utf-8')
         logging.info("👁️ REOLINK: Requesting threat analysis from vision model...")
         
-        # Security focused prompt instructs the vision model to look for threats/activity
-        security_prompt = (
-            f"This is a live feed from the {camera_name} camera. "
-            "Please analyze for any threats, vehicles, or people and describe them in detail. "
-            "Look for anything suspicious, seemingly out of place, or posing a potential threat."
-        )
+        # This highly disciplined prompt forces the vision model to filter background noise natively
+        security_prompt = f"""You are a professional home security monitoring system checking the live '{camera_name}' camera feed.
+            Analyze this image and report ONLY active entities, security hazards, or items of interest:
+            - People (exact clothing, appearance, behavior)
+            - Vehicles (type, color, position)
+            - Deliveries, packages, or tools left out of place
+            - Animals or unexpected objects on walkways
+
+            STRICT SECURITY FILTER RULES:
+            1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
+            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up your driveway").
+            3. Keep your output extremely concise (exactly 1 or 2 sentences max).
+            4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
         
-        raw_description = await get_image_description(b64_image, security_prompt)
+        # Get the clean, concise description directly in one step
+        concise_report = await get_image_description(b64_image, security_prompt)
         
-        # 4. Filter description through main model to extract clean, concise threats
-        concise_report = await filter_security_description(raw_description, camera_name)
-        
-        # 5. Send the photo to Telegram captioned with the clean security report
+        # 4. Send the photo to Telegram captioned with the clean security report
         if TARGET_CHAT_ID:
             telegram_caption = f"📸 <b>Live: {camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             
-            # Send photo with concise threat summary
             await application_bot.send_photo(
                 chat_id=TARGET_CHAT_ID,
                 photo=response_content,
@@ -782,7 +786,6 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets a snapshot from 
                 parse_mode="HTML"
             )
             
-            # Return the concise report to the outer Emery loop so she knows what she sent you
             return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the filtered security report: {concise_report}"
             
         return "Failed to send photo: Chat context lost."
