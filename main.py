@@ -142,28 +142,45 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
     try:
         url = OLLAMA_URL  # Uses http://localhost:11434/api/chat
         
-        # Ensure no header metadata remains in the base64 payload
+        # Strip out any web metadata headers if they somehow slipped in
         clean_b64 = b64_data.split(",")[-1] if "," in b64_data else b64_data
 
+        prompt = "Analyze this image and describe what you see in detail. Focus on key elements, context, and any text present."
+        if user_caption:
+            prompt += f" Additional context from user: {user_caption}"
+
+        # Pure Ollama local multimodal chat payload
         payload = {
             "model": VISION_MODEL_ID,
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Describe this image as best as you can. {user_caption}".strip(),
-                    "images": [clean_b64] 
+                    "content": prompt,
+                    "images": [clean_b64]
                 }
             ],
-            "stream": False
+            "stream": False,
+            "options": {
+                "temperature": 0.3
+            }
         }
         
-        r = await http_client.post(url, json=payload, timeout=120)
+        logging.info(f"👁️ VISION: Sending image payload to Ollama using model {VISION_MODEL_ID}...")
+        r = await http_client.post(url, json=payload, timeout=180)
+        
         if r.status_code != 200:
             logging.error(f"❌ Ollama Vision API Error {r.status_code}: {r.text}")
-            return "Failed to describe the image due to an Ollama API error."
+            return "Failed to describe the image due to an Ollama processing error."
             
         data = r.json()
-        return data.get('message', {}).get('content', "No description generated.").strip()
+        description = data.get('message', {}).get('content', "").strip()
+        
+        if not description:
+            logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty text string.")
+            return "No description generated."
+            
+        logging.info(f"👁️ VISION: Successfully got description ({len(description)} chars)")
+        return description
         
     except Exception as e:
         logging.error(f"❌ Ollama Vision Crash: {e}", exc_info=True)
@@ -784,41 +801,37 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     system_msg = {"role": "system", "content": get_current_system_prompt()}
     voice_sent_via_tool = False
     
-    # --- OLLAMA MULTIMODAL CONVERTER ---
-    # Convert OpenAI-style photo payloads into clean Ollama-native format
+    # --- AUTOMATIC HISTORY SANITIZER ---
+    # Heals history by stripping out any giant base64 strings or complex structures
     ollama_history = []
     for msg in history_buffer:
         clean_msg = {"role": msg["role"]}
+        content = msg.get("content", "")
         
-        # If content is already formatted as an OpenAI multimodal list (images + text)
-        if isinstance(msg.get("content"), list):
+        # 1. If content is a structured list (OpenAI-style multimodal payload)
+        if isinstance(content, list):
             text_parts = []
-            image_parts = []
-            
-            for part in msg["content"]:
-                if part.get("type") == "text":
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
                     text_parts.append(part["text"])
-                elif part.get("type") == "image_url":
-                    raw_url = part["image_url"]["url"]
-                    if isinstance(raw_url, str) and "," in raw_url:
-                        # Extract only the base64 part, discarding "data:image/jpeg;base64,"
-                        b64_data = raw_url.split(",", 1)
-                    else:
-                        b64_data = raw_url
-                    image_parts.append(b64_data)
+            clean_msg["content"] = " ".join(text_parts) if text_parts else "[Sent an image]"
             
-            clean_msg["content"] = " ".join(text_parts)
-            if image_parts:
-                clean_msg["images"] = image_parts
+        # 2. If content is a string containing a raw, un-scrubbed base64 text stream
+        elif isinstance(content, str):
+            # If a single string has no spaces in a 2000-char block, it's a base64 sequence
+            if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
+                logging.warning("🧹 SANITIZER: Detected and scrubbed legacy base64 text block from chat history!")
+                clean_msg["content"] = "[Image base64 data removed for stability]"
+            else:
+                clean_msg["content"] = content
         else:
-            # Handle standard text-only messages
-            clean_msg["content"] = msg.get("content", "")
+            clean_msg["content"] = str(content)
             
         ollama_history.append(clean_msg)
     # -----------------------------------
     
     for loop_count in range(TOOL_LOOP):
-        # Inject the updated system message at the beginning of each turn
+        # Inject the system prompt at the beginning
         full_context = [system_msg] + ollama_history
         
         payload = {
@@ -838,17 +851,10 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
-            # --- SAFE DEBUG LOGGING (Prevents terminal flooding) ---
+            # --- SAFE DEBUG LOGGING ---
             debug_payload = {k: v for k, v in payload.items()}
-            debug_messages = []
-            for m in payload.get("messages", []):
-                m_copy = m.copy()
-                if "images" in m_copy and isinstance(m_copy["images"], list):
-                    m_copy["images"] = [f"<base64_data_length_{len(img)}>" for img in m_copy["images"]]
-                debug_messages.append(m_copy)
-            debug_payload["messages"] = debug_messages
             logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
-            # --------------------------------------------------------
+            # --------------------------
 
             logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
             r = await http_client.post(url, json=payload, timeout=300)
@@ -862,12 +868,10 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             
             logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
             
-            # --- TOOL CALLING LOGIC ---
+            # --- TOOL CALL PROCESSOR ---
             if msg.get("tool_calls"):
-                # Append assistant's tool-use choice to both history contexts
                 history_buffer.append(msg)
                 ollama_history.append(msg)
-                
                 for tc in msg['tool_calls']:
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
@@ -879,16 +883,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
-                    # Execute tool
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
                     
-                    # Append tool execution results back to tracking histories
-                    tool_response_msg = {"role": "tool", "content": str(result)}
-                    history_buffer.append(tool_response_msg)
-                    ollama_history.append(tool_response_msg)
+                    tool_response = {"role": "tool", "content": str(result)}
+                    history_buffer.append(tool_response)
+                    ollama_history.append(tool_response)
                 continue
             
-            # --- RAW CONTENT PARSING ---
+            # --- RESPONSE CONSTRUTOR ---
             content = msg.get('content', "")
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             
