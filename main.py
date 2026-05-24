@@ -631,8 +631,8 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict:
 
 async def get_reolink_snapshot(camera_name: str) -> str:
     """
-    Grabs a live snapshot from a specified Reolink camera channel via secure HTTPS,
-    sends it to the Telegram chat, and describes it using the vision engine.
+    Grabs a live snapshot from a specified Reolink camera channel.
+    Attempts HTTPS first, automatically falling back to HTTP if connection is refused.
     """
     logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
     
@@ -656,61 +656,67 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         available_cams = ", ".join(camera_map.keys())
         return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
         
-    # 2. Query Reolink CGI API over secure HTTPS
-    snap_url = f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"
+    # We will try secure HTTPS first, then fallback to standard HTTP
+    protocols = [
+        {"name": "HTTPS", "url": f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"},
+        {"name": "HTTP", "url": f"http://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"}
+    ]
     
+    response_content = None
+    successful_protocol = None
+
+    # 2. Query Reolink API (Sequential Attempt)
+    for proto in protocols:
+        try:
+            logging.info(f"📹 REOLINK: Attempting connection via {proto['name']} to {host}...")
+            r = await http_client.get(proto["url"], timeout=8)
+            
+            if r.status_code == 200:
+                # Ensure we actually got an image (JPEG hex starts with FF D8)
+                if r.content.startswith(b'\xff\xd8'):
+                    response_content = r.content
+                    successful_protocol = proto["name"]
+                    logging.info(f"✅ REOLINK: Securely fetched snapshot using {proto['name']}!")
+                    break
+                else:
+                    # It's an API text error rather than a socket connection error
+                    error_msg = r.content.decode('utf-8', errors='ignore')
+                    logging.warning(f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {error_msg}")
+            else:
+                logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
+                
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError) as e:
+            logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed, blocked, or offline)")
+        except Exception as e:
+            logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
+
+    # If both protocols failed to get an image
+    if not response_content:
+        return (f"FAILED: Could not connect to your Reolink NVR at {host}. "
+                f"1. Please REBOOT your Reolink NVR to apply the HTTPS/CGI settings. "
+                f"2. If the bot runs in Docker, ensure Docker's firewall allows routing to your LAN.")
+
+    # 3. Analyze the snapshot using your local vision model
     try:
-        logging.info(f"📹 REOLINK: Securely fetching snapshot from channel {channel} on {host}...")
-        r = await http_client.get(snap_url, timeout=15)
-        
-        # --- DIAGNOSTIC LOGS ---
-        logging.info(f"📹 REOLINK: Response Status Code: {r.status_code}")
-        logging.info(f"📹 REOLINK: Content Type: {r.headers.get('content-type', 'Unknown')}")
-        logging.info(f"📹 REOLINK: Content Length: {len(r.content)} bytes")
-        
-        # Check if the camera returned an HTTP error (like 401 Unauthorized or 403 Forbidden)
-        if r.status_code != 200:
-            return f"FAILED: Reolink returned HTTP status {r.status_code}. Please make sure 'CGI' and 'HTTPS' are fully enabled in Network -> Advanced -> Server Settings on the Reolink device."
-
-        # Reolink API Quirks: Sometimes it returns 200 OK but with a JSON error body instead of an image.
-        # Valid JPEG images always start with the hexadecimal bytes FF D8.
-        is_jpeg = r.content.startswith(b'\xff\xd8')
-        
-        if not is_jpeg:
-            # It's likely a JSON error block. Let's decode and read it.
-            try:
-                error_response = r.content.decode('utf-8', errors='ignore')
-                logging.error(f"❌ Reolink API returned error message: {error_response}")
-                if "Invalid password" in error_response or "password error" in error_response:
-                    return "FAILED: Reolink security system rejected the request due to an invalid username or password."
-                return f"FAILED: Reolink system returned API error: {error_response}"
-            except Exception:
-                return f"FAILED: Reolink didn't return a valid JPEG picture. Received payload: {r.content[:200]}"
-
-        # 3. Analyze the snapshot using your local vision model
-        b64_image = base64.b64encode(r.content).decode('utf-8')
-        
-        logging.info("👁️ REOLINK: Analyzing secure camera frame with vision model...")
+        b64_image = base64.b64encode(response_content).decode('utf-8')
+        logging.info("👁️ REOLINK: Analyzing camera frame with vision model...")
         description = await get_image_description(b64_image, f"This is a live feed from the {camera_name} camera.")
         
-        # 4. Send the physical snapshot photo to Telegram
+        # 4. Send the photo to Telegram
         if TARGET_CHAT_ID:
             await application_bot.send_photo(
                 chat_id=TARGET_CHAT_ID,
-                photo=r.content,
-                caption=f"📸 Live feed: {camera_name.upper()}\n\n<i>{description}</i>",
+                photo=response_content,
+                caption=f"📸 Live feed: {camera_name.upper()} ({successful_protocol})\n\n<i>{description}</i>",
                 parse_mode="HTML"
             )
             return f"Successfully sent the live snapshot of the {camera_name} camera to the user with the description: {description}"
             
         return "Failed to send photo: Chat context lost."
         
-    except httpx.ConnectTimeout:
-        logging.error(f"❌ Reolink Connection Timeout at {host}. Is the IP correct?")
-        return f"FAILED: Connection timeout while trying to reach the Reolink device at {host}. Verify the IP address."
     except Exception as e:
-        logging.error(f"❌ Reolink Tool Crash: {e}", exc_info=True)
-        return f"Error communicating with the security system over HTTPS: {e}"
+        logging.error(f"❌ Reolink Tool Analysis/Send Crash: {e}", exc_info=True)
+        return f"Successfully grabbed the image via {successful_protocol}, but failed to analyze/send it: {e}"
 
 # Create empty containers first
 AVAILABLE_TOOLS = {}
@@ -956,7 +962,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
 
         try:
             # Safe terminal logging (excludes raw image dumps)
-            debug_payload = {k: v for k, v in payload.items()}
+            debug_payload = {k: v for k, v in payload.items() if k != "tools"}
             logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
 
             logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
