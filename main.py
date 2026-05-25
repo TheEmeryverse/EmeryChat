@@ -1263,14 +1263,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     # --- SILENT HANDSHAKE DETECTION ---
-    # Strip any potential punctuation (e.g., "DONE.", "done!") to see if only the handshake remain
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     
     if handshake_check == "DONE":
         logging.info("🤫 HANDSHAKE: Suppressing final text message because camera photo was already delivered.")
-        return  # Silent exit! Prevents double-texting
+        return  # Silent exit! Prevents duplicate texts
 
-    # If not suppressing, display the thinking block (if one exists)
+    # Display the thinking block if one exists
     if think_match and thinking_content:
         CHUNK_SIZE = 3900
         chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
@@ -1285,52 +1284,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(thinking_msg, parse_mode="HTML")
     # ---------------------------------------------------------
 
-    # Send the main reply (voice or text)
+    # --- SINGLE FINAL REPLY DISPATCHER ---
     if is_input_voice and not voice_sent_via_tool:
         await update.message.reply_chat_action("record_voice")
         v_out = await get_voice_audio(clean_response)
         if v_out:
             await update.message.reply_voice(voice=v_out, caption="Voice message")
         else:
-            await send_safe_large_message(update, emery_format(clean_response))
-    else:
-        if clean_response:
-            await send_safe_large_message(update, emery_format(clean_response))
-    
-    # --- THINKING SPLITTER LOGIC (WITH AUTOMATIC CHUNKING) ---
-    start_tag = "<" + "think" + ">"
-    end_tag = "</" + "think" + ">"
-    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
-    
-    clean_response = response_text
-    
-    if think_match:
-        thinking_content = think_match.group(1).strip()
-        # Clean the main response text
-        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
-        
-        if thinking_content:
-            CHUNK_SIZE = 3900
-            chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
-            
-            for idx, chunk in enumerate(chunks):
-                if len(chunks) > 1:
-                    header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
-                else:
-                    header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
-                
-                thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
-                await update.message.reply_text(thinking_msg, parse_mode="HTML")
-    # ---------------------------------------------------------
-    
-    # Send the main reply (voice or text)
-    if is_input_voice and not voice_sent_via_tool:
-        await update.message.reply_chat_action("record_voice")
-        v_out = await get_voice_audio(clean_response)
-        if v_out: 
-            await update.message.reply_voice(voice=v_out, caption="Voice message")
-        else: 
             await send_safe_large_message(update, emery_format(clean_response))
     else:
         if clean_response:
