@@ -786,47 +786,33 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         
         # --- STAGE 1: Broad Scene Description (For LLM Memory Context) ---
         logging.info("👁️ VISION [1/2]: Generating scene context...")
-        context_prompt = f"Describe the layout, background structures, and stationary objects in this image from the {matched_camera_name} camera."
+        context_prompt = (
+            f"This is a live feed from the {matched_camera_name} camera. "
+            "Concisely describe the layout, stationary structures, background, "
+            "and visible inanimate objects in the frame."
+        )
         scene_context = await get_image_description(b64_image, context_prompt)
         
         # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [2/2]: Running threat analysis...")
-        security_prompt = f"Describe any people, vehicles, animals, or packages visible in this {matched_camera_name} camera feed."
-        
+        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
+            Analyze this image and report ONLY active entities, security hazards, or items of interest:
+            - People (exact clothing, appearance, behavior)
+            - Vehicles (type, color, position)
+            - Deliveries, packages, or tools left out of place
+            - Animals or unexpected objects on walkways
+
+        STRICT SECURITY FILTER RULES:
+            1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
+            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up the driveway").
+            3. Keep your output extremely concise (exactly 1 or 2 sentences max).
+            4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
+            
         concise_report = await get_image_description(b64_image, security_prompt)
         logging.info(f"👁️ VISION [2/2] Raw Response: '{concise_report}'")
         
-        # Clean up empty or negative responses from small models like moondream
-        def check_if_clear(report):
-            if not report:
-                return True
-            lower_report = report.lower()
-            # Split text by periods, semicolons, and contrastive conjunctions
-            clauses = re.split(r'[.;]|\bbut\b|\bhowever\b|\bexcept\b|\byet\b', lower_report)
-            threat_keywords = {
-                'person', 'people', 'someone', 'man', 'woman', 'child', 'individual', 
-                'figure', 'intruder', 'human', 'car', 'cars', 'vehicle', 'vehicles', 
-                'truck', 'trucks', 'suv', 'van', 'motorcycle', 'bike', 'package', 
-                'packages', 'delivery', 'deliveries', 'box', 'envelope', 'dog', 
-                'cat', 'deer', 'fox', 'coyote', 'raccoon', 'bear'
-            }
-            negation_words = {'no', 'not', 'none', 'never', 'without', 'clear'}
-            detected_threats = []
-            
-            for clause in clauses:
-                clause = clause.strip()
-                if not clause:
-                    continue
-                clean_clause = re.sub(r'[^\w\s]', ' ', clause)
-                words = clean_clause.split()
-                clause_threats = [w for w in words if w in threat_keywords]
-                if clause_threats:
-                    has_negation = any(neg in words for neg in negation_words)
-                    if not has_negation:
-                        detected_threats.extend(clause_threats)
-            return len(detected_threats) == 0
-
-        if check_if_clear(concise_report):
+        # Fallback if vision analysis returns empty response
+        if not concise_report or not concise_report.strip():
             concise_report = "No active threats or activity detected."
         
         # 4. Send the photo to Telegram captioned with the clean threat report
