@@ -188,7 +188,7 @@ EmeryChat includes an advanced local memory module that stores user facts and pr
 ```
 
 * **Staging Area:** When the bot learns a new detail, it calls the `save_user_memory` tool. This appends the fact to a `## Raw Memory Intake` header in `memory.md`.
-* **Background Consolidation:** In the background, EmeryChat spawns a separate non-blocking asynchronous task using the secondary coprocessor model (`VISION_MODEL_ID`) to parse `memory.md`, deduplicate logs, resolve contradictions, categorise information into preferences/logs, and clear the raw staging area.
+* **Background Consolidation:** In the background, EmeryChat spawns a separate non-blocking asynchronous task using the secondary coprocessor model (`VISION_MODEL_ID`) to parse `memory.md`, deduplicate logs, resolve contradictions, categorize information into preferences/logs, and clear the raw staging area.
 * **Memory Management Commands:**
   * Send `/clear` to clear current chat thread context history.
   * Send `/wipe` to wipe the persistent `memory.md` file back to the baseline config template (reads user configurations from `.env`).
@@ -239,7 +239,7 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   REOLINK_USER=admin
   REOLINK_PASSWORD=your_nvr_password
   REOLINK_CAMERAS=frontdoor:0,backyard:1  # Map of friendly_name:nvr_channel
-  REOLINK_CAMERA_DESCRIPTIONS=frontdoor:ドアベルカメラ... # Helps vision model understand context
+  REOLINK_CAMERA_DESCRIPTIONS=frontdoor:doorbell_camera_facing_porch... # Helps vision model understand context
   ENABLE_REOLINK_POLLING=true  # Background person detection trigger
   ```
 </details>
@@ -398,7 +398,7 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `NASA_API_KEY` | `DEMO_KEY` | Developer API key from NASA. |
 | `ENABLE_VOICE` | `false` | Enable outbound voice message (Kokoro TTS). |
 | `TTS_URL` | `http://localhost:8880/v1/audio/...` | Connection endpoint for Kokoro server. |
-| `TTS_VOICE` | `af_heart` | Voice voice model profile. |
+| `TTS_VOICE` | `af_heart` | Kokoro TTS voice model profile. |
 | `ENABLE_IMAGEGEN` | `false` | Enable Gemini image generation. |
 | `GEMINI_API_KEY` | *Required if ImageGen active* | Developer API key from Google. |
 | `ENABLE_SEARCH` | `false` | Enable web search query tool. |
