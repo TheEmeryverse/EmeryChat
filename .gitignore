@@ -10,3 +10,8 @@ script.py
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Personal Memory files
+memory.md
+memory.md.bak
+test_memory_temp.md

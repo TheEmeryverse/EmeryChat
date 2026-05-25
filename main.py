@@ -38,6 +38,10 @@ OPEN_WEBUI_KEY=os.getenv("OPEN_WEBUI_KEY", "blank") # Open WebUI API Key
 THINK=os.getenv("ENABLE_THINKING", "true").lower() == "true" # Toggles the thinking engine (use this for thinking models)
 MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # The Model ID of the main model for response and text generation, through Ollama
 VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Ollama
+VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat") # Ollama URL for Vision/Task coprocessor on Mac Mini M4
+ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "true").lower() == "true" # Toggles the memory engine
+MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md") # Path to memory.md
+MEMORY_THRESHOLD = int(os.getenv("MEMORY_THRESHOLD", "4000")) # Character threshold before memory is filtered
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG query URL
 NASA_API_KEY = os.getenv("NASA_API_KEY", "blank") # For NASA's Image of the Day
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "blank") # For Nano Banana Pro image generation
@@ -118,6 +122,297 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
         return r.json().get('text', "")
     except Exception as e:
         logging.error(f"❌ STT Error: {e}"); return ""
+
+async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
+    """
+    Queries the fast, unified-memory gemma4:e4b model on the Mac Mini M4.
+    Used to offload processing tasks from the main model's CPU.
+    """
+    url = VISION_OLLAMA_URL
+    if not url.endswith("/api/chat"):
+        url = url.rstrip("/")
+        if not url.endswith("/api"):
+            url += "/api"
+        url += "/chat"
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": VISION_MODEL_ID,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": -1,
+        "think": True,
+        "options": {
+            "num_ctx": 8192
+        }
+    }
+    
+    try:
+        logging.info(f"⚡ FAST MODEL: Querying {VISION_MODEL_ID} on M4 Mac...")
+        r = await http_client.post(url, json=payload, timeout=180)
+        if r.status_code != 200:
+            logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {r.text}")
+            return ""
+            
+        data = r.json()
+        content = data.get('message', {}).get('content', "").strip()
+        
+        # Clean think tags if the model uses reasoning
+        content = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', content, flags=re.DOTALL).strip()
+        content = re.sub(r'</?[tT]hink>', '', content).strip()
+        
+        return content
+    except Exception as e:
+        logging.error(f"❌ FAST MODEL: Crash querying {VISION_MODEL_ID}: {e}", exc_info=True)
+        return ""
+
+def retrieve_relevant_memories(user_query: str) -> str:
+    """
+    Reads memory.md and performs keyword filtering against the user's latest query
+    to load only relevant memories, keeping the CPU-only prompt evaluation window small.
+    """
+    if not os.path.exists(MEMORY_FILE_PATH):
+        return ""
+        
+    try:
+        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        # If the file is small, load it entirely to ensure maximum context
+        if len(content) < MEMORY_THRESHOLD:
+            return content
+            
+        # If larger, parse and filter sections to save context tokens on CPU
+        lines = content.splitlines()
+        
+        # Simple parser to separate critical header sections (Profile, Context)
+        # from General Facts section which we will filter by keyword.
+        profile_context_lines = []
+        general_facts_lines = []
+        
+        current_section = None
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_section = stripped.lower()
+                
+            # Keep header sections intact
+            if current_section in ["## user profile & preferences", "## project & system context"]:
+                profile_context_lines.append(line)
+            # Route general facts to a list we will filter
+            elif current_section in ["## general facts & logs", "## raw memory intake"]:
+                # Keep section headers, but only filter bullets
+                if stripped.startswith("## ") or not stripped:
+                    general_facts_lines.append(line)
+                elif stripped.startswith("- ") or stripped.startswith("* "):
+                    general_facts_lines.append(line)
+            else:
+                # Outside major sections (like main title)
+                if not stripped.startswith("## "):
+                    profile_context_lines.append(line)
+                    
+        # Tokenize user query to extract keywords
+        # 1. Clean query (lowercase, remove punctuation)
+        clean_query = re.sub(r'[^\w\s]', '', user_query.lower())
+        words = clean_query.split()
+        
+        # 2. Exclude common stop words
+        stop_words = {
+            "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", 
+            "he", "him", "his", "she", "her", "hers", "it", "its", "they", "them", "their", 
+            "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", 
+            "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", 
+            "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", 
+            "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", 
+            "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", 
+            "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", 
+            "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", 
+            "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", 
+            "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
+            "please", "emery", "remember"
+        }
+        keywords = [w for w in words if w not in stop_words and len(w) > 2]
+        
+        if not keywords:
+            # If no significant keywords found, just return the profile sections to save space
+            return "\n".join(profile_context_lines)
+            
+        # 3. Scan general facts and keep matching lines
+        matched_facts = []
+        for line in general_facts_lines:
+            stripped = line.strip()
+            if stripped.startswith("- ") or stripped.startswith("* "):
+                # It's a fact bullet, check for keyword match
+                lower_fact = stripped.lower()
+                if any(kw in lower_fact for kw in keywords):
+                    matched_facts.append(line)
+            else:
+                # Keep structure/spacing
+                matched_facts.append(line)
+                
+        # Combine profile context with matched facts
+        final_memories = profile_context_lines + ["\n## Relevant Recalled Memories"] + matched_facts
+        return "\n".join(final_memories)
+        
+    except Exception as e:
+        logging.error(f"❌ MEMORY ENGINE: Error retrieving memories: {e}", exc_info=True)
+        # Fallback to empty string in case of reading crash
+        return ""
+
+async def save_user_memory(fact: str) -> str:
+    """
+    Saves a new fact, preference, or critical piece of information about the user or their environment
+    to the persistent memory log. Use when the user shares something they expect you to remember long-term.
+    """
+    logging.info(f"💾 MEMORY: Appending new fact to staging area: '{fact}'")
+    if not os.path.exists(MEMORY_FILE_PATH):
+        # Create default if missing
+        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write("# Emery's Memory Log\n\n## User Profile & Preferences\n\n## Project & System Context\n\n## General Facts & Logs\n\n## Raw Memory Intake\n")
+
+    try:
+        # Append to the Raw Memory Intake section of memory.md
+        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        # Standardize Raw Memory Intake heading presence
+        heading = "## Raw Memory Intake"
+        if heading not in content:
+            content += f"\n\n{heading}\n"
+            
+        # Insert the fact under the heading
+        new_fact_line = f"- {fact.strip()}"
+        
+        # We find the heading and inject right after it
+        parts = content.split(heading)
+        # parts[0] is everything before ## Raw Memory Intake, parts[1] is everything after
+        prefix = parts[0].rstrip()
+        suffix = parts[1].strip()
+        
+        updated_suffix = f"\n{new_fact_line}"
+        if suffix:
+            updated_suffix += f"\n{suffix}"
+            
+        updated_content = f"{prefix}\n\n{heading}{updated_suffix}\n"
+        
+        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(updated_content)
+            
+        # Trigger background consolidation using the fast model
+        logging.info("💾 MEMORY: Scheduling background memory consolidation...")
+        asyncio.create_task(consolidate_memory_background())
+        
+        return f"Successfully saved to memory log staging: '{fact}'"
+        
+    except Exception as e:
+        logging.error(f"❌ MEMORY TOOL: Failed to write memory: {e}", exc_info=True)
+        return f"Failed to save fact to memory: {e}"
+
+_is_consolidating = False
+
+async def consolidate_memory_background() -> None:
+    """
+    A background consolidation task that reads memory.md, runs the gemma4:e4b coprocessor model
+    on the Mac Mini M4 to deduplicate, sort, and organize the list, and then saves it.
+    This keeps the main chat model from blocking on heavy processing task execution.
+    """
+    global _is_consolidating
+    if _is_consolidating:
+        logging.info("💾 CONSOLIDATOR: Memory consolidation is already in progress. Skipping duplicate run.")
+        return
+
+    logging.info("💾 CONSOLIDATOR: Starting background memory consolidation...")
+    
+    if not os.path.exists(MEMORY_FILE_PATH):
+        logging.warning("⚠️ CONSOLIDATOR: memory.md does not exist. Aborting consolidation.")
+        return
+        
+    _is_consolidating = True
+    try:
+        # Prevent concurrent file reads/writes using a simple sleep
+        await asyncio.sleep(0.5)
+        
+        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+            current_markdown = f.read()
+            
+        system_prompt = (
+            "You are Emery's Memory Consolidation System. Your job is to process the memory log (written in Markdown) "
+            "and merge any new facts listed under '## Raw Memory Intake' into the main categories:\n"
+            "- '## User Profile & Preferences'\n"
+            "- '## Project & System Context'\n"
+            "- '## General Facts & Logs'\n\n"
+            "Rules:\n"
+            "1. Categorize all raw facts from '## Raw Memory Intake' into their appropriate section.\n"
+            "2. Completely empty/clear the '## Raw Memory Intake' section so it has no bullet points listed under it anymore.\n"
+            "3. Deduplicate facts. If a new fact matches an existing one, merge them or keep the most detailed/recent one.\n"
+            "4. Resolve contradictions: if a new fact directly contradicts an old one (e.g., 'User moved from NYC to Seattle'), update the profile/fact with the newer information and remove the obsolete one.\n"
+            "5. Keep the exact markdown section structure. Maintain bullet points. Output ONLY the updated markdown file content, starting with '# Emery's Memory Log'. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
+        )
+        
+        user_prompt = f"Here is the current memory file content:\n\n{current_markdown}\n\nPlease consolidate it now."
+        
+        consolidated = await query_fast_model(user_prompt, system_prompt)
+        
+        if not consolidated or not consolidated.startswith("# Emery's Memory Log"):
+            # Validation safeguard: if the fast model returned an error or completely hallucinated/mangled structure, abort writing
+            logging.error(f"❌ CONSOLIDATOR: Fast model returned invalid markdown. Aborting overwrite. Response: '{consolidated[:200]}...'")
+            return
+            
+        # Safety check: make sure the Raw Memory Intake section exists but is empty of bullets
+        if "## Raw Memory Intake" not in consolidated:
+            consolidated += "\n\n## Raw Memory Intake\n"
+            
+        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(consolidated)
+            
+        logging.info("💾 CONSOLIDATOR: Background memory consolidation completed successfully!")
+        
+    except Exception as e:
+        logging.error(f"❌ CONSOLIDATOR: Background task crash: {e}", exc_info=True)
+    finally:
+        _is_consolidating = False
+
+def wipe_memory() -> bool:
+    """
+    Overwrites memory.md with the default baseline template structure,
+    clearing all custom saved facts and preferences.
+    """
+    logging.info("🧠 MEMORY: Wiping all memories and restoring baseline template...")
+    baseline_template = (
+        f"# Emery's Memory Log\n\n"
+        f"## User Profile & Preferences\n"
+        f"- Name: {USER_NAME}\n"
+        f"- Location: {USER_LOCATION}\n"
+        f"- Timezone: {USER_TIMEZONE}\n"
+        f"- Birthday: {USER_BIRTHDAY}\n"
+        f"- Family: {USER_FAMILY}\n"
+        f"- Profession: {USER_PROFESSION}\n\n"
+        f"## Project & System Context\n"
+        f"- Repository: EmeryChat\n"
+        f"- Platform: Python Telegram Bot (python-telegram-bot)\n"
+        f"- Primary Chat Model: gemma4:26b MoE (local CPU-only, running on AMD 5950X / 32GB RAM)\n"
+        f"- Vision & Task Coprocessor Model: gemma4:e4b (running on Mac Mini M4 @ 192.168.1.129)\n\n"
+        f"## General Facts & Logs\n\n"
+        f"## Raw Memory Intake\n"
+    )
+    try:
+        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(baseline_template)
+        return True
+    except Exception as e:
+        logging.error(f"❌ WIPE MEMORY: Failed to wipe memory file: {e}", exc_info=True)
+        return False
+
+async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram handler for /wipe command."""
+    if wipe_memory():
+        await update.message.reply_text("🧠 Memory wiped successfully and re-initialized to baseline template.")
+    else:
+        await update.message.reply_text("❌ Failed to wipe memory due to a filesystem error.")
 
 def get_relative_holiday(year, month, weekday, index):
     """
@@ -292,7 +587,7 @@ def get_active_birthday_info(birthday_str, today_date):
     logging.info(f"🎂 DATE MATH: No active birthday alerts for {USER_NAME} (next occurrence is in {diff} days).")
     return ""
 
-def get_current_system_prompt(): # Injects the system prompt into model's context
+def get_current_system_prompt(user_query=""): # Injects the system prompt into model's context
     now = datetime.now(USER_TIMEZONE)
     now_str = now.strftime("%A, %B %d, %Y at %I:%M %p") # gets current time and date
     today_date = now.date()
@@ -303,6 +598,14 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     if active_bday or active_hols:
         notifications = f"\n\n# Dynamic Event Alerts{active_bday}{active_hols}"
         
+    memory_section = ""
+    memory_instruction = ""
+    if ENABLE_MEMORY:
+        recalled = retrieve_relevant_memories(user_query)
+        if recalled:
+            memory_section = f"\n\n# Long-Term Persistent Memory\n{recalled}"
+        memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
+
     prompt = f"""# Identity
 Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 
@@ -310,7 +613,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.
+- Do not sycophanymically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.
@@ -322,7 +625,7 @@ Your tone is serious, logical, and straight to the point. You are an expert in m
 - User's name: {USER_NAME}
 - User's birthday: {USER_BIRTHDAY}
 - User's family: {USER_FAMILY}
-- User's profession: {USER_PROFESSION}{notifications}"""
+- User's profession: {USER_PROFESSION}{notifications}{memory_section}"""
     
     return prompt
 
@@ -356,7 +659,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info(f"👁️ VISION: Analyzing image ({VISION_MODEL_ID})...")
     try:
         # Match the endpoint to OLLAMA_URL (ensuring it ends with /api/chat)
-        url = "http://192.168.1.129:11434/api/chat"
+        url = VISION_OLLAMA_URL
         if not url.endswith("/api/chat"):
             url = url.rstrip("/")
             if not url.endswith("/api"):
@@ -1828,7 +2131,28 @@ if is_enabled("ENABLE_REOLINK"): # Reolink Security
         }
     ])
 
+if ENABLE_MEMORY: # Memory
+    AVAILABLE_TOOLS["save_user_memory"] = save_user_memory
+    tools_schema.append({
+        "type": "function", 
+        "function": {
+            "name": "save_user_memory", 
+            "description": "Saves a new fact, preference, or critical piece of information about the user or their environment to the permanent memory log. Use when the user shares something they expect you to remember long-term.", 
+            "parameters": {
+                "type": "object", 
+                "properties": {
+                    "fact": {
+                        "type": "string",
+                        "description": "The exact fact, preference, or instruction to remember (e.g. 'Hudson prefers tabs over spaces')."
+                    }
+                }, 
+                "required": ["fact"]
+            }
+        }
+    })
+
 TOOL_STATUS_MESSAGES = {
+    "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
     "get_nest_thermostats": f"{MODEL_NAME} is checking the Nest thermostat status...",
@@ -1854,7 +2178,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     url = OLLAMA_URL
     ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
     
-    system_msg = {"role": "system", "content": get_current_system_prompt()}
+    # Find the latest user query from the history buffer for memory keyword filtering
+    user_query = ""
+    for msg in reversed(history_buffer):
+        if msg.get("role") == "user":
+            user_query = msg.get("content", "")
+            break
+            
+    system_msg = {"role": "system", "content": get_current_system_prompt(user_query)}
     voice_sent_via_tool = False
     
     # Ensure history buffer is passed as clean text only
@@ -2141,6 +2472,7 @@ if __name__ == '__main__':
     application.job_queue.run_daily(job_today_in_history, time=time(21, 5, tzinfo=USER_TIMEZONE))
     
     application.add_handler(CommandHandler("clear", lambda u, c: chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
+    application.add_handler(CommandHandler("wipe", handle_wipe_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
 
     logging.info(f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | vision: {VISION_MODEL_ID}")
