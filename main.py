@@ -156,7 +156,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
 
         prompt_text = "What is in this image?"
         if user_caption:
-            prompt_text += f" Additional context from user: {user_caption}"
+            prompt_text = f" Additional context from user: {user_caption}"
 
         # EXACT payload mapping from your working curl example:
         payload = {
@@ -787,8 +787,8 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         logging.info("👁️ REOLINK [STAGE 1]: Requesting general scene context...")
         context_prompt = (
             f"This is a live feed from the {matched_camera_name} camera. "
-            "Briefly but comprehensively describe the layout, stationary structures, background, "
-            "and visible inanimate objects in the frame so a text-only assistant knows the environment."
+            "Concisely describe the layout, stationary structures, background, "
+            "and visible inanimate objects in the frame."
         )
         scene_context = await get_image_description(b64_image, context_prompt)
         
@@ -803,7 +803,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
 
         STRICT SECURITY FILTER RULES:
             1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
-            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up your driveway").
+            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up the driveway").
             3. Keep your output extremely concise (exactly 1 or 2 sentences max).
             4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
         
