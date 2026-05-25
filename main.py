@@ -825,6 +825,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
                 "and visible inanimate objects in the frame."
             )
             scene_context = await get_image_description(b64_image, context_prompt)
+            logging.info(f"👁️ VISION [2/2] Raw Response: '{scene_context}'")
             
             # 5. Return both datasets to Emery's core loop.
             # This inserts the spatial scene layout and active alert details directly into her memory context.
