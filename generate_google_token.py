@@ -19,20 +19,42 @@ def load_env_custom():
                         val = val[1:-1]
                     os.environ[key] = val
 
-def main():
-    load_env_custom()
-    
-    # Prioritize nest_credentials.json if present
-    creds_file = 'nest_credentials.json'
-    if not os.path.exists(creds_file):
-        creds_file = 'credentials.json'
-        
-    if not os.path.exists(creds_file):
-        print("❌ Error: credentials.json or nest_credentials.json not found.")
-        print("Please place your credentials JSON file in this directory.")
+def generate_calendar_token(creds_file):
+    print("\n========================================================")
+    print("      Google Calendar Token Generator (Desktop Flow)    ")
+    print("========================================================\n")
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        print("❌ Error: google-auth-oauthlib is not installed.")
+        print("Please install dependencies first: pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client")
         return
-        
+
+    scopes = ['https://www.googleapis.com/auth/calendar.readonly']
     print(f"Loading credentials from: {creds_file}")
+    print("Starting authentication flow...")
+    print("A browser window should open. If it doesn't, please click the link provided below.")
+    
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(creds_file, scopes)
+        creds = flow.run_local_server(port=0)
+        
+        with open('token.json', 'w') as token_file:
+            token_file.write(creds.to_json())
+            
+        print("\n✅ Successfully generated token.json!")
+        print("Your Google Calendar integration is now ready to use.")
+        print("\nNote: If your Google Cloud app's Publishing Status is set to 'Testing',")
+        print("this token will expire in 7 days and you will need to run this script again.")
+        print("To fix this permanently, change the status to 'In production' in the OAuth consent screen.")
+    except Exception as e:
+        print(f"\n❌ An error occurred during Calendar authentication: {e}")
+
+def generate_nest_token(creds_file):
+    print("\n========================================================")
+    print("      Google Nest Token Generator Helper (PCM Flow)      ")
+    print("========================================================\n")
+    
     with open(creds_file, 'r') as f:
         creds_data = json.load(f)
         
@@ -52,9 +74,6 @@ def main():
         print("Please add your Nest Device Access Project ID (UUID) to your .env file as NEST_PROJECT_ID=...")
         return
         
-    print("\n========================================================")
-    print("      Google Nest Token Generator Helper (PCM Flow)      ")
-    print("========================================================\n")
     print("Step 1: In your Nest Device Access Console, ensure your project's Redirect URI is set to:")
     print("👉 http://localhost\n")
     
@@ -148,6 +167,34 @@ def main():
         print(f"\n❌ Failed to exchange code for token: {e}")
         if hasattr(e, 'read'):
             print("Response details:", e.read().decode('utf-8'))
+
+def main():
+    load_env_custom()
+    
+    print("========================================================")
+    print("              EmeryChat Google Token Setup              ")
+    print("========================================================")
+    print("1. Google Calendar (generates token.json)")
+    print("2. Google Nest Thermostat (generates nest_token.json)")
+    choice = input("Select an option (1 or 2): ").strip()
+    
+    if choice not in ("1", "2"):
+        print("❌ Invalid selection. Exiting.")
+        return
+        
+    creds_file = 'credentials.json'
+    if choice == "2" and os.path.exists('nest_credentials.json'):
+        creds_file = 'nest_credentials.json'
+        
+    if not os.path.exists(creds_file):
+        print(f"❌ Error: Credentials file '{creds_file}' not found.")
+        print("Please place your credentials JSON file in this directory.")
+        return
+        
+    if choice == "1":
+        generate_calendar_token(creds_file)
+    else:
+        generate_nest_token(creds_file)
 
 if __name__ == '__main__':
     main()
