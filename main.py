@@ -1578,59 +1578,6 @@ async def job_nasa(c): await run_brief(c, "Use get_nasa_apod. Provide title, exp
 async def job_calendar(c): await run_brief(c, "Check User's calendar with get_calendar_events for any events the User has today and list them chronologically.", "Daily Planner")
 async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
 
-async def job_security_assessment(c):
-    global TARGET_CHAT_ID
-    if not TARGET_CHAT_ID:
-        logging.warning("📅 JOB: Security Assessment skipped (no TARGET_CHAT_ID set).")
-        return
-        
-    logging.info("📅 JOB: Security Assessment - Starting")
-    
-    # Retrieve context history
-    history = chat_histories.get(TARGET_CHAT_ID, deque(maxlen=100))
-    
-    # Prompt the model to review logs overnight (9:00 PM to 3:20 AM)
-    prompt = (
-        "Review the chat history context for any security alerts or person-detection events "
-        "that occurred overnight while the user slept (starting from 9:00 PM last night to now). "
-        "In your assessment:\n"
-        "1. List each event with its camera name, time, and threat report details.\n"
-        "2. Provide an overall security evaluation of the night.\n"
-        "3. If absolutely no alerts or events occurred overnight, state clearly: "
-        "'No security alerts or activity were detected overnight while you slept.'\n"
-        "Keep the summary clear, concise, and structured."
-    )
-    
-    # Copy the history and append the prompt to run through the engine
-    temp_history = deque(history)
-    temp_history.append({"role": "user", "content": prompt})
-    
-    res_text, _ = await emery_engine(temp_history)
-    
-    await c.bot.send_message(
-        chat_id=TARGET_CHAT_ID, 
-        text=f"🛡️ <b>EMERYCHAT JOB: Security Assessment Summary</b>\n\n{emery_format(res_text)}", 
-        parse_mode="HTML"
-    )
-    
-    # Iterate over all cameras and send the current live snapshot
-    raw_cams = os.getenv("REOLINK_CAMERAS", "")
-    camera_names = []
-    for item in raw_cams.split(","):
-        colon_idx = item.find(":")
-        if colon_idx != -1:
-            camera_names.append(item[:colon_idx].strip())
-            
-    if camera_names:
-        logging.info(f"📅 JOB: Security Assessment - Gathering current snapshots for {camera_names}")
-        for cam in camera_names:
-            try:
-                logging.info(f"📅 JOB: Security Assessment - Live snapshot for {cam}")
-                await get_reolink_snapshot(cam)
-                await asyncio.sleep(1) # tiny sleep to ensure sequential message delivery
-            except Exception as cam_err:
-                logging.error(f"❌ JOB: Security Assessment failed for camera '{cam}': {cam_err}")
-
 # --- GLOBAL TELEGRAM ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs network drops and timeouts cleanly instead of crashing the thread."""
