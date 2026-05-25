@@ -196,6 +196,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             ],
             "stream": False,
             "keep_alive": -1,
+            "think": True,
             "options": {
                 "num_ctx": ctx_size
             }
@@ -210,6 +211,10 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             
         data = r.json()
         description = data.get('message', {}).get('content', "").strip()
+        
+        # Safely strip reasoning blocks if the vision model uses them
+        description = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', description, flags=re.DOTALL).strip()
+        description = re.sub(r'</?[tT]hink>', '', description).strip()
         
         if not description:
             logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty response.")
@@ -833,7 +838,10 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         # Inject current date/time context for vision processing
         now_dt = datetime.now(USER_TIMEZONE)
         now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
-        time_context = f" The snapshot was captured on {now_str}."
+        time_context = (
+            f" The snapshot was captured on {now_str}. "
+            "Note that at night, the camera feed automatically switches to black and white night vision."
+        )
         
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
