@@ -3,3 +3,8 @@ token.json
 credentials.json
 script.py
 .DS_Store
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class

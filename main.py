@@ -854,7 +854,7 @@ async def get_available_cameras() -> str: # Gets all available cameras
         asyncio.create_task(reolink_polling_loop(application))
 
 async def trigger_webhook_alert(camera_name: str):
-    """Fetches an NVR frame, runs a person-detection pre-filter, and only alerts if a person is found."""
+    """Immediately alerts the user of native NVR person detection and starts two-stage vision analysis."""
     global TARGET_CHAT_ID
     
     # Fallback: Recover TARGET_CHAT_ID from active chat histories if not yet set
@@ -865,54 +865,8 @@ async def trigger_webhook_alert(camera_name: str):
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
         return
         
-    logging.info(f"🚨 SECURITY: Person trigger received for '{camera_name}' — running pre-filter...")
-
-    # --- STEP 1: Silently grab a raw snapshot for the person-detection check ---
-    host = os.getenv("REOLINK_HOST")
-    user = os.getenv("REOLINK_USER")
-    password = os.getenv("REOLINK_PASSWORD")
-    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
-
-    camera_map = {}
-    for item in cameras_raw.split(","):
-        colon_idx = item.find(":")
-        if colon_idx != -1:
-            camera_map[item[:colon_idx].strip().lower()] = item[colon_idx+1:].strip()
-
-    channel = camera_map.get(camera_name.lower().strip())
-    if not channel:
-        logging.warning(f"⚠️ PERSON FILTER: Could not resolve channel for '{camera_name}'. Skipping alert.")
-        return
-
-    snapshot_content = None
-    for scheme in ("https", "http"):
-        snap_url = f"{scheme}://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"
-        try:
-            r = await http_client.get(snap_url, timeout=8)
-            if r.status_code == 200 and r.content.startswith(b'\xff\xd8'):
-                snapshot_content = r.content
-                break
-        except Exception:
-            pass
-
-    if not snapshot_content:
-        logging.warning(f"⚠️ PERSON FILTER: Could not grab snapshot for '{camera_name}'. Skipping alert to avoid false positive.")
-        return
-
-    # --- STEP 2: Run a fast, strict binary person-detection check ---
-    b64_image = base64.b64encode(snapshot_content).decode('utf-8')
-    person_check_prompt = "Is there a human person in this image? Respond with YES or NO."
-    verdict = await get_image_description(b64_image, person_check_prompt)
-    verdict_clean = verdict.strip().upper().split()[0] if verdict.strip() else "NO"
-
-    logging.info(f"👤 PERSON FILTER: '{camera_name}' → {verdict_clean}")
-
-    if verdict_clean != "YES":
-        logging.info(f"✅ SECURITY: No person on '{camera_name}' — alert suppressed")
-        return
-
-    # --- STEP 3: Person confirmed — send the full alert ---
-    logging.info(f"🚨 SECURITY: Person confirmed on '{camera_name}' — dispatching full alert...")
+    logging.info(f"🚨 SECURITY: Person trigger received for '{camera_name}' — dispatching alert...")
+    
     await application_bot.send_message(
         chat_id=TARGET_CHAT_ID,
         text=f"🚨 <b>Person Detected:</b> Someone is on the <b>{camera_name.upper()}</b> camera. Running analysis...",
