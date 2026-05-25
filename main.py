@@ -865,7 +865,7 @@ async def get_available_cameras() -> str: # Gets all available cameras
         asyncio.create_task(reolink_polling_loop(application))
 
 async def trigger_webhook_alert(camera_name: str):
-    """Automatically fetches NVR frame, filters threats, and pushes to Telegram."""
+    """Fetches an NVR frame, runs a person-detection pre-filter, and only alerts if a person is found."""
     global TARGET_CHAT_ID
     
     # Fallback: Recover TARGET_CHAT_ID from active chat histories if not yet set
@@ -876,18 +876,68 @@ async def trigger_webhook_alert(camera_name: str):
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
         return
         
-    logging.info(f"🚨 MOTION DETECTED: Dispatching automatic threat check for '{camera_name}'...")
-    
-    # Send a notification message that motion occurred
+    logging.info(f"🚨 MOTION DETECTED: Grabbing snapshot for person-detection pre-filter on '{camera_name}'...")
+
+    # --- STEP 1: Silently grab a raw snapshot for the person-detection check ---
+    host = os.getenv("REOLINK_HOST")
+    user = os.getenv("REOLINK_USER")
+    password = os.getenv("REOLINK_PASSWORD")
+    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
+
+    camera_map = {}
+    for item in cameras_raw.split(","):
+        colon_idx = item.find(":")
+        if colon_idx != -1:
+            camera_map[item[:colon_idx].strip().lower()] = item[colon_idx+1:].strip()
+
+    channel = camera_map.get(camera_name.lower().strip())
+    if not channel:
+        logging.warning(f"⚠️ PERSON FILTER: Could not resolve channel for '{camera_name}'. Skipping alert.")
+        return
+
+    snapshot_content = None
+    for scheme in ("https", "http"):
+        snap_url = f"{scheme}://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"
+        try:
+            r = await http_client.get(snap_url, timeout=8)
+            if r.status_code == 200 and r.content.startswith(b'\xff\xd8'):
+                snapshot_content = r.content
+                break
+        except Exception:
+            pass
+
+    if not snapshot_content:
+        logging.warning(f"⚠️ PERSON FILTER: Could not grab snapshot for '{camera_name}'. Skipping alert to avoid false positive.")
+        return
+
+    # --- STEP 2: Run a fast, strict binary person-detection check ---
+    b64_image = base64.b64encode(snapshot_content).decode('utf-8')
+    person_check_prompt = (
+        "You are a security camera person-detection classifier. "
+        "Look at this image and answer with EXACTLY one word only. "
+        "Reply 'YES' if there is a human person visible in the frame (even partially). "
+        "Reply 'NO' if there is no person — only animals, vehicles, empty scenery, shadows, or wind movement. "
+        "Do not explain. Do not add punctuation. One word only: YES or NO."
+    )
+    verdict = await get_image_description(b64_image, person_check_prompt)
+    verdict_clean = verdict.strip().upper().split()[0] if verdict.strip() else "NO"
+
+    logging.info(f"👤 PERSON FILTER: Camera '{camera_name}' verdict → '{verdict_clean}'")
+
+    if verdict_clean != "YES":
+        logging.info(f"✅ PERSON FILTER: No person detected on '{camera_name}'. Suppressing alert (motion was likely animal/wind/vehicle).")
+        return
+
+    # --- STEP 3: Person confirmed — send the full alert ---
+    logging.info(f"🚨 PERSON CONFIRMED on '{camera_name}': Dispatching full AI threat analysis...")
     await application_bot.send_message(
         chat_id=TARGET_CHAT_ID,
-        text=f"🔔 <b>Security Alert:</b> Motion detected on the <b>{camera_name.upper()}</b> camera. Running AI analysis...",
+        text=f"🚨 <b>Person Detected:</b> Someone is on the <b>{camera_name.upper()}</b> camera. Running analysis...",
         parse_mode="HTML"
     )
-    
-    # Trigger your standard, optimized camera capture and filtering tool
+
     result = await get_reolink_snapshot(camera_name)
-    logging.info(f"🚨 MOTION DETECTED: AI threat sweep completed. Result: {result}")
+    logging.info(f"🚨 PERSON ALERT: AI threat sweep completed. Result: {result}")
 
 async def reolink_polling_loop(application):
     """Runs a highly diagnostic background loop that polls the Reolink NVR for motion states."""
@@ -927,23 +977,29 @@ async def reolink_polling_loop(application):
     # --- STARTUP DIAGNOSTIC SELF-TEST ---
     test_cam = next(iter(camera_map))
     test_chan = camera_map[test_cam]
-    test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={test_chan}&user={user}&password={password}"
+    test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetAiState&user={user}&password={password}"
+    test_body = [{"cmd": "GetAiState", "param": {"channel": int(test_chan)}}]
     
-    logging.info(f"🔍 REOLINK DIAGNOSTIC: Running startup self-test on camera '{test_cam}' (Channel {test_chan})...")
+    logging.info(f"🔍 REOLINK DIAGNOSTIC: Running startup self-test (GetAiState) on camera '{test_cam}' (Channel {test_chan})...")
     try:
-        r = await http_client.get(test_url, timeout=10)
+        r = await http_client.post(test_url, json=test_body, timeout=10)
         logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS connection response status code: {r.status_code}")
         
         if r.status_code != 200:
             # Try HTTP
             test_url_http = test_url.replace("https://", "http://")
             logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS failed. Trying HTTP fallback to {host}...")
-            r = await http_client.get(test_url_http, timeout=10)
+            r = await http_client.post(test_url_http, json=test_body, timeout=10)
             logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTP connection response status code: {r.status_code}")
             
         if r.status_code == 200:
             raw_json = r.json()
             logging.info(f"🔍 REOLINK DIAGNOSTIC: Raw JSON payload returned from your firmware: {raw_json}")
+            # Log whether AI person detection is supported on this channel
+            if isinstance(raw_json, list) and raw_json:
+                ai_value = raw_json[0].get("value", {})
+                people_support = ai_value.get("people", {}).get("support", 0)
+                logging.info(f"🔍 REOLINK DIAGNOSTIC: AI person detection supported on '{test_cam}': {'YES ✅' if people_support else 'NO ❌ — upgrade firmware or use a supported camera'}")
         else:
             logging.error(f"❌ REOLINK DIAGNOSTIC: NVR returned status {r.status_code}. Are 'CGI' and 'HTTPS' ports enabled on your Reolink NVR settings?")
     except Exception as e:
@@ -959,41 +1015,42 @@ async def reolink_polling_loop(application):
             await asyncio.sleep(2.5)
             
             for camera_name, channel in camera_map.items():
-                url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={channel}&user={user}&password={password}"
+                # Use GetAiState (POST with JSON body) to get native person/vehicle/pet detection
+                url = f"https://{host}/cgi-bin/api.cgi?cmd=GetAiState&user={user}&password={password}"
+                body = [{"cmd": "GetAiState", "param": {"channel": int(channel)}}]
                 
                 try:
-                    r = await http_client.get(url, timeout=5)
+                    r = await http_client.post(url, json=body, timeout=5)
                     if r.status_code != 200:
                         # Fallback to HTTP
                         url_http = url.replace("https://", "http://")
-                        r = await http_client.get(url_http, timeout=5)
+                        r = await http_client.post(url_http, json=body, timeout=5)
                         
                     if r.status_code == 200:
                         data = r.json()
                         if isinstance(data, list) and len(data) > 0:
-                            # Parse code status from the first element of the response list
                             entry = data[0]
                             code = entry.get("code", -1)
                             if code != 0:
-                                # Reolink API error code (e.g. invalid credentials)
                                 error_detail = entry.get("error", {})
                                 logging.warning(f"⚠️ REOLINK POLLING: Camera '{camera_name}' (Channel {channel}) returned API error code {code}: {error_detail}")
                                 continue
-                                
+
                             value = entry.get("value", {})
-                            current_state = value.get("state", 0) # 1 = Active Motion, 0 = Clear
-                            
+                            # Native AI person detection — alarm_state 1 = person in frame, 0 = clear
+                            current_state = value.get("people", {}).get("alarm_state", 0)
+
                             tracker = state_tracker[channel]
                             last_state = tracker["last_state"]
                             now = datetime.now(pytz.UTC)
-                            
-                            # State Transition: Motion just started (0 -> 1)
+
+                            # State Transition: Person just appeared (0 -> 1)
                             if last_state == 0 and current_state == 1:
                                 if now > tracker["cooldown_until"]:
                                     tracker["cooldown_until"] = now + timedelta(seconds=60)
-                                    logging.info(f"🚨 REOLINK POLLING: Motion detected on camera '{camera_name}'!")
+                                    logging.info(f"🚨 REOLINK POLLING: Person detected on camera '{camera_name}'!")
                                     asyncio.create_task(trigger_webhook_alert(camera_name))
-                                    
+
                             tracker["last_state"] = current_state
                         else:
                             logging.warning(f"⚠️ REOLINK POLLING: Unexpected response format from NVR: {data}")
