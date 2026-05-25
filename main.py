@@ -158,6 +158,8 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
         if user_caption:
             prompt_text = f" Additional context from user: {user_caption}"
 
+        ctx_size = int(os.getenv("OLLAMA_VISION_NUM_CTX", "65536"))
+
         # EXACT payload mapping from your working curl example:
         payload = {
             "model": VISION_MODEL_ID,
@@ -168,7 +170,10 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
                     "images": [clean_b64]
                 }
             ],
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_ctx": ctx_size
+            }
         }
         
 
