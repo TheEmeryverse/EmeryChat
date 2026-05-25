@@ -859,7 +859,12 @@ async def get_available_cameras() -> str: # Gets all available cameras
     formatted_list = ", ".join([f"'{c}'" for c in camera_names])
     return f"The following security cameras are online and available: {formatted_list}"
 
-async def trigger_webhook_alert(camera_name: str): # Used for the reolink polling loop
+
+    """Starts the active-polling loop as a background task upon bot initialization."""
+    if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
+        asyncio.create_task(reolink_polling_loop(application))
+
+async def trigger_webhook_alert(camera_name: str):
     """Automatically fetches NVR frame, filters threats, and pushes to Telegram."""
     global TARGET_CHAT_ID
     
@@ -884,8 +889,8 @@ async def trigger_webhook_alert(camera_name: str): # Used for the reolink pollin
     result = await get_reolink_snapshot(camera_name)
     logging.info(f"🚨 MOTION DETECTED: AI threat sweep completed. Result: {result}")
 
-async def reolink_polling_loop(application): # Used for the reolink polling loop
-    """Runs a lightweight background loop that polls the Reolink NVR for motion states."""
+async def reolink_polling_loop(application):
+    """Runs a highly diagnostic background loop that polls the Reolink NVR for motion states."""
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
         return
         
@@ -896,7 +901,7 @@ async def reolink_polling_loop(application): # Used for the reolink polling loop
     password = os.getenv("REOLINK_PASSWORD")
     cameras_raw = os.getenv("REOLINK_CAMERAS", "")
     
-    # Map camera names to channel IDs
+    # Map camera names to channel IDs using safe string slicing
     camera_map = {}
     for item in cameras_raw.split(","):
         colon_idx = item.find(":")
@@ -906,9 +911,11 @@ async def reolink_polling_loop(application): # Used for the reolink polling loop
             camera_map[name] = chan
             
     if not camera_map:
-        logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Active-polling disabled.")
+        logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Check your REOLINK_CAMERAS environment variable.")
         return
         
+    logging.info(f"📹 REOLINK: Successfully mapped {len(camera_map)} cameras from config: {list(camera_map.keys())}")
+    
     # Track state: {channel_id: {"last_state": 0, "cooldown_until": datetime}}
     state_tracker = {
         chan: {
@@ -916,6 +923,34 @@ async def reolink_polling_loop(application): # Used for the reolink polling loop
             "cooldown_until": datetime.min.replace(tzinfo=pytz.UTC)
         } for chan in camera_map.values()
     }
+
+    # --- STARTUP DIAGNOSTIC SELF-TEST ---
+    test_cam = list(camera_map.keys())
+    test_chan = camera_map[test_cam]
+    test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={test_chan}&user={user}&password={password}"
+    
+    logging.info(f"🔍 REOLINK DIAGNOSTIC: Running startup self-test on camera '{test_cam}' (Channel {test_chan})...")
+    try:
+        r = await http_client.get(test_url, timeout=10)
+        logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS connection response status code: {r.status_code}")
+        
+        if r.status_code != 200:
+            # Try HTTP
+            test_url_http = test_url.replace("https://", "http://")
+            logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS failed. Trying HTTP fallback to {host}...")
+            r = await http_client.get(test_url_http, timeout=10)
+            logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTP connection response status code: {r.status_code}")
+            
+        if r.status_code == 200:
+            raw_json = r.json()
+            logging.info(f"🔍 REOLINK DIAGNOSTIC: Raw JSON payload returned from your firmware: {raw_json}")
+        else:
+            logging.error(f"❌ REOLINK DIAGNOSTIC: NVR returned status {r.status_code}. Are 'CGI' and 'HTTPS' ports enabled on your Reolink NVR settings?")
+    except Exception as e:
+        logging.error(f"❌ REOLINK DIAGNOSTIC: Connection self-test crashed: {e}", exc_info=True)
+    # ------------------------------------
+
+    logging.info("📹 REOLINK: Diagnostic test complete. Starting security polling loop...")
     
     # Run loop forever inside the bot's asynchronous thread
     while True:
@@ -927,15 +962,23 @@ async def reolink_polling_loop(application): # Used for the reolink polling loop
                 url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={channel}&user={user}&password={password}"
                 
                 try:
-                    r = await http_client.get(url, timeout=4)
+                    r = await http_client.get(url, timeout=5)
                     if r.status_code != 200:
-                        # Fallback to HTTP if HTTPS fails
+                        # Fallback to HTTP
                         url_http = url.replace("https://", "http://")
-                        r = await http_client.get(url_http, timeout=4)
+                        r = await http_client.get(url_http, timeout=5)
                         
                     if r.status_code == 200:
                         data = r.json()
                         if isinstance(data, list) and len(data) > 0:
+                            # Parse code status
+                            code = data.get("code", -1)
+                            if code != 0:
+                                # Reolink API error code (e.g. invalid credentials)
+                                error_detail = data.get("error", {})
+                                logging.warning(f"⚠️ REOLINK POLLING: Camera '{camera_name}' (Channel {channel}) returned API error code {code}: {error_detail}")
+                                continue
+                                
                             value = data.get("value", {})
                             current_state = value.get("state", 0) # 1 = Active Motion, 0 = Clear
                             
@@ -946,22 +989,24 @@ async def reolink_polling_loop(application): # Used for the reolink polling loop
                             # State Transition: Motion just started (0 -> 1)
                             if last_state == 0 and current_state == 1:
                                 if now > tracker["cooldown_until"]:
-                                    # Apply a 60-second cooldown to prevent flood alerts of the same event
                                     tracker["cooldown_until"] = now + timedelta(seconds=60)
                                     logging.info(f"🚨 REOLINK POLLING: Motion detected on camera '{camera_name}'!")
-                                    
-                                    # Dispatch snapshot and AI analysis task in background
                                     asyncio.create_task(trigger_webhook_alert(camera_name))
                                     
                             tracker["last_state"] = current_state
+                        else:
+                            logging.warning(f"⚠️ REOLINK POLLING: Unexpected response format from NVR: {data}")
+                    else:
+                        logging.warning(f"⚠️ REOLINK POLLING: Both HTTP and HTTPS queries returned code {r.status_code} for camera '{camera_name}'")
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError) as e:
+                    logging.debug(f"REOLINK POLLING: Connection blip on camera '{camera_name}' (Channel {channel})")
                 except Exception as inner_e:
-                    # Log silently to avoid terminal spam if network blips occur
-                    logging.debug(f"REOLINK POLLING: Connection error on channel {channel}: {inner_e}")
+                    logging.error(f"❌ REOLINK POLLING: Error evaluating state for camera '{camera_name}': {inner_e}")
                     
         except Exception as outer_e:
-            logging.error(f"❌ REOLINK POLLING: Polling loop exception: {outer_e}")
+            logging.error(f"❌ REOLINK POLLING: Global polling loop exception: {outer_e}")
 
-async def start_reolink_polling(application): # Used for the reolink polling loop
+async def start_reolink_polling(application):
     """Starts the active-polling loop as a background task upon bot initialization."""
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
         asyncio.create_task(reolink_polling_loop(application))
