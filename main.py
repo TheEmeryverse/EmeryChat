@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 import logging
 import httpx
 import json
@@ -450,6 +451,7 @@ def get_easter(year):
     day = ((h + l - 7 * m + 114) % 31) + 1
     return datetime(year, month, day).date()
 
+@lru_cache(maxsize=16)
 def get_holidays_for_year(year):
     logging.info(f"📅 DATE MATH: Generating holiday database for year {year}...")
     holidays = {
@@ -484,6 +486,7 @@ def get_holidays_for_year(year):
         
     return holidays
 
+@lru_cache(maxsize=16)
 def get_active_holiday_info(today_date):
     logging.info(f"📅 DATE MATH: Checking upcoming holidays for today_date={today_date}...")
     year = today_date.year
@@ -516,6 +519,7 @@ def get_active_holiday_info(today_date):
     logging.info(f"📅 DATE MATH: Active holidays detected: {', '.join(detected_hols)}")
     return "\n" + "\n".join(lines)
 
+@lru_cache(maxsize=16)
 def get_active_birthday_info(birthday_str, today_date):
     if not birthday_str or birthday_str.upper() == "UNKNOWN":
         return ""
