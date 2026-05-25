@@ -39,7 +39,7 @@ OPEN_WEBUI_KEY=os.getenv("OPEN_WEBUI_KEY", "blank") # Open WebUI API Key
 THINK=os.getenv("ENABLE_THINKING", "true").lower() == "true" # Toggles the thinking engine (use this for thinking models)
 MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # The Model ID of the main model for response and text generation, through Ollama
 VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Specifically for multi-modal queries, if the main model is multi-modal capable then use the same value as above. For Ollama
-VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat") # Ollama URL for Vision/Task coprocessor on Mac Mini M4
+VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat") # Ollama URL for Vision/Task coprocessor (if run on a secondary endpoint)
 ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "true").lower() == "true" # Toggles the memory engine
 MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md") # Path to memory.md
 MEMORY_THRESHOLD = int(os.getenv("MEMORY_THRESHOLD", "4000")) # Character threshold before memory is filtered
@@ -126,7 +126,7 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
 
 async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     """
-    Queries the fast, unified-memory gemma4:e4b model on the Mac Mini M4.
+    Queries the fast, vision-capable coprocessor model (e.g. gemma4:e4b) on a secondary endpoint.
     Used to offload processing tasks from the main model's CPU.
     """
     url = VISION_OLLAMA_URL
@@ -153,7 +153,7 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     }
     
     try:
-        logging.info(f"⚡ FAST MODEL: Querying {VISION_MODEL_ID} on M4 Mac...")
+        logging.info(f"⚡ FAST MODEL: Querying {VISION_MODEL_ID} on secondary coprocessor...")
         r = await http_client.post(url, json=payload, timeout=180)
         if r.status_code != 200:
             logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {r.text}")
@@ -317,8 +317,8 @@ _is_consolidating = False
 
 async def consolidate_memory_background() -> None:
     """
-    A background consolidation task that reads memory.md, runs the gemma4:e4b coprocessor model
-    on the Mac Mini M4 to deduplicate, sort, and organize the list, and then saves it.
+    A background consolidation task that reads memory.md, runs the coprocessor model
+    to deduplicate, sort, and organize the list, and then saves it.
     This keeps the main chat model from blocking on heavy processing task execution.
     """
     global _is_consolidating
