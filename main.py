@@ -791,12 +791,21 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         
         # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [2/2]: Running threat analysis...")
-        security_prompt = (
-            f"Describe any people, vehicles, animals, or packages visible in this {matched_camera_name} camera feed. "
-            "If there are none, reply with 'No active threats or activity detected.'"
-        )
+        security_prompt = f"Describe any people, vehicles, animals, or packages visible in this {matched_camera_name} camera feed."
         
         concise_report = await get_image_description(b64_image, security_prompt)
+        
+        # Clean up empty or negative responses from small models like moondream
+        lower_report = concise_report.lower() if concise_report else ""
+        if (
+            not concise_report
+            or "no people, vehicles" in lower_report
+            or "no person, vehicle" in lower_report
+            or "no objects or people" in lower_report
+            or "no visible objects" in lower_report
+            or "no active threats" in lower_report
+        ):
+            concise_report = "No active threats or activity detected."
         
         # 4. Send the photo to Telegram captioned with the clean threat report
         if TARGET_CHAT_ID:
