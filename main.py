@@ -971,15 +971,16 @@ async def reolink_polling_loop(application):
                     if r.status_code == 200:
                         data = r.json()
                         if isinstance(data, list) and len(data) > 0:
-                            # Parse code status
-                            code = data.get("code", -1)
+                            # Parse code status from the first element of the response list
+                            entry = data[0]
+                            code = entry.get("code", -1)
                             if code != 0:
                                 # Reolink API error code (e.g. invalid credentials)
-                                error_detail = data.get("error", {})
+                                error_detail = entry.get("error", {})
                                 logging.warning(f"⚠️ REOLINK POLLING: Camera '{camera_name}' (Channel {channel}) returned API error code {code}: {error_detail}")
                                 continue
                                 
-                            value = data.get("value", {})
+                            value = entry.get("value", {})
                             current_state = value.get("state", 0) # 1 = Active Motion, 0 = Clear
                             
                             tracker = state_tracker[channel]
