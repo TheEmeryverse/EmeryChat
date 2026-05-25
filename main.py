@@ -670,6 +670,286 @@ async def get_calendar_events(): # Fetches User's Google Calendars
         logging.error(f"❌ Calendar Tool Error: {e}")
         return "The system encountered an error trying to read the calendars."
 
+def get_nest_credentials():
+    token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
+    if not os.path.exists(token_path):
+        raise FileNotFoundError("Google token file not found.")
+        
+    scopes = [
+        'https://www.googleapis.com/auth/calendar.readonly',
+        'https://www.googleapis.com/auth/sdm.servicehub.uip.pubsub'
+    ]
+    creds = Credentials.from_authorized_user_file(token_path, scopes)
+    
+    if creds and creds.expired and creds.refresh_token:
+        logging.info("🔄 Refreshing expired Google token for Nest...")
+        creds.refresh(Request())
+        with open(token_path, 'w') as token_file:
+            token_file.write(creds.to_json())
+            
+    return creds
+
+async def get_nest_thermostats() -> str:
+    """
+    Fetch the list of all Nest thermostats and their current status (ambient temperature, humidity, mode, target temperature setpoints, and HVAC state).
+    """
+    logging.info("🔧 TOOL: get_nest_thermostats")
+    project_id = os.getenv("NEST_PROJECT_ID")
+    if not project_id or project_id.strip() == "":
+        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        
+    try:
+        creds = get_nest_credentials()
+    except FileNotFoundError:
+        return "Nest error: Google token file not found. Please run `python generate_google_token.py` first."
+    except RefreshError as e:
+        logging.error(f"❌ Nest Token Refresh Error: {e}")
+        return "Nest error: Google token expired and cannot be refreshed. Please run `python generate_google_token.py` to re-authenticate."
+    except Exception as e:
+        logging.error(f"❌ Nest Auth Error: {e}")
+        return f"Nest error: Authentication failed: {e}"
+
+    url = f"https://smartdevicemanagement.googleapis.com/v1/enterprises/{project_id}/devices"
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        r = await http_client.get(url, headers=headers, timeout=15)
+        if r.status_code == 403:
+            return ("Nest error: Access forbidden. This usually means the Nest SDM API is not enabled in your Google Cloud Project, "
+                    "or you need to run `python generate_google_token.py` to authenticate with the Nest scopes enabled.")
+        if r.status_code != 200:
+            return f"Nest error: API returned HTTP {r.status_code}: {r.text}"
+            
+        data = r.json()
+        devices = data.get("devices", [])
+        
+        thermostats = []
+        for dev in devices:
+            if dev.get("type") == "sdm.devices.types.THERMOSTAT":
+                traits = dev.get("traits", {})
+                info = traits.get("sdm.devices.traits.Info", {})
+                custom_name = info.get("customName", "")
+                
+                if not custom_name:
+                    parent_relations = dev.get("parentRelations", [])
+                    if parent_relations:
+                        custom_name = parent_relations[0].get("displayName", "")
+                
+                device_id = dev.get("name", "")
+                
+                temp_trait = traits.get("sdm.devices.traits.Temperature", {})
+                ambient_temp = temp_trait.get("ambientTemperatureCelsius")
+                
+                humidity_trait = traits.get("sdm.devices.traits.Humidity", {})
+                humidity = humidity_trait.get("ambientHumidityPercent")
+                
+                mode_trait = traits.get("sdm.devices.traits.ThermostatMode", {})
+                mode = mode_trait.get("mode")
+                available_modes = mode_trait.get("availableModes", [])
+                
+                setpoint_trait = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
+                heat_setpoint = setpoint_trait.get("heatCelsius")
+                cool_setpoint = setpoint_trait.get("coolCelsius")
+                
+                hvac_trait = traits.get("sdm.devices.traits.ThermostatHvac", {})
+                hvac_status = hvac_trait.get("status")
+                
+                thermostats.append({
+                    "id": device_id,
+                    "name": custom_name or "Unnamed Thermostat",
+                    "ambient_temp_c": ambient_temp,
+                    "humidity": humidity,
+                    "mode": mode,
+                    "available_modes": available_modes,
+                    "heat_setpoint_c": heat_setpoint,
+                    "cool_setpoint_c": cool_setpoint,
+                    "hvac_status": hvac_status
+                })
+                
+        if not thermostats:
+            return "No Nest Thermostats found in this Nest account."
+            
+        result_lines = ["Nest Thermostats status:"]
+        for t in thermostats:
+            celsius_to_fahrenheit = lambda c: round((c * 9/5) + 32, 1) if c is not None else None
+            
+            ambient_f = celsius_to_fahrenheit(t["ambient_temp_c"])
+            heat_f = celsius_to_fahrenheit(t["heat_setpoint_c"])
+            cool_f = celsius_to_fahrenheit(t["cool_setpoint_c"])
+            
+            status_line = (
+                f"🏠 Thermostat: {t['name']}\n"
+                f"   - ID: {t['id']}\n"
+                f"   - Ambient Temp: {t['ambient_temp_c']}°C ({ambient_f}°F)\n"
+                f"   - Ambient Humidity: {t['humidity']}%\n"
+                f"   - Mode: {t['mode']}\n"
+                f"   - HVAC Status: {t['hvac_status']}\n"
+            )
+            
+            if t['mode'] == 'HEAT':
+                status_line += f"   - Target Temp: {t['heat_setpoint_c']}°C ({heat_f}°F)\n"
+            elif t['mode'] == 'COOL':
+                status_line += f"   - Target Temp: {t['cool_setpoint_c']}°C ({cool_f}°F)\n"
+            elif t['mode'] == 'HEATCOOL':
+                status_line += f"   - Heat Setpoint: {t['heat_setpoint_c']}°C ({heat_f}°F) | Cool Setpoint: {t['cool_setpoint_c']}°C ({cool_f}°F)\n"
+            else:
+                status_line += "   - Setpoints: OFF\n"
+                
+            status_line += f"   - Available Modes: {', '.join(t['available_modes'])}"
+            result_lines.append(status_line)
+            
+        return "\n\n".join(result_lines)
+        
+    except Exception as e:
+        logging.error(f"❌ Nest Get Thermostats Error: {e}", exc_info=True)
+        return f"Nest error: Failed to fetch thermostats: {e}"
+
+async def set_nest_thermostat_mode(device_id: str, mode: str) -> str:
+    """
+    Set the operating mode for a Nest Thermostat.
+    - device_id: The full device ID resource name (e.g. enterprises/.../devices/...)
+    - mode: The mode to set (HEAT, COOL, HEATCOOL, OFF)
+    """
+    logging.info(f"🔧 TOOL: set_nest_thermostat_mode | Device: {device_id} | Mode: {mode}")
+    project_id = os.getenv("NEST_PROJECT_ID")
+    if not project_id or project_id.strip() == "":
+        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        
+    mode = mode.upper()
+    if mode not in ["HEAT", "COOL", "HEATCOOL", "OFF"]:
+        return f"Nest error: Invalid mode '{mode}'. Mode must be HEAT, COOL, HEATCOOL, or OFF."
+        
+    try:
+        creds = get_nest_credentials()
+    except Exception as e:
+        return f"Nest error: Authentication failed: {e}"
+        
+    url = f"https://smartdevicemanagement.googleapis.com/v1/{device_id}:executeCommand"
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "command": "sdm.devices.commands.ThermostatMode.SetMode",
+        "params": {
+            "mode": mode
+        }
+    }
+    
+    try:
+        r = await http_client.post(url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            return f"Success: Set thermostat mode to {mode}."
+        else:
+            return f"Nest error: API returned HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        logging.error(f"❌ Nest Set Mode Error: {e}")
+        return f"Nest error: Failed to set mode: {e}"
+
+async def set_nest_thermostat_temperature(device_id: str, temp_celsius: float = None, heat_temp_celsius: float = None, cool_temp_celsius: float = None) -> str:
+    """
+    Set the target temperature for a Nest Thermostat in Celsius.
+    - device_id: The full device ID resource name (e.g. enterprises/.../devices/...)
+    - temp_celsius: The target temperature to set (for HEAT or COOL modes).
+    - heat_temp_celsius: The target heat temperature to set (for HEATCOOL range mode).
+    - cool_temp_celsius: The target cool temperature to set (for HEATCOOL range mode).
+    """
+    logging.info(f"🔧 TOOL: set_nest_thermostat_temperature | Device: {device_id} | Temp: {temp_celsius} | Heat: {heat_temp_celsius} | Cool: {cool_temp_celsius}")
+    project_id = os.getenv("NEST_PROJECT_ID")
+    if not project_id or project_id.strip() == "":
+        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        
+    try:
+        creds = get_nest_credentials()
+    except Exception as e:
+        return f"Nest error: Authentication failed: {e}"
+
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json"
+    }
+    
+    # First, query the device directly to get its current mode to determine the correct command
+    device_url = f"https://smartdevicemanagement.googleapis.com/v1/{device_id}"
+    try:
+        r_dev = await http_client.get(device_url, headers=headers, timeout=15)
+        if r_dev.status_code != 200:
+            return f"Nest error: Could not fetch thermostat current state to set temperature: {r_dev.text}"
+        dev_data = r_dev.json()
+        traits = dev_data.get("traits", {})
+        mode_trait = traits.get("sdm.devices.traits.ThermostatMode", {})
+        current_mode = mode_trait.get("mode", "OFF")
+    except Exception as e:
+        logging.error(f"❌ Nest Fetch Device State Error: {e}")
+        return f"Nest error: Failed to fetch thermostat current state: {e}"
+
+    if current_mode == "OFF":
+        return "Nest error: Cannot set temperature when thermostat mode is OFF. Please set mode to HEAT, COOL, or HEATCOOL first."
+        
+    url = f"https://smartdevicemanagement.googleapis.com/v1/{device_id}:executeCommand"
+    if current_mode == "HEAT":
+        if temp_celsius is None:
+            return "Nest error: For HEAT mode, temp_celsius must be provided."
+        payload = {
+            "command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat",
+            "params": {
+                "heatCelsius": temp_celsius
+            }
+        }
+    elif current_mode == "COOL":
+        if temp_celsius is None:
+            return "Nest error: For COOL mode, temp_celsius must be provided."
+        payload = {
+            "command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool",
+            "params": {
+                "coolCelsius": temp_celsius
+            }
+        }
+    elif current_mode == "HEATCOOL":
+        setpoint_trait = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
+        curr_heat = setpoint_trait.get("heatCelsius")
+        curr_cool = setpoint_trait.get("coolCelsius")
+        
+        target_heat = heat_temp_celsius if heat_temp_celsius is not None else temp_celsius
+        target_cool = cool_temp_celsius if cool_temp_celsius is not None else temp_celsius
+        
+        if target_heat is None:
+            target_heat = curr_heat
+        if target_cool is None:
+            target_cool = curr_cool
+            
+        if target_heat is None or target_cool is None:
+            return "Nest error: For HEATCOOL mode, please specify both heat and cool target temperatures."
+            
+        payload = {
+            "command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange",
+            "params": {
+                "heatCelsius": target_heat,
+                "coolCelsius": target_cool
+            }
+        }
+    else:
+        return f"Nest error: Unsupported thermostat mode '{current_mode}' for setting temperature."
+
+    try:
+        r = await http_client.post(url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            if current_mode == "HEAT":
+                return f"Success: Set target temperature to {temp_celsius}°C."
+            elif current_mode == "COOL":
+                return f"Success: Set target temperature to {temp_celsius}°C."
+            elif current_mode == "HEATCOOL":
+                return f"Success: Set target range to {target_heat}°C - {target_cool}°C."
+        else:
+            return f"Nest error: API returned HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        logging.error(f"❌ Nest Set Temperature Error: {e}")
+        return f"Nest error: Failed to set temperature: {e}"
+
 async def overseer_search_movie(query: str) -> str: # Searches for movies in Overseer
     logging.info(f"🔧 TOOL: overseer_search_movie | '{query}'")
     def sync_search():
@@ -1302,6 +1582,71 @@ if is_enabled("ENABLE_CALENDAR"): # Calendar
         }
     })
 
+if is_enabled("ENABLE_NEST"): # Google Nest Thermostat
+    AVAILABLE_TOOLS["get_nest_thermostats"] = get_nest_thermostats
+    AVAILABLE_TOOLS["set_nest_thermostat_mode"] = set_nest_thermostat_mode
+    AVAILABLE_TOOLS["set_nest_thermostat_temperature"] = set_nest_thermostat_temperature
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_nest_thermostats",
+                "description": "Fetch the list of all Nest thermostats and their current status (ambient temperature, humidity, mode, target temperature setpoints, and HVAC state).",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_nest_thermostat_mode",
+                "description": "Set the operating mode for a Nest Thermostat.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "device_id": {
+                            "type": "string",
+                            "description": "The full device ID/resource name returned by get_nest_thermostats (e.g. enterprises/{project_id}/devices/{device_id})."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "The mode to set: HEAT, COOL, HEATCOOL, or OFF."
+                        }
+                    },
+                    "required": ["device_id", "mode"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_nest_thermostat_temperature",
+                "description": "Set the target temperature for a Nest Thermostat. Specify temperature in Celsius. Convert Fahrenheit to Celsius if user requests it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "device_id": {
+                            "type": "string",
+                            "description": "The full device ID/resource name returned by get_nest_thermostats (e.g. enterprises/{project_id}/devices/{device_id})."
+                        },
+                        "temp_celsius": {
+                            "type": "number",
+                            "description": "The target temperature in Celsius (used for single-setpoint modes like HEAT or COOL)."
+                        },
+                        "heat_temp_celsius": {
+                            "type": "number",
+                            "description": "The target heat temperature in Celsius (used for range mode HEATCOOL)."
+                        },
+                        "cool_temp_celsius": {
+                            "type": "number",
+                            "description": "The target cool temperature in Celsius (used for range mode HEATCOOL)."
+                        }
+                    },
+                    "required": ["device_id"]
+                }
+            }
+        }
+    ])
+
 if is_enabled("ENABLE_SEERR"): # Seerr
     AVAILABLE_TOOLS.update({
         "overseer_search_movie": overseer_search_movie,
@@ -1488,6 +1833,9 @@ if is_enabled("ENABLE_REOLINK"): # Reolink Security
 TOOL_STATUS_MESSAGES = {
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
+    "get_nest_thermostats": f"{MODEL_NAME} is checking the Nest thermostat status...",
+    "set_nest_thermostat_mode": f"{MODEL_NAME} is changing the Nest thermostat mode...",
+    "set_nest_thermostat_temperature": f"{MODEL_NAME} is adjusting the Nest thermostat temperature...",
     "get_noaa_weather": f"{MODEL_NAME} is looking outside...",
     "generate_image": f"{MODEL_NAME} is painting a picture...",
     "get_news_headlines": f"{MODEL_NAME} is reading the morning news...",

@@ -2,7 +2,10 @@ import os
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 # The SCOPES should match what the application requests
-SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar.readonly',
+    'https://www.googleapis.com/auth/sdm.servicehub.uip.pubsub'
+]
 
 def main():
     if not os.path.exists('credentials.json'):
