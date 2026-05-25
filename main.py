@@ -273,7 +273,7 @@ async def save_user_memory(fact: str) -> str:
     if not os.path.exists(MEMORY_FILE_PATH):
         # Create default if missing
         with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
-            f.write("# Emery's Memory Log\n\n## User Profile & Preferences\n\n## Project & System Context\n\n## General Facts & Logs\n\n## Raw Memory Intake\n")
+            f.write("# Emery's Memory Log\n\n## User Profile & Preferences\n\n## General Facts & Logs\n\n## Raw Memory Intake\n")
 
     try:
         # Append to the Raw Memory Intake section of memory.md
@@ -344,14 +344,13 @@ async def consolidate_memory_background() -> None:
             "You are Emery's Memory Consolidation System. Your job is to process the memory log (written in Markdown) "
             "and merge any new facts listed under '## Raw Memory Intake' into the main categories:\n"
             "- '## User Profile & Preferences'\n"
-            "- '## Project & System Context'\n"
             "- '## General Facts & Logs'\n\n"
             "Rules:\n"
             "1. Categorize all raw facts from '## Raw Memory Intake' into their appropriate section.\n"
             "2. Completely empty/clear the '## Raw Memory Intake' section so it has no bullet points listed under it anymore.\n"
             "3. Deduplicate facts. If a new fact matches an existing one, merge them or keep the most detailed/recent one.\n"
             "4. Resolve contradictions: if a new fact directly contradicts an old one (e.g., 'User moved from NYC to Seattle'), update the profile/fact with the newer information and remove the obsolete one.\n"
-            "5. Keep the exact markdown section structure. Maintain bullet points. Output ONLY the updated markdown file content, starting with '# Emery's Memory Log'. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
+            "5. Keep the exact markdown section structure. Maintain bullet points. Output ONLY a single, consolidated markdown document, starting with '# Emery's Memory Log'. Do not duplicate the document, repeat the headers, or output 'before' and 'after' versions. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
         )
         
         user_prompt = f"Here is the current memory file content:\n\n{current_markdown}\n\nPlease consolidate it now."
@@ -362,6 +361,12 @@ async def consolidate_memory_background() -> None:
             # Validation safeguard: if the fast model returned an error or completely hallucinated/mangled structure, abort writing
             logging.error(f"❌ CONSOLIDATOR: Fast model returned invalid markdown. Aborting overwrite. Response: '{consolidated[:200]}...'")
             return
+            
+            
+        # Safety Check: if the model duplicated the document (e.g. repeated the header), only keep the first document block
+        if consolidated.count("# Emery's Memory Log") > 1:
+            logging.warning("⚠️ CONSOLIDATOR: Model output contained multiple document blocks. Keeping only the first one to resolve duplication.")
+            consolidated = "# Emery's Memory Log" + consolidated.split("# Emery's Memory Log")[1]
             
         # Safety check: make sure the Raw Memory Intake section exists but is empty of bullets
         if "## Raw Memory Intake" not in consolidated:
@@ -392,11 +397,6 @@ def wipe_memory() -> bool:
         f"- Birthday: {USER_BIRTHDAY}\n"
         f"- Family: {USER_FAMILY}\n"
         f"- Profession: {USER_PROFESSION}\n\n"
-        f"## Project & System Context\n"
-        f"- Repository: EmeryChat\n"
-        f"- Platform: Python Telegram Bot (python-telegram-bot)\n"
-        f"- Primary Chat Model: gemma4:26b MoE (local CPU-only, running on AMD 5950X / 32GB RAM)\n"
-        f"- Vision & Task Coprocessor Model: gemma4:e4b (running on Mac Mini M4 @ 192.168.1.129)\n\n"
         f"## General Facts & Logs\n\n"
         f"## Raw Memory Intake\n"
     )
