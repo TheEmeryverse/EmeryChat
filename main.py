@@ -13,6 +13,7 @@ import asyncio
 import io
 import requests
 import re
+from telegram.request import HTTPXRequest
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from dotenv import load_dotenv
@@ -1352,18 +1353,36 @@ async def job_calendar(c): await run_brief(c, "Check User's calendar with get_ca
 async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
 
 
+from telegram.request import HTTPXRequest
+
+# --- GLOBAL TELEGRAM ERROR HANDLER ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs network drops and timeouts cleanly instead of crashing the thread."""
+    if isinstance(context.error, TimedOut):
+        logging.warning("⚠️ Telegram API timed out temporarily due to high CPU load. The message will retry.")
+    else:
+        logging.error(f"⚠️ Telegram API Exception: {context.error}", exc_info=True)
+
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Build the application with an increased network timeout (30 seconds)
+    # to prevent timeouts when your local CPU is heavily loaded by Ollama.
+    t_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+    
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_request).build()
     application_bot = application.bot
+    
+    # Register the global error handler
+    application.add_error_handler(error_handler)
+    
     # Schedule the jobs
     application.job_queue.run_daily(job_morning_briefing, time=time(3, 0, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_morning_weather, time=time(3, 5, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_calendar, time=time(3, 10, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_nasa, time=time(21, 0, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_today_in_history, time=time(21, 5, tzinfo=USER_TIMEZONE))
-
+    
     application.add_handler(CommandHandler("clear", lambda u, c: chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
-    
+
     logging.info("🚀 EMERYCHAT IS ONLINE...")
     application.run_polling()
