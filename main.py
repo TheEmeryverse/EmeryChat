@@ -139,7 +139,7 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     return prompt
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info("👁️ VISION: Requesting image description directly from Ollama /api/chat...")
+    logging.info(f"👁️ VISION: Analyzing image ({VISION_MODEL_ID})...")
     try:
         # Match the endpoint to OLLAMA_URL (ensuring it ends with /api/chat)
         url = "http://192.168.1.129:11434/api/chat"
@@ -171,9 +171,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             "stream": False
         }
         
-        logging.info(f"👁️ VISION: Sending payload to {url} using model {VISION_MODEL_ID}...")
-        logging.info(f"👁️ VISION: Clean Base64 payload length: {len(clean_b64)} characters.")
-        
+
         r = await http_client.post(url, json=payload, timeout=180)
         
         if r.status_code != 200:
@@ -187,7 +185,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty response.")
             return "No description generated."
             
-        logging.info(f"👁️ VISION: Successfully got description ({len(description)} chars)")
+        logging.info(f"👁️ VISION: Done ({len(description)} chars)")
         return description
         
     except Exception as e:
@@ -209,7 +207,7 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
         logging.error(f"❌ TTS Error: {e}"); return None
 
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
-    logging.info(f"🛠️ TOOL EXECUTION: speak_message | Text: {text[:50]}...")
+    logging.info(f"🔧 TOOL: speak_message")
     audio = await get_voice_audio(text)
     if audio and TARGET_CHAT_ID:
         await application_bot.send_voice(chat_id=TARGET_CHAT_ID, voice=audio, caption="Voice message")
@@ -217,7 +215,7 @@ async def speak_message(text): # What the model calls to create a voice message 
     return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
 
 async def generate_image(prompt): # Generates an image based on the prompt using Gemini API
-    logging.info(f"🛠️ TOOL EXECUTION: generate_image | Prompt: '{prompt}'")
+    logging.info(f"🔧 TOOL: generate_image | {prompt[:80]}")
     URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
@@ -253,7 +251,7 @@ async def generate_image(prompt): # Generates an image based on the prompt using
         return f"Error: {e}"
 
 async def get_noaa_weather(): # Fetches the forecast
-    logging.info("🛠️ TOOL EXECUTION: get_noaa_weather")
+    logging.info("🔧 TOOL: get_noaa_weather")
     headers = {'User-Agent': f'({MODEL_NAME}-bot, {NOAA_EMAIL})'}
     try:
         r1 = await http_client.get(f"https://api.weather.gov/points/{NOAA_LAT},{NOAA_LONG}", headers=headers)
@@ -269,7 +267,7 @@ async def get_noaa_weather(): # Fetches the forecast
         return "Weather unavailable."
 
 async def web_search(query): # Searches the internet
-    logging.info(f"🛠️ TOOL EXECUTION: web_search | Query: '{query}'")
+    logging.info(f"🔧 TOOL: web_search | '{query}'")
     try:
         r = await http_client.get(SEARXNG_URL, params={'q': query, 'format': 'json'})
         res = r.json().get('results', [])
@@ -293,7 +291,7 @@ async def get_news_headlines(): # Fetches news headlines from RSS feeds
     if not FEEDS:
         FEEDS = {"news": "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en"}
     
-    logging.info(f"🛠️ TOOL EXECUTION: get_news_headlines | Sources: {list(FEEDS.keys())}")
+    logging.info(f"🔧 TOOL: get_news_headlines | Sources: {list(FEEDS.keys())}")
 
     async def safe_parse(name, url):
         try:
@@ -311,7 +309,7 @@ async def get_news_headlines(): # Fetches news headlines from RSS feeds
     return "\n\n".join(results)
 
 async def get_nasa_apod(): # Fetches NASA's image of the day
-    logging.info("🛠️ TOOL EXECUTION: get_nasa_apod")
+    logging.info("🔧 TOOL: get_nasa_apod")
     try:
         r = await http_client.get(f"https://api.nasa.gov/planetary/apod?api_key={NASA_API_KEY}", timeout=20)
         if r.status_code == 200:
@@ -321,11 +319,11 @@ async def get_nasa_apod(): # Fetches NASA's image of the day
     except Exception: return "NASA APOD connection failed."
 
 async def get_system_stats(): # Fetches system stats
-    logging.info("🛠️ TOOL EXECUTION: get_system_stats")
+    logging.info("🔧 TOOL: get_system_stats")
     return f"CPU {psutil.cpu_percent()}% | RAM {psutil.virtual_memory().percent}%"
 
 async def get_today_in_history(): # Fetches historical events for the current day
-    logging.info("🛠️ TOOL: Today in History")
+    logging.info("🔧 TOOL: get_today_in_history")
     urls = [
         "https://api.dayinhistory.dev/v1/today/events/",
         "https://api.dayinhistory.dev/v1/today/births/",
@@ -351,7 +349,7 @@ async def get_today_in_history(): # Fetches historical events for the current da
         return "Failed to fetch history data."
 
 async def get_calendar_events(): # Fetches User's Google Calendars
-    logging.info("🛠️ TOOL EXECUTION: get_calendar_events")
+    logging.info("🔧 TOOL: get_calendar_events")
     
     token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
     raw_cal_ids = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
@@ -451,7 +449,7 @@ async def get_calendar_events(): # Fetches User's Google Calendars
         return "The system encountered an error trying to read the calendars."
 
 async def overseer_search_movie(query: str) -> str: # Searches for movies in Overseer
-    logging.info(f"🎬 SEARCH MOVIE: {query}")
+    logging.info(f"🔧 TOOL: overseer_search_movie | '{query}'")
     def sync_search():
         encoded_query = quote(query)
         url = f"{OVERSEER_URL}/search?query={encoded_query}"
@@ -494,8 +492,7 @@ async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
 
-        logging.info(f"Overseer status: {r.status_code}")
-        logging.info(f"Overseer response body: {r.text}")
+        logging.info(f"🔧 TOOL: overseer_request_movie | Status: {r.status_code}")
 
         if r.status_code == 201 or r.status_code == 200:
             return "SUCCESS: Movie requested for user."
@@ -509,7 +506,7 @@ async def overseer_request_movie(tmdb_id): # Requests a movie through Seerr
         return f"Request failed: {e}"
 
 async def overseer_search_tv(query: str) -> str: # Searches for TV shows in Overseer
-    logging.info(f"📺 SEARCH TV: {query}")
+    logging.info(f"🔧 TOOL: overseer_search_tv | '{query}'")
 
     def sync_search():
         encoded_query = quote(query)
@@ -551,8 +548,7 @@ async def overseer_request_tv_season(tmdb_id, season_number): # Requests a speci
     payload = {"mediaType": "tv", "mediaId": int(float(tmdb_id)), "seasons": [int(season_number)], "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
-        logging.info(f"Overseer status: {r.status_code}")
-        logging.info(f"Overseer response body: {r.text}")
+        logging.info(f"🔧 TOOL: overseer_request_tv_season | Status: {r.status_code}")
         if r.status_code == 409: return f"Season {season_number} is already available or pending."
         return f"SUCCESS: Season {season_number} requested for user."
     except Exception as e:
@@ -694,7 +690,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
     1. Generates a broad scene description to insert into the LLM's chat history context.
     2. Generates a strict, concise threat assessment to caption the Telegram photo.
     """
-    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
+    logging.info(f"🔧 TOOL: get_reolink_snapshot | Camera: {camera_name}")
     
     # 1. Parse configuration
     host = os.getenv("REOLINK_HOST")
@@ -753,14 +749,14 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
     # 2. Query Reolink API (Sequential Attempt)
     for proto in protocols:
         try:
-            logging.info(f"📹 REOLINK: Attempting connection via {proto['name']} to {host}...")
+            logging.info(f"📹 CAMERA: Connecting via {proto['name']} → {host}...")
             r = await http_client.get(proto["url"], timeout=8)
             
             if r.status_code == 200:
                 if r.content.startswith(b'\xff\xd8'):
                     response_content = r.content
                     successful_protocol = proto["name"]
-                    logging.info(f"✅ REOLINK: Securely fetched snapshot using {proto['name']}!")
+                    logging.info(f"✅ CAMERA: Snapshot fetched via {proto['name']}")
                     break
                 else:
                     error_msg = r.content.decode('utf-8', errors='ignore')
@@ -784,7 +780,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         b64_image = base64.b64encode(response_content).decode('utf-8')
         
         # --- STAGE 1: Broad Scene Description (For LLM Memory Context) ---
-        logging.info("👁️ REOLINK [STAGE 1]: Requesting general scene context...")
+        logging.info("👁️ VISION [1/2]: Generating scene context...")
         context_prompt = (
             f"This is a live feed from the {matched_camera_name} camera. "
             "Concisely describe the layout, stationary structures, background, "
@@ -793,7 +789,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         scene_context = await get_image_description(b64_image, context_prompt)
         
         # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
-        logging.info("👁️ REOLINK [STAGE 2]: Requesting focused threat analysis...")
+        logging.info("👁️ VISION [2/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
@@ -839,7 +835,7 @@ async def get_available_cameras() -> str: # Gets all available cameras
     """
     Returns a clean, human-readable list of all configured home security cameras.
     """
-    logging.info("🛠️ TOOL EXECUTION: get_available_cameras")
+    logging.info("🔧 TOOL: get_available_cameras")
     raw_cams = os.getenv("REOLINK_CAMERAS", "")
     
     if not raw_cams:
@@ -876,7 +872,7 @@ async def trigger_webhook_alert(camera_name: str):
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
         return
         
-    logging.info(f"🚨 MOTION DETECTED: Grabbing snapshot for person-detection pre-filter on '{camera_name}'...")
+    logging.info(f"🚨 SECURITY: Person trigger received for '{camera_name}' — running pre-filter...")
 
     # --- STEP 1: Silently grab a raw snapshot for the person-detection check ---
     host = os.getenv("REOLINK_HOST")
@@ -922,14 +918,14 @@ async def trigger_webhook_alert(camera_name: str):
     verdict = await get_image_description(b64_image, person_check_prompt)
     verdict_clean = verdict.strip().upper().split()[0] if verdict.strip() else "NO"
 
-    logging.info(f"👤 PERSON FILTER: Camera '{camera_name}' verdict → '{verdict_clean}'")
+    logging.info(f"👤 PERSON FILTER: '{camera_name}' → {verdict_clean}")
 
     if verdict_clean != "YES":
-        logging.info(f"✅ PERSON FILTER: No person detected on '{camera_name}'. Suppressing alert (motion was likely animal/wind/vehicle).")
+        logging.info(f"✅ SECURITY: No person on '{camera_name}' — alert suppressed")
         return
 
     # --- STEP 3: Person confirmed — send the full alert ---
-    logging.info(f"🚨 PERSON CONFIRMED on '{camera_name}': Dispatching full AI threat analysis...")
+    logging.info(f"🚨 SECURITY: Person confirmed on '{camera_name}' — dispatching full alert...")
     await application_bot.send_message(
         chat_id=TARGET_CHAT_ID,
         text=f"🚨 <b>Person Detected:</b> Someone is on the <b>{camera_name.upper()}</b> camera. Running analysis...",
@@ -937,14 +933,14 @@ async def trigger_webhook_alert(camera_name: str):
     )
 
     result = await get_reolink_snapshot(camera_name)
-    logging.info(f"🚨 PERSON ALERT: AI threat sweep completed. Result: {result}")
+    logging.info(f"✅ SECURITY: Alert dispatched for '{camera_name}'")
 
 async def reolink_polling_loop(application):
     """Runs a highly diagnostic background loop that polls the Reolink NVR for motion states."""
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
         return
         
-    logging.info("📹 REOLINK: Initializing background active-polling security loop...")
+    logging.info("📹 CAMERA POLL: Initializing background person-detection polling loop...")
     
     host = os.getenv("REOLINK_HOST")
     user = os.getenv("REOLINK_USER")
@@ -964,7 +960,7 @@ async def reolink_polling_loop(application):
         logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Check your REOLINK_CAMERAS environment variable.")
         return
         
-    logging.info(f"📹 REOLINK: Successfully mapped {len(camera_map)} cameras from config: {list(camera_map.keys())}")
+    logging.info(f"📹 CAMERA POLL: Mapped {len(camera_map)} cameras — {list(camera_map.keys())}")
     
     # Track state: {channel_id: {"last_state": 0, "cooldown_until": datetime}}
     state_tracker = {
@@ -980,33 +976,32 @@ async def reolink_polling_loop(application):
     test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetAiState&user={user}&password={password}"
     test_body = [{"cmd": "GetAiState", "param": {"channel": int(test_chan)}}]
     
-    logging.info(f"🔍 REOLINK DIAGNOSTIC: Running startup self-test (GetAiState) on camera '{test_cam}' (Channel {test_chan})...")
+    logging.info(f"📹 CAMERA POLL: Running startup self-test on '{test_cam}' (ch.{test_chan})...")
     try:
         r = await http_client.post(test_url, json=test_body, timeout=10)
-        logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS connection response status code: {r.status_code}")
+        logging.info(f"📹 CAMERA POLL: Self-test HTTPS status {r.status_code}")
         
         if r.status_code != 200:
             # Try HTTP
             test_url_http = test_url.replace("https://", "http://")
-            logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTPS failed. Trying HTTP fallback to {host}...")
+            logging.info(f"📹 CAMERA POLL: HTTPS failed — trying HTTP fallback...")
             r = await http_client.post(test_url_http, json=test_body, timeout=10)
-            logging.info(f"🔍 REOLINK DIAGNOSTIC: Direct HTTP connection response status code: {r.status_code}")
+            logging.info(f"📹 CAMERA POLL: HTTP fallback status {r.status_code}")
             
         if r.status_code == 200:
             raw_json = r.json()
-            logging.info(f"🔍 REOLINK DIAGNOSTIC: Raw JSON payload returned from your firmware: {raw_json}")
             # Log whether AI person detection is supported on this channel
             if isinstance(raw_json, list) and raw_json:
                 ai_value = raw_json[0].get("value", {})
                 people_support = ai_value.get("people", {}).get("support", 0)
-                logging.info(f"🔍 REOLINK DIAGNOSTIC: AI person detection supported on '{test_cam}': {'YES ✅' if people_support else 'NO ❌ — upgrade firmware or use a supported camera'}")
+                logging.info(f"📹 CAMERA POLL: AI person detection on '{test_cam}': {'supported ✅' if people_support else 'NOT supported ❌ — upgrade firmware'}")
         else:
-            logging.error(f"❌ REOLINK DIAGNOSTIC: NVR returned status {r.status_code}. Are 'CGI' and 'HTTPS' ports enabled on your Reolink NVR settings?")
+            logging.error(f"❌ CAMERA POLL: NVR returned status {r.status_code} — check CGI/HTTPS port settings")
     except Exception as e:
         logging.error(f"❌ REOLINK DIAGNOSTIC: Connection self-test crashed: {e}", exc_info=True)
     # ------------------------------------
 
-    logging.info("📹 REOLINK: Diagnostic test complete. Starting security polling loop...")
+    logging.info("📹 CAMERA POLL: Self-test complete — polling loop active")
     
     # Run loop forever inside the bot's asynchronous thread
     while True:
@@ -1048,7 +1043,7 @@ async def reolink_polling_loop(application):
                             if last_state == 0 and current_state == 1:
                                 if now > tracker["cooldown_until"]:
                                     tracker["cooldown_until"] = now + timedelta(seconds=60)
-                                    logging.info(f"🚨 REOLINK POLLING: Person detected on camera '{camera_name}'!")
+                                    logging.info(f"🚨 CAMERA POLL: Person detected on '{camera_name}' — triggering alert")
                                     asyncio.create_task(trigger_webhook_alert(camera_name))
 
                             tracker["last_state"] = current_state
@@ -1340,21 +1335,20 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
-            # Safe terminal logging (excludes raw image dumps)
-            debug_payload = {k: v for k, v in payload.items() if k != "tools"}
-            logging.info(f"📤 OLLAMA PAYLOAD DEBUG:\n{json.dumps(debug_payload, indent=2)}")
-
-            logging.info(f"⏳ OLLAMA STATUS: Thinking... (Loop: {loop_count+1})")
+            # Log only the user's query, not the full payload
+            last_user_msg = next((m["content"] for m in reversed(ollama_history) if m.get("role") == "user"), "(no user message)")
+            if isinstance(last_user_msg, list):
+                last_user_msg = next((p.get("text", "") for p in last_user_msg if isinstance(p, dict) and p.get("type") == "text"), "(image)")
+            logging.info(f"💬 USER: {str(last_user_msg)[:200]}")
+            logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
             r = await http_client.post(url, json=payload, timeout=300)
             
             if r.status_code != 200:
-                logging.error(f"❌ Ollama Error {r.status_code}: {r.text}")
+                logging.error(f"❌ ENGINE: Ollama returned {r.status_code} — {r.text[:200]}")
                 return "Ollama connection error.", False
 
             res = r.json()
             msg = res.get('message', {})
-            
-            logging.info(f"🔍 DEBUG: Ollama response keys: {list(msg.keys())}")
             
             # Tool Executions
             if msg.get("tool_calls"):
@@ -1367,7 +1361,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                     await application_bot.send_message(chat_id=TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
                     
-                    logging.info(f"🛠️ OLLAMA TOOL: {fn} | Args: {args}")
+                    logging.info(f"🔧 TOOL: {fn} | Args: {args}")
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
@@ -1381,13 +1375,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             content = msg.get('content', "")
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             
-            # ======== RAW OLLAMA DIAGNOSTIC LOGS ========
-            logging.info("==================================================")
-            logging.info("🚨 RAW UNEDITED OLLAMA RESPONSE RECEIVED:")
-            logging.info(f"🔑 Keys in message payload: {list(msg.keys())}")
-            logging.info(f"🧠 Raw Reasoning Block (Length: {len(reasoning)} chars):\n{reasoning}")
-            logging.info(f"💬 Raw Content Block (Length: {len(content)} chars):\n{content}")
-            logging.info("==================================================")
+            logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {len(reasoning)} chars reasoning" if reasoning else ""))
 
             if reasoning:
                 start_think_tag = "<" + "think" + ">"
@@ -1396,11 +1384,11 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             else:
                 final_text = content
 
-            logging.info(f"✨ OLLAMA RESPONSE SENT TO SPLITTER: {final_text[:150]}...")
+
             return final_text, voice_sent_via_tool
             
         except Exception as e:
-            logging.error(f"🔥 EMERYCHAT CRASH: {e}", exc_info=True)
+            logging.error(f"❌ ENGINE: Crash — {e}", exc_info=True)
             return "EMERYCHAT engine failure.", False
             
     return "Timeout.", False
@@ -1444,7 +1432,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         content = f"[{now_str}] {update.message.text}"
         
-    logging.info(f"👤 USER PROMPT (Chat: {chat_id}): {content}")
+    logging.info(f"💬 USER (chat {chat_id}): {str(content)[:120]}")
     chat_histories[chat_id].append({"role": "user", "content": content})
     
     # --- TYPING INDICATOR LOOP ---
@@ -1551,7 +1539,7 @@ async def send_safe_large_message(update: Update, text: str):
 async def run_brief(c, prompt, label):
     global TARGET_CHAT_ID
     if not TARGET_CHAT_ID: return
-    logging.info(f"⏰ SCHEDULED JOB: {label}")
+    logging.info(f"📅 JOB: {label}")
     res_text, _= await emery_engine(deque([{"role": "user", "content": prompt}]))
     await c.bot.send_message(TARGET_CHAT_ID, f"🛡️ <b>EMERYCHAT JOB: {label}</b>\n\n{emery_format(res_text)}", parse_mode="HTML")
 
@@ -1561,9 +1549,6 @@ async def job_morning_weather(c): await run_brief(c, "Look up weather with the g
 async def job_nasa(c): await run_brief(c, "Use get_nasa_apod. Provide title, explanation, and MUST provide image URL link.", "Today In Space")
 async def job_calendar(c): await run_brief(c, "Check User's calendar with get_calendar_events for any events the User has today and list them chronologically.", "Daily Planner")
 async def job_today_in_history(c): await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
-
-
-from telegram.request import HTTPXRequest
 
 # --- GLOBAL TELEGRAM ERROR HANDLER ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1597,5 +1582,5 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("clear", lambda u, c: chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
 
-    logging.info("🚀 EMERYCHAT IS ONLINE...")
+    logging.info(f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | vision: {VISION_MODEL_ID}")
     application.run_polling()
