@@ -794,6 +794,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         security_prompt = f"Describe any people, vehicles, animals, or packages visible in this {matched_camera_name} camera feed."
         
         concise_report = await get_image_description(b64_image, security_prompt)
+        logging.info(f"👁️ VISION [2/2] Raw Response: '{concise_report}'")
         
         # Clean up empty or negative responses from small models like moondream
         lower_report = concise_report.lower() if concise_report else ""
