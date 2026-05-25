@@ -925,7 +925,7 @@ async def reolink_polling_loop(application):
     }
 
     # --- STARTUP DIAGNOSTIC SELF-TEST ---
-    test_cam = list(camera_map.keys())
+    test_cam = next(iter(camera_map))
     test_chan = camera_map[test_cam]
     test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={test_chan}&user={user}&password={password}"
     
