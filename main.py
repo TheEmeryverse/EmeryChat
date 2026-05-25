@@ -1604,7 +1604,6 @@ if __name__ == '__main__':
     application.job_queue.run_daily(job_morning_briefing, time=time(3, 0, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_morning_weather, time=time(3, 5, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_calendar, time=time(3, 10, tzinfo=USER_TIMEZONE))
-    application.job_queue.run_daily(job_security_assessment, time=time(3, 20, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_nasa, time=time(21, 0, tzinfo=USER_TIMEZONE))
     application.job_queue.run_daily(job_today_in_history, time=time(21, 5, tzinfo=USER_TIMEZONE))
     
