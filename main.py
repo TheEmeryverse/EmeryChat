@@ -811,9 +811,28 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         compressed_bytes = compress_image_bytes(response_content)
         b64_image = base64.b64encode(compressed_bytes).decode('utf-8')
         
+        # Parse camera descriptions for prompting context
+        descriptions_raw = os.getenv("REOLINK_CAMERA_DESCRIPTIONS", "")
+        camera_descriptions = {}
+        for item in descriptions_raw.split(","):
+            if ":" in item:
+                name, desc = item.split(":", 1)
+                camera_descriptions[name.strip().lower()] = desc.strip()
+                
+        default_descriptions = {
+            "frontdoor": "the front door porch and entryway walkway",
+            "backdoor": "the back door patio and deck area",
+            "backyard": "the main grass lawn and back yard perimeter",
+            "driveway": "the driveway leading to the street",
+            "front": "the front yard and sidewalk area facing the street",
+            "alleyway": "the side alleyway between the buildings"
+        }
+        camera_desc = camera_descriptions.get(matched_camera_name, default_descriptions.get(matched_camera_name, ""))
+        desc_context = f" (which is looking at: {camera_desc})" if camera_desc else ""
+        
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
-        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
+        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
             - Vehicles (type, color, position)
@@ -847,7 +866,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
             logging.info("👁️ VISION [2/2]: Generating scene context...")
             context_prompt = (
-                f"This is a live feed from the {matched_camera_name} camera. "
+                f"This is a live feed from the {matched_camera_name} camera{desc_context}. "
                 "Concisely describe the layout, stationary structures, background, "
                 "and visible inanimate objects in the frame."
             )
