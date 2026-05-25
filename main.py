@@ -687,7 +687,7 @@ Detailed Visual Input:
         logging.error(f"❌ Reolink security filter crash: {e}", exc_info=True)
         return "Activity detected, but security filtering encountered an error."
 
-async def get_reolink_snapshot(camera_name: str) -> str:
+async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camera and sends it to the user.
     """
     Grabs a live snapshot from a specified Reolink camera channel.
     Runs a two-stage vision analysis:
@@ -835,7 +835,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         logging.error(f"❌ Reolink Tool Analysis/Send Crash: {e}", exc_info=True)
         return f"Successfully grabbed the image via {successful_protocol}, but failed to analyze/send it: {e}"
 
-async def get_available_cameras() -> str:
+async def get_available_cameras() -> str: # Gets all available cameras
     """
     Returns a clean, human-readable list of all configured home security cameras.
     """
@@ -858,6 +858,113 @@ async def get_available_cameras() -> str:
         
     formatted_list = ", ".join([f"'{c}'" for c in camera_names])
     return f"The following security cameras are online and available: {formatted_list}"
+
+async def trigger_webhook_alert(camera_name: str): # Used for the reolink polling loop
+    """Automatically fetches NVR frame, filters threats, and pushes to Telegram."""
+    global TARGET_CHAT_ID
+    
+    # Fallback: Recover TARGET_CHAT_ID from active chat histories if not yet set
+    if not TARGET_CHAT_ID and chat_histories:
+        TARGET_CHAT_ID = list(chat_histories.keys())
+        
+    if not TARGET_CHAT_ID:
+        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
+        return
+        
+    logging.info(f"🚨 MOTION DETECTED: Dispatching automatic threat check for '{camera_name}'...")
+    
+    # Send a notification message that motion occurred
+    await application_bot.send_message(
+        chat_id=TARGET_CHAT_ID,
+        text=f"🔔 <b>Security Alert:</b> Motion detected on the <b>{camera_name.upper()}</b> camera. Running AI analysis...",
+        parse_mode="HTML"
+    )
+    
+    # Trigger your standard, optimized camera capture and filtering tool
+    result = await get_reolink_snapshot(camera_name)
+    logging.info(f"🚨 MOTION DETECTED: AI threat sweep completed. Result: {result}")
+
+async def reolink_polling_loop(application): # Used for the reolink polling loop
+    """Runs a lightweight background loop that polls the Reolink NVR for motion states."""
+    if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
+        return
+        
+    logging.info("📹 REOLINK: Initializing background active-polling security loop...")
+    
+    host = os.getenv("REOLINK_HOST")
+    user = os.getenv("REOLINK_USER")
+    password = os.getenv("REOLINK_PASSWORD")
+    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
+    
+    # Map camera names to channel IDs
+    camera_map = {}
+    for item in cameras_raw.split(","):
+        colon_idx = item.find(":")
+        if colon_idx != -1:
+            name = item[:colon_idx].strip()
+            chan = item[colon_idx+1:].strip()
+            camera_map[name] = chan
+            
+    if not camera_map:
+        logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Active-polling disabled.")
+        return
+        
+    # Track state: {channel_id: {"last_state": 0, "cooldown_until": datetime}}
+    state_tracker = {
+        chan: {
+            "last_state": 0, 
+            "cooldown_until": datetime.min.replace(tzinfo=pytz.UTC)
+        } for chan in camera_map.values()
+    }
+    
+    # Run loop forever inside the bot's asynchronous thread
+    while True:
+        try:
+            # Poll camera states every 2.5 seconds
+            await asyncio.sleep(2.5)
+            
+            for camera_name, channel in camera_map.items():
+                url = f"https://{host}/cgi-bin/api.cgi?cmd=GetMdState&channel={channel}&user={user}&password={password}"
+                
+                try:
+                    r = await http_client.get(url, timeout=4)
+                    if r.status_code != 200:
+                        # Fallback to HTTP if HTTPS fails
+                        url_http = url.replace("https://", "http://")
+                        r = await http_client.get(url_http, timeout=4)
+                        
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            value = data.get("value", {})
+                            current_state = value.get("state", 0) # 1 = Active Motion, 0 = Clear
+                            
+                            tracker = state_tracker[channel]
+                            last_state = tracker["last_state"]
+                            now = datetime.now(pytz.UTC)
+                            
+                            # State Transition: Motion just started (0 -> 1)
+                            if last_state == 0 and current_state == 1:
+                                if now > tracker["cooldown_until"]:
+                                    # Apply a 60-second cooldown to prevent flood alerts of the same event
+                                    tracker["cooldown_until"] = now + timedelta(seconds=60)
+                                    logging.info(f"🚨 REOLINK POLLING: Motion detected on camera '{camera_name}'!")
+                                    
+                                    # Dispatch snapshot and AI analysis task in background
+                                    asyncio.create_task(trigger_webhook_alert(camera_name))
+                                    
+                            tracker["last_state"] = current_state
+                except Exception as inner_e:
+                    # Log silently to avoid terminal spam if network blips occur
+                    logging.debug(f"REOLINK POLLING: Connection error on channel {channel}: {inner_e}")
+                    
+        except Exception as outer_e:
+            logging.error(f"❌ REOLINK POLLING: Polling loop exception: {outer_e}")
+
+async def start_reolink_polling(application): # Used for the reolink polling loop
+    """Starts the active-polling loop as a background task upon bot initialization."""
+    if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
+        asyncio.create_task(reolink_polling_loop(application))
 
 # Create empty containers first
 AVAILABLE_TOOLS = {}
@@ -1364,14 +1471,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         logging.error(f"⚠️ Telegram API Exception: {context.error}", exc_info=True)
 
 if __name__ == '__main__':
-    # Build the application with an increased network timeout (30 seconds)
-    # to prevent timeouts when your local CPU is heavily loaded by Ollama.
     t_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
     
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_request).build()
+    application = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .request(t_request)
+        .post_init(start_reolink_polling)  # Registers active-polling startup
+        .build()
+    )
     application_bot = application.bot
     
-    # Register the global error handler
     application.add_error_handler(error_handler)
     
     # Schedule the jobs
