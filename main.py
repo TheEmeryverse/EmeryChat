@@ -171,6 +171,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
                 }
             ],
             "stream": False,
+            "keep_alive": -1,
             "options": {
                 "num_ctx": ctx_size
             }
@@ -662,6 +663,7 @@ Detailed Visual Input:
             "model": MODEL_ID,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
+            "keep_alive": -1,
             "options": {
                 "temperature": 0.1,
                 "num_ctx": 4096
