@@ -784,17 +784,8 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
     try:
         b64_image = base64.b64encode(response_content).decode('utf-8')
         
-        # --- STAGE 1: Broad Scene Description (For LLM Memory Context) ---
-        logging.info("👁️ VISION [1/2]: Generating scene context...")
-        context_prompt = (
-            f"This is a live feed from the {matched_camera_name} camera. "
-            "Concisely describe the layout, stationary structures, background, "
-            "and visible inanimate objects in the frame."
-        )
-        scene_context = await get_image_description(b64_image, context_prompt)
-        
-        # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
-        logging.info("👁️ VISION [2/2]: Running threat analysis...")
+        # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
+        logging.info("👁️ VISION [1/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
@@ -809,13 +800,13 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
             4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
             
         concise_report = await get_image_description(b64_image, security_prompt)
-        logging.info(f"👁️ VISION [2/2] Raw Response: '{concise_report}'")
+        logging.info(f"👁️ VISION [1/2] Raw Response: '{concise_report}'")
         
         # Fallback if vision analysis returns empty response
         if not concise_report or not concise_report.strip():
             concise_report = "No active threats or activity detected."
         
-        # 4. Send the photo to Telegram captioned with the clean threat report
+        # --- STAGE 2: Send the photo to Telegram captioned with the clean threat report ---
         if TARGET_CHAT_ID:
             telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             
@@ -825,6 +816,15 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
                 caption=telegram_caption,
                 parse_mode="HTML"
             )
+            
+            # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
+            logging.info("👁️ VISION [2/2]: Generating scene context...")
+            context_prompt = (
+                f"This is a live feed from the {matched_camera_name} camera. "
+                "Concisely describe the layout, stationary structures, background, "
+                "and visible inanimate objects in the frame."
+            )
+            scene_context = await get_image_description(b64_image, context_prompt)
             
             # 5. Return both datasets to Emery's core loop.
             # This inserts the spatial scene layout and active alert details directly into her memory context.
