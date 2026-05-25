@@ -671,14 +671,11 @@ async def get_calendar_events(): # Fetches User's Google Calendars
         return "The system encountered an error trying to read the calendars."
 
 def get_nest_credentials():
-    token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
+    token_path = os.getenv("NEST_TOKEN_PATH", "nest_token.json")
     if not os.path.exists(token_path):
-        raise FileNotFoundError("Google token file not found.")
+        raise FileNotFoundError("Google Nest token file not found.")
         
-    scopes = [
-        'https://www.googleapis.com/auth/calendar.readonly',
-        'https://www.googleapis.com/auth/sdm.servicehub.uip.pubsub'
-    ]
+    scopes = ['https://www.googleapis.com/auth/sdm.service']
     creds = Credentials.from_authorized_user_file(token_path, scopes)
     
     if creds and creds.expired and creds.refresh_token:

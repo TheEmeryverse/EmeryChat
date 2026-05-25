@@ -1,6 +1,8 @@
 .env
 token.json
 credentials.json
+nest_token.json
+nest_credentials.json
 script.py
 .DS_Store
 
