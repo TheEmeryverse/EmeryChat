@@ -830,9 +830,14 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         camera_desc = camera_descriptions.get(matched_camera_name, default_descriptions.get(matched_camera_name, ""))
         desc_context = f" (which is looking at: {camera_desc})" if camera_desc else ""
         
+        # Inject current date/time context for vision processing
+        now_dt = datetime.now(USER_TIMEZONE)
+        now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
+        time_context = f" The snapshot was captured on {now_str}."
+        
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
-        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.
+        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
             - Vehicles (type, color, position)
@@ -866,7 +871,7 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
             logging.info("👁️ VISION [2/2]: Generating scene context...")
             context_prompt = (
-                f"This is a live feed from the {matched_camera_name} camera{desc_context}. "
+                f"This is a live feed from the {matched_camera_name} camera{desc_context}.{time_context} "
                 "Concisely describe the layout, stationary structures, background, "
                 "and visible inanimate objects in the frame."
             )
