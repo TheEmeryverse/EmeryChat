@@ -689,10 +689,11 @@ Detailed Visual Input:
 async def get_reolink_snapshot(camera_name: str) -> str:
     """
     Grabs a live snapshot from a specified Reolink camera channel.
-    Attempts HTTPS, falls back to HTTP, and uses a highly disciplined single-stage 
-    vision prompt to get a concise, threat-focused security report.
+    Runs a two-stage vision analysis:
+    1. Generates a broad scene description to insert into the LLM's chat history context.
+    2. Generates a strict, concise threat assessment to caption the Telegram photo.
     """
-    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera Input: {camera_name}")
+    logging.info(f"🛠️ TOOL EXECUTION: get_reolink_snapshot | Camera: {camera_name}")
     
     # 1. Parse configuration
     host = os.getenv("REOLINK_HOST")
@@ -717,26 +718,22 @@ async def get_reolink_snapshot(camera_name: str) -> str:
     channel = None
     matched_camera_name = None
 
-    # --- STRICT PASS 1: Cleaned Exact Match ---
+    # Strict Pass 1: Cleaned Exact Match
     for key, val in camera_map.items():
         cleaned_key = key.replace(" ", "").replace("_", "").replace("-", "")
         if cleaned_key == cleaned_target:
             channel = val
             matched_camera_name = key
-            logging.info(f"📹 REOLINK: Exact Match Found! Key: '{key}' maps to Channel: {channel}")
             break
             
-    # --- FALLBACK PASS 2: Substring Match (Only if exact match failed) ---
+    # Fallback Pass 2: Substring Match
     if not channel:
-        # Sort keys by length descending so longer keys (like "frontdoor") 
-        # are evaluated before shorter ones (like "front") to prevent greedy collisions
         sorted_keys = sorted(camera_map.keys(), key=len, reverse=True)
         for key in sorted_keys:
             cleaned_key = key.replace(" ", "").replace("_", "").replace("-", "")
             if cleaned_target in cleaned_key or cleaned_key in cleaned_target:
                 channel = camera_map[key]
                 matched_camera_name = key
-                logging.info(f"📹 REOLINK: Fallback Substring Match! Key: '{key}' maps to Channel: {channel}")
                 break
 
     if not channel:
@@ -759,7 +756,6 @@ async def get_reolink_snapshot(camera_name: str) -> str:
             r = await http_client.get(proto["url"], timeout=8)
             
             if r.status_code == 200:
-                # Ensure we actually got an image (JPEG hex starts with FF D8)
                 if r.content.startswith(b'\xff\xd8'):
                     response_content = r.content
                     successful_protocol = proto["name"]
@@ -782,11 +778,21 @@ async def get_reolink_snapshot(camera_name: str) -> str:
                 f"1. Please REBOOT your Reolink NVR to apply the HTTPS/CGI settings. "
                 f"2. If the bot runs in Docker, ensure Docker's firewall allows routing to your LAN.")
 
-    # 3. Analyze the snapshot using your local vision model
+    # 3. Two-Stage Vision Analysis
     try:
         b64_image = base64.b64encode(response_content).decode('utf-8')
-        logging.info("👁️ REOLINK: Requesting threat analysis from vision model...")
         
+        # --- STAGE 1: Broad Scene Description (For LLM Memory Context) ---
+        logging.info("👁️ REOLINK [STAGE 1]: Requesting general scene context...")
+        context_prompt = (
+            f"This is a live feed from the {matched_camera_name} camera. "
+            "Briefly but comprehensively describe the layout, stationary structures, background, "
+            "and visible inanimate objects in the frame so a text-only assistant knows the environment."
+        )
+        scene_context = await get_image_description(b64_image, context_prompt)
+        
+        # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
+        logging.info("👁️ REOLINK [STAGE 2]: Requesting focused threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
             Analyze this image and report ONLY active entities, security hazards, or items of interest:
             - People (exact clothing, appearance, behavior)
@@ -794,7 +800,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
             - Deliveries, packages, or tools left out of place
             - Animals or unexpected objects on walkways
 
-            STRICT SECURITY FILTER RULES:
+        STRICT SECURITY FILTER RULES:
             1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
             2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up your driveway").
             3. Keep your output extremely concise (exactly 1 or 2 sentences max).
@@ -802,7 +808,7 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         
         concise_report = await get_image_description(b64_image, security_prompt)
         
-        # 4. Send the photo to Telegram captioned with the clean security report
+        # 4. Send the photo to Telegram captioned with the clean threat report
         if TARGET_CHAT_ID:
             telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             
@@ -813,7 +819,14 @@ async def get_reolink_snapshot(camera_name: str) -> str:
                 parse_mode="HTML"
             )
             
-            return f"SUCCESS: Live photo sent directly to user. Security report was: '{concise_report}'. You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."
+            # 5. Return both datasets to Emery's core loop.
+            # This inserts the spatial scene layout and active alert details directly into her memory context.
+            return (
+                f"SUCCESS: Live photo sent directly to user. "
+                f"For your context, here is what the '{matched_camera_name}' environment looks like: '{scene_context}'. "
+                f"The active threat report sent to the user was: '{concise_report}'. "
+                f"You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."
+            )
             
         return "Failed to send photo: Chat context lost."
         
