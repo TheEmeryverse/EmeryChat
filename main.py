@@ -144,6 +144,7 @@ def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 
         from PIL import Image
         import io
         
+        orig_size = len(image_bytes)
         img = Image.open(io.BytesIO(image_bytes))
         # Keep aspect ratio and scale down if larger than max_dim
         img.thumbnail((max_dim, max_dim))
@@ -154,7 +155,11 @@ def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 
             
         compressed_buffer = io.BytesIO()
         img.save(compressed_buffer, format="JPEG", quality=quality, optimize=True)
-        return compressed_buffer.getvalue()
+        compressed_bytes = compressed_buffer.getvalue()
+        comp_size = len(compressed_bytes)
+        
+        logging.info(f"🖼️ COMPRESS: Reduced image size from {orig_size / 1024:.1f}KB to {comp_size / 1024:.1f}KB")
+        return compressed_bytes
     except Exception as e:
         logging.warning(f"⚠️ IMAGE COMPRESSION: Failed to compress image ({e}) — using original bytes.")
         return image_bytes
