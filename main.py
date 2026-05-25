@@ -820,12 +820,12 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
                 camera_descriptions[name.strip().lower()] = desc.strip()
                 
         default_descriptions = {
-            "frontdoor": "the front door porch and entryway walkway",
-            "backdoor": "the back door patio and deck area",
-            "backyard": "the main grass lawn and back yard perimeter",
+            "frontdoor": "A doorbell camera located on the front door, looking at the front patio and sidewalk",
+            "backdoor": "the back door, back patio, and side entrance through the gate. Viewing the rear of the house.",
+            "backyard": "The entire backyard, with a perimeter fence, stone pavers, and garden beds located in the middle.",
             "driveway": "the driveway leading to the street",
             "front": "the front yard and sidewalk area facing the street",
-            "alleyway": "the side alleyway between the buildings"
+            "alleyway": "the back parking off the alleyway, located behind the detached garage."
         }
         camera_desc = camera_descriptions.get(matched_camera_name, default_descriptions.get(matched_camera_name, ""))
         desc_context = f" (which is looking at: {camera_desc})" if camera_desc else ""
