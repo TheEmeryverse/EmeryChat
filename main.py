@@ -152,11 +152,9 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
         # Strip out newlines/carriage returns and data headers (equivalent to tr -d '\n')
         clean_b64 = b64_data.replace("\n", "").replace("\r", "").strip()
         if "," in clean_b64:
-            clean_b64 = clean_b64.split(",", 1)
+            clean_b64 = clean_b64.split(",", 1)[1]
 
-        prompt_text = "What is in this image?"
-        if user_caption:
-            prompt_text = f" Additional context from user: {user_caption}"
+        prompt_text = user_caption if user_caption else "What is in this image?"
 
         ctx_size = int(os.getenv("OLLAMA_VISION_NUM_CTX", "65536"))
 
@@ -788,27 +786,15 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         
         # --- STAGE 1: Broad Scene Description (For LLM Memory Context) ---
         logging.info("👁️ VISION [1/2]: Generating scene context...")
-        context_prompt = (
-            f"This is a live feed from the {matched_camera_name} camera. "
-            "Concisely describe the layout, stationary structures, background, "
-            "and visible inanimate objects in the frame."
-        )
+        context_prompt = f"Describe the layout, background structures, and stationary objects in this image from the {matched_camera_name} camera."
         scene_context = await get_image_description(b64_image, context_prompt)
         
         # --- STAGE 2: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [2/2]: Running threat analysis...")
-        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed.
-            Analyze this image and report ONLY active entities, security hazards, or items of interest:
-            - People (exact clothing, appearance, behavior)
-            - Vehicles (type, color, position)
-            - Deliveries, packages, or tools left out of place
-            - Animals or unexpected objects on walkways
-
-        STRICT SECURITY FILTER RULES:
-            1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
-            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up the driveway").
-            3. Keep your output extremely concise (exactly 1 or 2 sentences max).
-            4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
+        security_prompt = (
+            f"Describe any people, vehicles, animals, or packages visible in this {matched_camera_name} camera feed. "
+            "If there are none, reply with 'No active threats or activity detected.'"
+        )
         
         concise_report = await get_image_description(b64_image, security_prompt)
         
@@ -915,13 +901,7 @@ async def trigger_webhook_alert(camera_name: str):
 
     # --- STEP 2: Run a fast, strict binary person-detection check ---
     b64_image = base64.b64encode(snapshot_content).decode('utf-8')
-    person_check_prompt = (
-        "You are a security camera person-detection classifier. "
-        "Look at this image and answer with EXACTLY one word only. "
-        "Reply 'YES' if there is a human person visible in the frame (even partially). "
-        "Reply 'NO' if there is no person — only animals, vehicles, empty scenery, shadows, or wind movement. "
-        "Do not explain. Do not add punctuation. One word only: YES or NO."
-    )
+    person_check_prompt = "Is there a human person in this image? Respond with YES or NO."
     verdict = await get_image_description(b64_image, person_check_prompt)
     verdict_clean = verdict.strip().upper().split()[0] if verdict.strip() else "NO"
 
@@ -1342,11 +1322,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             payload["tools"] = tools_schema
 
         try:
-            # Log only the user's query, not the full payload
-            last_user_msg = next((m["content"] for m in reversed(ollama_history) if m.get("role") == "user"), "(no user message)")
-            if isinstance(last_user_msg, list):
-                last_user_msg = next((p.get("text", "") for p in last_user_msg if isinstance(p, dict) and p.get("type") == "text"), "(image)")
-            logging.info(f"💬 USER: {str(last_user_msg)[:200]}")
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
             r = await http_client.post(url, json=payload, timeout=300)
             
