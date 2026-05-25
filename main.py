@@ -138,6 +138,27 @@ def get_current_system_prompt(): # Injects the system prompt into model's contex
     
     return prompt
 
+def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 75) -> bytes:
+    """Resizes and compresses image bytes to optimize payload size and vision model processing."""
+    try:
+        from PIL import Image
+        import io
+        
+        img = Image.open(io.BytesIO(image_bytes))
+        # Keep aspect ratio and scale down if larger than max_dim
+        img.thumbnail((max_dim, max_dim))
+        
+        # Convert to RGB mode if it's RGBA (JPEG doesn't support RGBA)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+            
+        compressed_buffer = io.BytesIO()
+        img.save(compressed_buffer, format="JPEG", quality=quality, optimize=True)
+        return compressed_buffer.getvalue()
+    except Exception as e:
+        logging.warning(f"⚠️ IMAGE COMPRESSION: Failed to compress image ({e}) — using original bytes.")
+        return image_bytes
+
 async def get_image_description(b64_data: str, user_caption: str) -> str:
     logging.info(f"👁️ VISION: Analyzing image ({VISION_MODEL_ID})...")
     try:
@@ -782,7 +803,8 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
 
     # 3. Two-Stage Vision Analysis
     try:
-        b64_image = base64.b64encode(response_content).decode('utf-8')
+        compressed_bytes = compress_image_bytes(response_content)
+        b64_image = base64.b64encode(compressed_bytes).decode('utf-8')
         
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
@@ -1371,7 +1393,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = f"[{now_str}] {transcription}"
     elif update.message.photo:
         p_file = await update.message.photo[-1].get_file()
-        b64 = base64.b64encode(await p_file.download_as_bytearray()).decode('utf-8')
+        photo_bytes = await p_file.download_as_bytearray()
+        compressed_bytes = compress_image_bytes(photo_bytes)
+        b64 = base64.b64encode(compressed_bytes).decode('utf-8')
         caption = update.message.caption or ""
         
         await update.message.reply_chat_action("typing")
