@@ -155,6 +155,7 @@ def get_easter(year):
     return datetime(year, month, day).date()
 
 def get_holidays_for_year(year):
+    logging.info(f"📅 DATE MATH: Generating holiday database for year {year}...")
     holidays = {
         "New Year's Day": datetime(year, 1, 1).date(),
         "Valentine's Day": datetime(year, 2, 14).date(),
@@ -188,6 +189,7 @@ def get_holidays_for_year(year):
     return holidays
 
 def get_active_holiday_info(today_date):
+    logging.info(f"📅 DATE MATH: Checking upcoming holidays for today_date={today_date}...")
     year = today_date.year
     hols_this_year = get_holidays_for_year(year)
     hols_next_year = get_holidays_for_year(year + 1)
@@ -201,23 +203,28 @@ def get_active_holiday_info(today_date):
             active_holidays.append((name, date_obj, diff))
             
     if not active_holidays:
+        logging.info("📅 DATE MATH: No active holidays or alerts in the next 5 days.")
         return ""
         
     lines = []
     active_holidays.sort(key=lambda x: x[2])
+    detected_hols = []
     for name, date_obj, diff in active_holidays:
         day_str = date_obj.strftime("%A, %B %d")
+        detected_hols.append(f"{name} (in {diff} days)")
         if diff == 0:
             lines.append(f"- Today is {name} ({day_str}).")
         else:
             lines.append(f"- Upcoming holiday: {name} on {day_str} (in {diff} day{'s' if diff > 1 else ''}).")
             
+    logging.info(f"📅 DATE MATH: Active holidays detected: {', '.join(detected_hols)}")
     return "\n" + "\n".join(lines)
 
 def get_active_birthday_info(birthday_str, today_date):
     if not birthday_str or birthday_str.upper() == "UNKNOWN":
         return ""
         
+    logging.info(f"🎂 DATE MATH: Checking birthday alerts for '{birthday_str}', today_date={today_date}...")
     month = None
     day = None
     
@@ -250,6 +257,7 @@ def get_active_birthday_info(birthday_str, today_date):
                 day = int(m2.group(2))
                 
     if not month or not day:
+        logging.info(f"🎂 DATE MATH: Unable to parse birthday format '{birthday_str}', defaulting to static text.")
         return f"\n- {USER_NAME}'s birthday: {birthday_str}."
         
     # Calculate this year's birthday
@@ -274,10 +282,13 @@ def get_active_birthday_info(birthday_str, today_date):
     if 0 <= diff <= 5:
         day_str = bday_date.strftime("%A, %B %d")
         if diff == 0:
+            logging.info(f"🎂 DATE MATH: Birthday alert active today for {USER_NAME}!")
             return f"\n- Today is {USER_NAME}'s birthday!"
         else:
+            logging.info(f"🎂 DATE MATH: Birthday alert active for {USER_NAME} (in {diff} days on {day_str})")
             return f"\n- Upcoming event: {USER_NAME}'s birthday is on {day_str} (in {diff} day{'s' if diff > 1 else ''})."
             
+    logging.info(f"🎂 DATE MATH: No active birthday alerts for {USER_NAME} (next occurrence is in {diff} days).")
     return ""
 
 def get_current_system_prompt(): # Injects the system prompt into model's context
