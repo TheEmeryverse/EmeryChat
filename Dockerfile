@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 # Copy the script and requirements
 COPY main.py .
 COPY token.json .
+COPY emery/ ./emery/
 
 # Install all dependencies including python-dotenv
 RUN pip install --no-cache-dir \
