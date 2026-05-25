@@ -797,15 +797,36 @@ async def get_reolink_snapshot(camera_name: str) -> str: # Gets image from camer
         logging.info(f"👁️ VISION [2/2] Raw Response: '{concise_report}'")
         
         # Clean up empty or negative responses from small models like moondream
-        lower_report = concise_report.lower() if concise_report else ""
-        if (
-            not concise_report
-            or "no people, vehicles" in lower_report
-            or "no person, vehicle" in lower_report
-            or "no objects or people" in lower_report
-            or "no visible objects" in lower_report
-            or "no active threats" in lower_report
-        ):
+        def check_if_clear(report):
+            if not report:
+                return True
+            lower_report = report.lower()
+            # Split text by periods, semicolons, and contrastive conjunctions
+            clauses = re.split(r'[.;]|\bbut\b|\bhowever\b|\bexcept\b|\byet\b', lower_report)
+            threat_keywords = {
+                'person', 'people', 'someone', 'man', 'woman', 'child', 'individual', 
+                'figure', 'intruder', 'human', 'car', 'cars', 'vehicle', 'vehicles', 
+                'truck', 'trucks', 'suv', 'van', 'motorcycle', 'bike', 'package', 
+                'packages', 'delivery', 'deliveries', 'box', 'envelope', 'dog', 
+                'cat', 'deer', 'fox', 'coyote', 'raccoon', 'bear'
+            }
+            negation_words = {'no', 'not', 'none', 'never', 'without', 'clear'}
+            detected_threats = []
+            
+            for clause in clauses:
+                clause = clause.strip()
+                if not clause:
+                    continue
+                clean_clause = re.sub(r'[^\w\s]', ' ', clause)
+                words = clean_clause.split()
+                clause_threats = [w for w in words if w in threat_keywords]
+                if clause_threats:
+                    has_negation = any(neg in words for neg in negation_words)
+                    if not has_negation:
+                        detected_threats.extend(clause_threats)
+            return len(detected_threats) == 0
+
+        if check_if_clear(concise_report):
             concise_report = "No active threats or activity detected."
         
         # 4. Send the photo to Telegram captioned with the clean threat report
