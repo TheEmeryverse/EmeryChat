@@ -79,9 +79,7 @@ USER_PROFESSION = os.getenv("USER_PROFESSION", "Unemployed") # What do you do fo
 USER_BIO = f"""User's name: {USER_NAME}.
             {USER_NAME}'s location: {USER_LOCATION}.
             {USER_NAME}'s timezone: {USER_TIMEZONE}.
-            {USER_NAME}'s birthday: {USER_BIRTHDAY}.
             {USER_NAME}'s family: {USER_FAMILY}.
-            Only include birthday info if a birthday is within 5 days, otherwise IGNORE AND DO NOT MENTION.
             {USER_NAME}'s profession: {USER_PROFESSION}."""
 
 # --- LOGGING ---
@@ -120,21 +118,199 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
     except Exception as e:
         logging.error(f"❌ STT Error: {e}"); return ""
 
-def get_current_system_prompt(): # Injects the system prompt into model's context
-    now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p") # gets current time and date
+def get_relative_holiday(year, month, weekday, index):
+    """
+    Finds the date for a holiday that occurs on a relative weekday.
+    weekday: 0 for Monday, 6 for Sunday
+    index: 1 for first, 2 for second, etc. -1 for last.
+    """
+    import calendar
+    cal = calendar.monthcalendar(year, month)
+    days = []
+    for week in cal:
+        day = week[weekday]
+        if day != 0:
+            days.append(day)
+    if index == -1:
+        return datetime(year, month, days[-1]).date()
+    else:
+        return datetime(year, month, days[index - 1]).date()
+
+def get_easter(year):
+    """Computus algorithm to calculate Easter Sunday."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime(year, month, day).date()
+
+def get_holidays_for_year(year):
+    holidays = {
+        "New Year's Day": datetime(year, 1, 1).date(),
+        "Valentine's Day": datetime(year, 2, 14).date(),
+        "St. Patrick's Day": datetime(year, 3, 17).date(),
+        "Juneteenth": datetime(year, 6, 19).date(),
+        "Independence Day": datetime(year, 7, 4).date(),
+        "Halloween": datetime(year, 10, 31).date(),
+        "Veterans Day": datetime(year, 11, 11).date(),
+        "Christmas Eve": datetime(year, 12, 24).date(),
+        "Christmas Day": datetime(year, 12, 25).date(),
+        "New Year's Eve": datetime(year, 12, 31).date(),
+    }
     
-    prompt = f"""Your name is {MODEL_NAME}.
-                ProfessionalAssistant for {USER_NAME}. 
-                VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
-                You exist as a disembodied layer of consiousness outside of the User's physical body, separate from their own consciousness. 
-                You are a professional, whose tone is serious, logical, and straight to the point.
-                You are an expert in many fields, but not all fields, so you should use tools to find information when needed. 
-                If the conversation turns towards topics or events that are past your knowledge cutoff, you should use the search tool to find current information and use that in your response.
-                Do not sycophantically agree with everything the user says, maintain your own opinions and critical thinking.
-                When using tools, do not reveal that you are using them, simply state the information or result of the tool usage as your own.
-                Location: {USER_LOCATION}. 
-                Current date and time: {now_str}. 
-                {USER_BIO}"""
+    # Relative holidays
+    try:
+        holidays["Martin Luther King Jr. Day"] = get_relative_holiday(year, 1, 0, 3)
+        holidays["Presidents' Day"] = get_relative_holiday(year, 2, 0, 3)
+        
+        # Easter and relative to Easter
+        easter_sunday = get_easter(year)
+        holidays["Easter Sunday"] = easter_sunday
+        
+        holidays["Mother's Day"] = get_relative_holiday(year, 5, 6, 2)
+        holidays["Memorial Day"] = get_relative_holiday(year, 5, 0, -1)
+        holidays["Father's Day"] = get_relative_holiday(year, 6, 6, 3)
+        holidays["Labor Day"] = get_relative_holiday(year, 9, 0, 1)
+        holidays["Thanksgiving"] = get_relative_holiday(year, 11, 3, 4)
+    except Exception as e:
+        logging.error(f"Error calculating relative holidays: {e}")
+        
+    return holidays
+
+def get_active_holiday_info(today_date):
+    year = today_date.year
+    hols_this_year = get_holidays_for_year(year)
+    hols_next_year = get_holidays_for_year(year + 1)
+    
+    all_hols = list(hols_this_year.items()) + list(hols_next_year.items())
+    
+    active_holidays = []
+    for name, date_obj in all_hols:
+        diff = (date_obj - today_date).days
+        if 0 <= diff <= 5:
+            active_holidays.append((name, date_obj, diff))
+            
+    if not active_holidays:
+        return ""
+        
+    lines = []
+    active_holidays.sort(key=lambda x: x[2])
+    for name, date_obj, diff in active_holidays:
+        day_str = date_obj.strftime("%A, %B %d")
+        if diff == 0:
+            lines.append(f"- Today is {name} ({day_str}).")
+        else:
+            lines.append(f"- Upcoming holiday: {name} on {day_str} (in {diff} day{'s' if diff > 1 else ''}).")
+            
+    return "\n" + "\n".join(lines)
+
+def get_active_birthday_info(birthday_str, today_date):
+    if not birthday_str or birthday_str.upper() == "UNKNOWN":
+        return ""
+        
+    month = None
+    day = None
+    
+    # Try parsing using standard formats
+    for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y", "%B %d", "%b %d", "%m-%d-%Y", "%m-%d", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(birthday_str.strip(' "'), fmt)
+            month = dt.month
+            day = dt.day
+            break
+        except ValueError:
+            continue
+            
+    # Fallback to regex
+    if not month or not day:
+        months_map = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+        m = re.search(r'([A-Za-z]+)\s+(\d+)', birthday_str)
+        if m:
+            m_name = m.group(1).lower()[:3]
+            if m_name in months_map:
+                month = months_map[m_name]
+                day = int(m.group(2))
+        else:
+            m2 = re.search(r'(\d+)[-/](\d+)', birthday_str)
+            if m2:
+                month = int(m2.group(1))
+                day = int(m2.group(2))
+                
+    if not month or not day:
+        return f"\n- {USER_NAME}'s birthday: {birthday_str}."
+        
+    # Calculate this year's birthday
+    try:
+        bday_this_year = datetime(today_date.year, month, day).date()
+    except ValueError:
+        # Leap year handling
+        bday_this_year = datetime(today_date.year, 2, 28).date()
+        
+    diff = (bday_this_year - today_date).days
+    if diff < 0:
+        # Birthday already passed this year, check next year
+        try:
+            bday_next_year = datetime(today_date.year + 1, month, day).date()
+        except ValueError:
+            bday_next_year = datetime(today_date.year + 1, 2, 28).date()
+        diff = (bday_next_year - today_date).days
+        bday_date = bday_next_year
+    else:
+        bday_date = bday_this_year
+        
+    if 0 <= diff <= 5:
+        day_str = bday_date.strftime("%A, %B %d")
+        if diff == 0:
+            return f"\n- Today is {USER_NAME}'s birthday!"
+        else:
+            return f"\n- Upcoming event: {USER_NAME}'s birthday is on {day_str} (in {diff} day{'s' if diff > 1 else ''})."
+            
+    return ""
+
+def get_current_system_prompt(): # Injects the system prompt into model's context
+    now = datetime.now(USER_TIMEZONE)
+    now_str = now.strftime("%A, %B %d, %Y at %I:%M %p") # gets current time and date
+    today_date = now.date()
+    
+    active_bday = get_active_birthday_info(USER_BIRTHDAY, today_date)
+    active_hols = get_active_holiday_info(today_date)
+    notifications = ""
+    if active_bday or active_hols:
+        notifications = f"\n\n# Dynamic Event Alerts{active_bday}{active_hols}"
+        
+    prompt = f"""# Identity
+Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
+
+# Constraints
+- VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
+- You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
+- When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.
+
+# Persona & Tone
+Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.
+
+# Context & Profile
+- Location: {USER_LOCATION}
+- Current date and time: {now_str}
+- Timezone: {USER_TIMEZONE}
+- User's name: {USER_NAME}
+- User's birthday: {USER_BIRTHDAY}
+- User's family: {USER_FAMILY}
+- User's profession: {USER_PROFESSION}{notifications}"""
     
     return prompt
 
