@@ -170,29 +170,12 @@ You can run EmeryChat directly using Python or inside a Docker container.
 
 EmeryChat includes an advanced local memory module that stores user facts and preferences to a local file (`memory.md`), eliminating token creep while maintaining long-term awareness.
 
-```
-                  ┌──────────────────────────────┐
-                  │      User sends Message      │
-                  └──────────────┬───────────────┘
-                                 ▼
-         ┌───────────────────────────────────────────────┐
-         │ Memory Engine filters memory.md by keywords   │
-         │ (Only loads relevant facts into system prompt)│
-         └──────────────┬────────────────────────────────┘
-                        ▼
-         ┌───────────────────────────────────────────────┐
-         │ Primary LLM processes query & calls tools    │
-         │ (e.g. calls save_user_memory("Moved to NYC")) │
-         └──────────────┬────────────────────────────────┘
-                        ▼
-         ┌───────────────────────────────────────────────┐
-         │ New facts appended to "Raw Memory Intake"     │
-         └──────────────┬───────────────────────────────┘
-                        ▼
-     ┌───────────────────────────────────────────────────────┐
-     │ Background Coprocessor Model consolidates memory.md   │
-     │ (Deduplicates, resolves contradictions, clears intake)│
-     └───────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["User sends Message"] --> B["Memory Engine filters memory.md by keywords<br>(Only loads relevant facts into system prompt)"]
+    B --> C["Primary LLM processes query & calls tools<br>(e.g. calls save_user_memory('Moved to NYC'))"]
+    C --> D["New facts appended to 'Raw Memory Intake'"]
+    D --> E["Background Coprocessor Model consolidates memory.md<br>(Deduplicates, resolves contradictions, clears intake)"]
 ```
 
 * **Staging Area:** When the bot learns a new detail, it calls the `save_user_memory` tool. This appends the fact to a `## Raw Memory Intake` header in `memory.md`.
