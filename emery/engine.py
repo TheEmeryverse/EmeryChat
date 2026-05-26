@@ -417,7 +417,7 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "delegate_to_coprocessor",
-        "description": "Send a lightweight sub-task, summarization, formatting, or text extraction to the fast secondary model (coprocessor). Use this to offload processing, clean up large text blocks, or analyze documents without bloating your own context.",
+        "description": "Send a lightweight sub-task, summarization, formatting, or text extraction to the fast secondary model (coprocessor). MANDATORY to use this to offload processing, clean up large text blocks, or analyze documents when input exceeds 1,500 characters, as your main context is limited and expensive.",
         "parameters": {
             "type": "object",
             "properties": {

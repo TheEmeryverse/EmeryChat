@@ -373,6 +373,13 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
     if str(ENABLE_SCHEDULER).lower() == "true":
         scheduler_instruction = "\n- You have the ability to schedule automated background jobs/tasks for the user (like checking the weather daily, fetching news headlines, or setting repeating or one-time reminders/alerts) using the `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job` tools. Encourage scheduling tasks when the user requests regular updates."
 
+    coprocessor_instruction = (
+        "\n- You operate in a dual-model topology. To keep system latency low and protect your context window, "
+        "you MUST delegate heavy text parsing, table formatting, data extraction, and general summarization tasks "
+        "to the coprocessor via the `delegate_to_coprocessor` tool, especially when the target content is long "
+        "(exceeds 1,500 characters) or highly repetitive."
+    )
+
     camera_log_hint = ""
     if re.sub(r'[^a-zA-Z]', '', os.getenv("ENABLE_REOLINK", "false")).lower() == "true":
         try:
@@ -390,7 +397,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.
