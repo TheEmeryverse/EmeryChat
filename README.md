@@ -23,7 +23,7 @@ Many AI agent wrappers require massive context, cloud-only models, and heavy tok
    - [Step 5: Run the Application](#step-5-run-the-application)
 5. [🧠 Persistent Memory System](#-persistent-memory-system)
 6. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
-7. [📅 Daily Automated Briefings](#-daily-automated-briefings)
+7. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
 8. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
 
 ---
@@ -353,17 +353,33 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
 
 ---
 
-## 📅 Daily Automated Briefings
+## 📅 Task Scheduling & Automated Briefings
 
-EmeryChat runs daily jobs scheduled on the Telegram queue. The bot generates these reports using tool output and sends them directly to your Telegram chat at configured times (uses timezone `USER_TIMEZONE`):
+EmeryChat features a dynamic background task scheduler. Instead of relying purely on hardcoded scripts, users can instruct the bot to create, list, and cancel schedules using natural language. 
 
-| Time | Job Name | Action |
+Custom jobs are saved in a local, git-ignored `custom_jobs.json` file. The bot reloads and registers these triggers in memory on startup.
+
+### 🛠️ Available Scheduling Commands
+You can ask the bot to schedule tasks with triggers such as:
+1. **Daily repeating schedules**: *"Remind me to check the news every day at 8:30 AM"* (triggers at a specific time daily).
+2. **Repeating interval schedules**: *"Check the front camera every 30 minutes"* (triggers repeatedly on a delay).
+3. **One-off schedules / reminders**: *"Remind me to check the oven in 15 minutes"* or *"Remind me on 2026-05-26 at 15:30:00 to run backups"* (triggers once and automatically deletes itself from storage after running).
+
+Emery utilizes three specific tool call routines behind the scenes to manage this:
+* `add_scheduled_job(schedule_type, schedule_value, prompt, description)`: Registers and schedules a task.
+* `list_scheduled_jobs()`: Returns all active user-scheduled jobs.
+* `remove_scheduled_job(job_id)`: Deletes and cancels a job trigger.
+
+### 📋 Pre-configured Daily Briefings
+For new users, the scheduler starts empty (blank slate). To reproduce the bot's default daily briefings, you can ask Emery to schedule them. The templates for these jobs are:
+
+| Trigger (Daily) | Description | Prompt / Action |
 | :---: | :--- | :--- |
-| **03:00 AM** | **Morning Briefing** | Aggregates feed headlines. Performs search and web scraping on the most critical story for bias and depth, compiling a detailed report. |
-| **03:05 AM** | **Today's Weather** | Queries NOAA and suggests clothing recommendations matching the weather profile. |
-| **03:10 AM** | **Daily Planner** | Checks Google Calendar and outlines your schedule chronologically. |
-| **09:00 PM** | **Today In Space** | Fetches the NASA APOD image and context details. |
-| **09:05 PM** | **Today In History** | Pulls today's history facts, picks one historical figure, and researches a short biography of their life. |
+| **03:00 AM** | **Morning Briefing** | *"Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search and fetch_web_content. Put all of it in a voice memo, and then also put everything in your text response. Do not include any sports news, and assess bias of any sources."* |
+| **03:05 AM** | **Today's Weather** | *"Look up weather with the get_NOAA_weather tool and give clothing recommendations while keeping in mind the User Bio."* |
+| **03:10 AM** | **Daily Planner** | *"Check User's calendar with get_calendar_events for any events the User has today and list them chronologically."* |
+| **09:00 PM** | **Today In Space** | *"Use get_nasa_apod. Provide title, explanation, and MUST provide image URL link."* |
+| **09:05 PM** | **Today In History** | *"Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content and give a small report on them at the end of your response."* |
 
 ---
 
@@ -416,3 +432,5 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `ENABLE_REOLINK` | `false` | Enable Reolink CCTV snapshots and queries. |
 | `ENABLE_REOLINK_POLLING`| `false` | Enables active background loop checking NVR for AI alerts. |
 | `TOOL_LOOP` | `15` | Maximum back-and-forth tool call loops in one turn. |
+| `ENABLE_SCHEDULER` | `true` | Enables/disables the custom background scheduler. |
+| `JOBS_FILE_PATH` | `custom_jobs.json` | Local filepath where custom schedules are persisted. |
