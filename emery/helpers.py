@@ -1,3 +1,4 @@
+import os
 import re
 import logging
 import io
@@ -70,7 +71,7 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     
     try:
         logging.info(f"⚡ FAST MODEL: Querying {VISION_MODEL_ID} on secondary coprocessor...")
-        r = await globals.http_client.post(url, json=payload, timeout=180)
+        r = await globals.http_client.post(url, json=payload, timeout=300)
         if r.status_code != 200:
             logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {r.text}")
             return ""
@@ -145,7 +146,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             }
         }
         
-        r = await globals.http_client.post(url, json=payload, timeout=180)
+        r = await globals.http_client.post(url, json=payload, timeout=300)
         
         if r.status_code != 200:
             logging.error(f"❌ Ollama Vision API Error {r.status_code}: {r.text}")

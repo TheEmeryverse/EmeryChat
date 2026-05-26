@@ -490,6 +490,8 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
                     clean_msg["content"] = "[Image base64 data removed]"
                 else:
+                    if msg.get("role") == "assistant":
+                        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
                     clean_msg["content"] = content
             else:
                 clean_msg["content"] = str(content)
@@ -511,7 +513,8 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 "num_ctx": ctx_size,
                 "temperature": 0.8,
                 "top_p": 0.9,
-                "num_gpu": 0
+                "num_gpu": 0,
+                "num_thread": 16
             }
         }
         
@@ -520,7 +523,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
 
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
-            r = await globals.http_client.post(url, json=payload, timeout=300)
+            r = await globals.http_client.post(url, json=payload, timeout=900)
             
             if r.status_code != 200:
                 logging.error(f"❌ ENGINE: Ollama returned {r.status_code} — {r.text[:200]}")
