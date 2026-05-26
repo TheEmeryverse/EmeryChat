@@ -33,7 +33,15 @@ from emery.tools import (
 
 # Helper to check if a feature is enabled
 def is_enabled(var_name):
+    try:
+        import emery.config as config
+        val = getattr(config, var_name, None)
+        if val is not None:
+            return str(val).lower() == "true"
+    except Exception:
+        pass
     return os.getenv(var_name, "false").lower() == "true"
+
 
 AVAILABLE_TOOLS = {}
 tools_schema = []

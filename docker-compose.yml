@@ -15,6 +15,8 @@ services:
     volumes:
       # Persist local agentic memory log on the host
       - ./memory.md:/app/memory.md
+      # Persist custom scheduled jobs on the host
+      - ./custom_jobs.json:/app/custom_jobs.json
       # Pass authentication tokens and OAuth secrets into the container
       - ./token.json:/app/token.json
       - ./nest_token.json:/app/nest_token.json
