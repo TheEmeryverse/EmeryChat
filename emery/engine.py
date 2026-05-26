@@ -456,18 +456,29 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     ollama_history = []
     for msg in history_buffer:
         clean_msg = {"role": msg["role"]}
-        content = msg.get("content", "")
         
-        if isinstance(content, list):
-            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-            clean_msg["content"] = " ".join(text_parts) if text_parts else "[Sent an image]"
-        elif isinstance(content, str):
-            if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
-                clean_msg["content"] = "[Image base64 data removed]"
+        # Preserve tool calling fields if present in history
+        if "tool_calls" in msg:
+            clean_msg["tool_calls"] = msg["tool_calls"]
+        if "tool_call_id" in msg:
+            clean_msg["tool_call_id"] = msg["tool_call_id"]
+        if "name" in msg:
+            clean_msg["name"] = msg["name"]
+            
+        content = msg.get("content")
+        if content is not None:
+            if isinstance(content, list):
+                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+                clean_msg["content"] = " ".join(text_parts) if text_parts else "[Sent an image]"
+            elif isinstance(content, str):
+                if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
+                    clean_msg["content"] = "[Image base64 data removed]"
+                else:
+                    clean_msg["content"] = content
             else:
-                clean_msg["content"] = content
+                clean_msg["content"] = str(content)
         else:
-            clean_msg["content"] = str(content)
+            clean_msg["content"] = None if "tool_calls" in msg else ""
             
         ollama_history.append(clean_msg)
     
@@ -518,7 +529,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     
                     result = await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
                     
-                    tool_response = {"role": "tool", "content": str(result)}
+                    tool_response = {
+                        "role": "tool",
+                        "content": str(result),
+                        "name": fn
+                    }
+                    if "id" in tc:
+                        tool_response["tool_call_id"] = tc["id"]
+                        
                     history_buffer.append(tool_response)
                     ollama_history.append(tool_response)
                 continue
