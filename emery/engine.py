@@ -317,6 +317,71 @@ if ENABLE_MEMORY:
         }
     })
 
+if is_enabled("ENABLE_SCHEDULER"):
+    from emery.scheduler import add_scheduled_job, list_scheduled_jobs, remove_scheduled_job
+    AVAILABLE_TOOLS.update({
+        "add_scheduled_job": add_scheduled_job,
+        "list_scheduled_jobs": list_scheduled_jobs,
+        "remove_scheduled_job": remove_scheduled_job
+    })
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "add_scheduled_job",
+                "description": "Schedule a new automated job/task (like checking the weather daily, fetching the news, or setting a repeating or one-time reminder/alert).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "schedule_type": {
+                            "type": "string",
+                            "enum": ["daily", "interval", "once"],
+                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), or 'once' (one-off localized date-time or relative delay)."
+                        },
+                        "schedule_value": {
+                            "type": "string",
+                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-05-26 15:30:00') or a relative delay (e.g. '15m' or '600')."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The exact instruction/query the bot will run when triggered (e.g. 'Check the NOAA weather using get_noaa_weather and send weather summary with clothing recommendations')."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "A short, user-friendly label/description of the job (e.g. 'Daily Weather Briefing')."
+                        }
+                    },
+                    "required": ["schedule_type", "schedule_value", "prompt", "description"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_scheduled_jobs",
+                "description": "Retrieve a list of all currently configured custom scheduled jobs, including their IDs, schedules, and prompts.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_scheduled_job",
+                "description": "Cancel and delete a scheduled job using its unique ID.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "The unique ID of the scheduled job to remove."
+                        }
+                    },
+                    "required": ["job_id"]
+                }
+            }
+        }
+    ])
+
 TOOL_STATUS_MESSAGES = {
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
@@ -336,8 +401,12 @@ TOOL_STATUS_MESSAGES = {
     "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
     "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
     "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night...",
-    "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration..."
+    "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration...",
+    "add_scheduled_job": f"{MODEL_NAME} is scheduling a job...",
+    "list_scheduled_jobs": f"{MODEL_NAME} is retrieving scheduled jobs...",
+    "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job..."
 }
+
 
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):

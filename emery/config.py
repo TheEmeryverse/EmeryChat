@@ -52,6 +52,9 @@ ENABLE_IMAGEGEN = os.getenv("ENABLE_IMAGEGEN", "false")
 ENABLE_WEATHER = os.getenv("ENABLE_WEATHER", "false")
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
 ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
+ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true")
+JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", "custom_jobs.json")
+
 
 # USER PROFILE
 USER_NAME = os.getenv("USER_NAME", "User")

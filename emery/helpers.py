@@ -11,7 +11,7 @@ from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER
 )
 import emery.globals as globals
 
@@ -368,6 +368,10 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
             memory_section = f"\n\n# Long-Term Persistent Memory\n{recalled}"
         memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
 
+    scheduler_instruction = ""
+    if str(ENABLE_SCHEDULER).lower() == "true":
+        scheduler_instruction = "\n- You have the ability to schedule automated background jobs/tasks for the user (like checking the weather daily, fetching news headlines, or setting repeating or one-time reminders/alerts) using the `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job` tools. Encourage scheduling tasks when the user requests regular updates."
+
     prompt = f"""# Identity
 Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 
@@ -375,7 +379,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.
@@ -388,5 +392,5 @@ Your tone is serious, logical, and straight to the point. You are an expert in m
 - User's birthday: {USER_BIRTHDAY}
 - User's family: {USER_FAMILY}
 - User's profession: {USER_PROFESSION}{notifications}{memory_section}"""
-    
+
     return prompt

@@ -33,6 +33,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     globals.TARGET_CHAT_ID = chat_id
     
+    # Dynamically associate user chat ID with any pending jobs (like default briefings)
+    from emery.scheduler import update_jobs_with_chat_id
+    update_jobs_with_chat_id(chat_id)
+    
     if chat_id not in globals.chat_histories: 
         globals.chat_histories[chat_id] = deque(maxlen=100)
     
@@ -159,27 +163,7 @@ async def send_safe_large_message(update: Update, text: str):
         await update.message.reply_text(chunk, parse_mode="HTML")
         text = text[split_index:].strip()
 
-# --- AUTOMATED JOBS ---
-async def run_brief(c, prompt, label):
-    if not globals.TARGET_CHAT_ID: return
-    logging.info(f"📅 JOB: {label}")
-    res_text, _ = await emery_engine(deque([{"role": "user", "content": prompt}]))
-    await c.bot.send_message(globals.TARGET_CHAT_ID, f"🛡️ <b>EMERYCHAT JOB: {label}</b>\n\n{emery_format(res_text)}", parse_mode="HTML")
 
-async def job_morning_briefing(c):
-    await run_brief(c, "Morning news intel from get_news_headlines. List all of the stories first, and hone in on the most important one at the end with a deep dive using web_search and fetch_web_content (if needed). Put all of it in a voice memo, and then also put everything in your text response. Do ***NOT*** include any sports news, and assess bias of any sources and inform the user with a quick qualifier, such as 'Left leaning' or 'Right leaning'.", "Morning Briefing")
-
-async def job_morning_weather(c):
-    await run_brief(c, "Look up weather with the get_NOAA_weather tool and give clothing recommendations while keeping in mind the User Bio.", "Today's Weather")
-
-async def job_calendar(c):
-    await run_brief(c, "Check User's calendar with get_calendar_events for any events the User has today and list them chronologically.", "Daily Planner")
-
-async def job_nasa(c):
-    await run_brief(c, "Use get_nasa_apod. Provide title, explanation, and MUST provide image URL link.", "Today In Space")
-
-async def job_today_in_history(c):
-    await run_brief(c, "Use get_today_in_history. Provide the returned items in a presentable list, then focus on one of the people and do research with web_search and fetch_web_content (if needed) and give a small report on them at the end of your response.", "Today In History")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs network drops and timeouts cleanly instead of crashing the thread."""
