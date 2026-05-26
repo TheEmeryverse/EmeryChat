@@ -15,3 +15,6 @@ __pycache__/
 memory.md
 memory.md.bak
 test_memory_temp.md
+
+# Backups
+*.bak
