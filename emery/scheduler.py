@@ -196,7 +196,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
 
 # --- LLM TOOL CALLABLE FUNCTIONS ---
 
-async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str) -> str:
+async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None) -> str:
     """
     Schedule a new automated job/task.
     
@@ -209,6 +209,10 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     chat_id = globals.TARGET_CHAT_ID
     if not chat_id:
         return "Error: No active chat session to associate with this job. Run this command from within a chat."
+        
+    if not description:
+        description = f"Reminder: {prompt[:30]}..." if len(prompt) > 30 else f"Reminder: {prompt}"
+
         
     stype = schedule_type.lower().strip()
     if stype not in ("daily", "interval", "once"):
