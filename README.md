@@ -34,7 +34,7 @@ EmeryChat operates under a simple philosophy: **consistency and utility over ins
 * **Telegram Interface:** Uses Telegram as a natural chat interface.
 * **Scheduled Operations:** Heavy cognitive tasks, research briefings, and long-term planning are handled through background scheduled jobs (e.g. running overnight while you sleep).
 * **CPU-Friendly Inference:** Fully optimized to run on local CPU threads utilizing context-pruning algorithms, local text models, and secondary fast models for background tasks.
-* **Multi-Model Pipeline:** Uses a primary text-generating model (e.g., Qwen 35B or Gemma 26B) and offloads vision/image analysis or background memory consolidation to a secondary fast "coprocessor" model (e.g. Gemma 4B/9B) to save resources.
+* **Multi-Model Pipeline:** Uses a primary text-generating model (e.g., Qwen 35B or Gemma 26B) and offloads vision/image analysis, background memory consolidation, web summarization, and custom lightweight sub-tasks to a secondary fast "coprocessor" model (e.g. Gemma 4B/9B) to save resources.
 
 ---
 
@@ -265,7 +265,7 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
 
 ### Web Scraping (`fetch_web_content`)
 * **Status Toggle:** `ENABLE_WEB_SCRAPING=true`
-* **Description:** Fetches raw HTML from a target URL, strips irrelevant tags (scripts, CSS, navigations, footers), formats list tags and headers, and returns the parsed article text (up to 8,000 characters). Perfect for deep research when used after `web_search`.
+* **Description:** Fetches raw HTML from a target URL, strips irrelevant tags (scripts, CSS, navigations, footers), formats list tags and headers, and returns the parsed article text. **Coprocessor-Optimized:** If the parsed text exceeds 1,500 characters, it is automatically summarized by the fast coprocessor model to prevent context bloat on the main model.
 * **No external configuration required.**
 
 ### RSS News Feed (`get_news_headlines`)
@@ -320,9 +320,13 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   IMAGE_MODEL=gemini-3.1-flash-image-preview
   ```
 
-### Multimodal Vision Coprocessor
-* **Status Toggle:** Active automatically when the user sends a photo.
-* **Description:** When the user uploads an image, the bot compresses it, converts it to base64, queries the secondary vision-capable coprocessor model (`VISION_MODEL_ID`), and passes the generated description to the primary model's context.
+### Multimodal Vision Coprocessor & Delegation
+* **Status Toggle:** Active automatically for photos, memory consolidation, and dynamic delegation.
+* **Description:** Integrates a secondary vision-capable coprocessor model (`VISION_MODEL_ID`) to handle visual checks, memory staging, and offload processing from the main model:
+  - **Image Analysis**: Processes user-uploaded photos and Reolink NVR camera feeds.
+  - **Memory Consolidation**: Deduplicates and organizes `memory.md` in the background.
+  - **Automatic Summarization**: Summarizes web content from `fetch_web_content` when it exceeds 1,500 characters.
+  - **Dynamic Delegation (`delegate_to_coprocessor`)**: A core tool allowing the main model to explicitly offload parsing, formatting, or extraction tasks. Enforced via system prompt rules to prevent model confidence-bias/over-prefilling.
 * **Env Config:**
   ```env
   VISION_MODEL_ID=gemma4:e4b
