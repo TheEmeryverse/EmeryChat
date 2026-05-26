@@ -343,12 +343,12 @@ if is_enabled("ENABLE_SCHEDULER"):
                     "properties": {
                         "schedule_type": {
                             "type": "string",
-                            "enum": ["daily", "interval", "once"],
-                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), or 'once' (one-off localized date-time or relative delay)."
+                            "enum": ["daily", "interval", "once", "weekly", "monthly", "yearly"],
+                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), 'once' (one-off localized date-time or relative delay), 'weekly' (e.g. Monday 08:30), 'monthly' (e.g. 1 12:00), or 'yearly' (e.g. 12-19 08:30)."
                         },
                         "schedule_value": {
                             "type": "string",
-                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-05-26 15:30:00') or a relative delay (e.g. '15m' or '600')."
+                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' or relative delay (e.g. '15m'). 'weekly' requires '<day_name> <HH:MM>' (e.g. 'Monday 08:30'). 'monthly' requires '<day_of_month> <HH:MM>' (e.g. '1 12:00'). 'yearly' requires '<MM-DD> <HH:MM>' (e.g. '12-19 08:30')."
                         },
                         "prompt": {
                             "type": "string",

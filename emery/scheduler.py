@@ -9,6 +9,17 @@ from collections import deque
 from emery.config import USER_TIMEZONE, JOBS_FILE_PATH
 import emery.globals as globals
 
+WEEKDAYS = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6
+}
+
+
 def parse_duration_to_seconds(val: str) -> int:
     """
     Parses duration strings like '1h', '30m', '10s', '1d', or a raw integer string
@@ -94,6 +105,19 @@ async def run_custom_job(context):
     if not chat_id:
         logging.warning(f"⚠️ Custom job '{description}' ({job_id}) triggered without chat_id.")
         return
+        
+    if schedule_type == "yearly":
+        try:
+            # schedule_value format: "MM-DD HH:MM", e.g., "12-19 08:30"
+            parts = job_data.get("schedule_value", "").split()
+            if parts:
+                target_month = int(parts[0].split("-")[0])
+                now = datetime.now(USER_TIMEZONE)
+                if now.month != target_month:
+                    logging.info(f"📅 SCHEDULER: Skipping yearly job '{description}' ({job_id}) because the current month ({now.month}) does not match target month ({target_month}).")
+                    return
+        except Exception as e:
+            logging.error(f"❌ SCHEDULER: Error filtering month for yearly job {job_id}: {e}", exc_info=True)
         
     logging.info(f"📅 CUSTOM JOB: '{description}' ({job_id}) starting...")
     from emery.engine import emery_engine
@@ -188,6 +212,57 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
             logging.info(f"📅 SCHEDULER: Scheduled one-off job '{job_id}' at {dt_localized}")
             return True
             
+        elif stype == "weekly":
+            # format: "Monday 08:30"
+            parts = sval.split()
+            day_name, time_str = parts
+            weekday_index = WEEKDAYS[day_name.lower()]
+            hour, minute = map(int, time_str.split(":"))
+            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
+            globals.application.job_queue.run_daily(
+                run_custom_job,
+                time=time_obj,
+                days=(weekday_index,),
+                data=job_data,
+                name=job_id
+            )
+            logging.info(f"📅 SCHEDULER: Scheduled weekly job '{job_id}' on {day_name}s at {time_str}")
+            return True
+            
+        elif stype == "monthly":
+            # format: "1 08:30"
+            parts = sval.split()
+            dom_str, time_str = parts
+            day_of_month = int(dom_str)
+            hour, minute = map(int, time_str.split(":"))
+            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
+            globals.application.job_queue.run_monthly(
+                run_custom_job,
+                time=time_obj,
+                day=day_of_month,
+                data=job_data,
+                name=job_id
+            )
+            logging.info(f"📅 SCHEDULER: Scheduled monthly job '{job_id}' on day {day_of_month} at {time_str}")
+            return True
+            
+        elif stype == "yearly":
+            # format: "12-19 08:30"
+            parts = sval.split()
+            date_str, time_str = parts
+            month, day = map(int, date_str.split("-"))
+            hour, minute = map(int, time_str.split(":"))
+            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
+            globals.application.job_queue.run_monthly(
+                run_custom_job,
+                time=time_obj,
+                day=day,
+                data=job_data,
+                name=job_id
+            )
+            logging.info(f"📅 SCHEDULER: Scheduled yearly job '{job_id}' on {month}-{day} at {time_str} (via monthly trigger)")
+            return True
+            
     except Exception as e:
         logging.error(f"❌ SCHEDULER: Failed to schedule job {job_id} in Telegram queue: {e}", exc_info=True)
         return False
@@ -215,8 +290,8 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
 
         
     stype = schedule_type.lower().strip()
-    if stype not in ("daily", "interval", "once"):
-        return f"Error: Invalid schedule_type '{schedule_type}'. Must be 'daily', 'interval', or 'once'."
+    if stype not in ("daily", "interval", "once", "weekly", "monthly", "yearly"):
+        return f"Error: Invalid schedule_type '{schedule_type}'. Must be 'daily', 'interval', 'once', 'weekly', 'monthly', or 'yearly'."
         
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     
@@ -235,6 +310,50 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
                 datetime.strptime(schedule_value, "%Y-%m-%d %H:%M:%S")
             else:
                 parse_duration_to_seconds(schedule_value)
+        elif stype == "weekly":
+            parts = schedule_value.split()
+            if len(parts) != 2:
+                return "Error: For 'weekly' job, schedule_value must be in '<day_name> <HH:MM>' format (e.g. 'Monday 08:30')."
+            day_name, time_str = parts
+            if day_name.lower() not in WEEKDAYS:
+                return f"Error: Invalid weekday name '{day_name}'."
+            if ":" not in time_str:
+                return "Error: Time portion must be in 'HH:MM' 24-hour format."
+            hour, minute = map(int, time_str.split(":"))
+            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+                return "Error: Hours must be 0-23 and minutes 0-59."
+        elif stype == "monthly":
+            parts = schedule_value.split()
+            if len(parts) != 2:
+                return "Error: For 'monthly' job, schedule_value must be in '<day_of_month> <HH:MM>' format (e.g. '1 12:00')."
+            dom_str, time_str = parts
+            if not dom_str.isdigit():
+                return "Error: Day of month must be a number."
+            dom = int(dom_str)
+            if not (1 <= dom <= 31):
+                return "Error: Day of month must be between 1 and 31."
+            if ":" not in time_str:
+                return "Error: Time portion must be in 'HH:MM' 24-hour format."
+            hour, minute = map(int, time_str.split(":"))
+            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+                return "Error: Hours must be 0-23 and minutes 0-59."
+        elif stype == "yearly":
+            parts = schedule_value.split()
+            if len(parts) != 2:
+                return "Error: For 'yearly' job, schedule_value must be in '<MM-DD> <HH:MM>' format (e.g. '12-19 08:30')."
+            date_str, time_str = parts
+            if "-" not in date_str:
+                return "Error: Date portion must be in 'MM-DD' format."
+            month, day = map(int, date_str.split("-"))
+            if not (1 <= month <= 12):
+                return "Error: Month must be between 1 and 12."
+            if not (1 <= day <= 31):
+                return "Error: Day must be between 1 and 31."
+            if ":" not in time_str:
+                return "Error: Time portion must be in 'HH:MM' 24-hour format."
+            hour, minute = map(int, time_str.split(":"))
+            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+                return "Error: Hours must be 0-23 and minutes 0-59."
     except Exception as e:
         return f"Error validating schedule_value '{schedule_value}': {e}"
         
