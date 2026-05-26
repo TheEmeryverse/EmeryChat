@@ -786,23 +786,23 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
-            Analyze this image and report ONLY active entities, security hazards, or items of interest:
+            Analyze this image and report ONLY the following active elements if present:
             - People (exact clothing, appearance, behavior)
             - Vehicles (type, color, position)
-            - Deliveries, packages, or tools left out of place
-            - Animals or unexpected objects on walkways
+            - Packages, deliveries, or parcels (especially near entryways like the front door)
 
         STRICT SECURITY FILTER RULES:
-            1. Do NOT describe the house, siding, lawn, backyard, fences, background trees, weather, or lighting conditions unless they are directly involved in an active security event.
-            2. Be highly specific and direct (e.g., "There is a delivery driver in a blue vest carrying a package up the driveway").
-            3. Keep your output extremely concise (exactly 1 or 2 sentences max).
-            4. If there are no people, no cars, no packages, and absolutely nothing unusual or active in the image, respond EXACTLY with: "No active threats or activity detected." """
+            1. Do NOT describe static background objects, stationary items, or daily environmental features (e.g., grills, bicycles, stairs, chairs, tables, lawn furniture, toys, structures, siding, or fences).
+            2. Do NOT describe domestic pets or local animals unless they represent an active safety/security issue.
+            3. Be highly specific and direct (e.g., "A person in a yellow shirt is walking on the patio").
+            4. Keep your output extremely concise (exactly 1 or 2 sentences max).
+            5. If there are no people, vehicles, or packages in the image, respond EXACTLY with: "No active activity detected." """
             
         concise_report = await get_image_description(b64_image, security_prompt)
         logging.info(f"👁️ VISION [1/2] Raw Response: '{concise_report}'")
         
         if not concise_report or not concise_report.strip():
-            concise_report = "No active threats or activity detected."
+            concise_report = "No active activity detected."
         
         if globals.TARGET_CHAT_ID:
             telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
