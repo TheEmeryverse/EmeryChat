@@ -823,10 +823,12 @@ async def get_reolink_snapshot(camera_name: str) -> str:
             scene_context = await get_image_description(b64_image, context_prompt)
             logging.info(f"👁️ VISION [2/2] Raw Response: '{scene_context}'")
             
+            # Write to out-of-context log
+            from emery.memory import append_camera_log
+            await append_camera_log(matched_camera_name, concise_report, scene_context)
+            
             return (
-                f"SUCCESS: Live photo sent directly to user. "
-                f"For your context, here is what the '{matched_camera_name}' environment looks like: '{scene_context}'. "
-                f"The active threat report sent to the user was: '{concise_report}'. "
+                f"SUCCESS: Photo sent. Security log updated ({matched_camera_name}, {now_str}). "
                 f"You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."
             )
             
@@ -884,7 +886,7 @@ async def trigger_webhook_alert(camera_name: str):
         now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
         event_content = (
             f"[{now_str}] [SYSTEM SECURITY ALERT] Camera '{camera_name}' triggered a person-detection event. "
-            f"Result: {result}"
+            f"Photo sent. Security log updated ({camera_name}, {now_str})."
         )
         chat_histories[globals.TARGET_CHAT_ID].append({"role": "user", "content": event_content})
 

@@ -12,7 +12,7 @@ from emery.config import (
 # ENABLE_SYSTEM_STATS might not have been defined as a direct flag, but is checked: is_enabled("ENABLE_SYSTEM_STATS")
 import emery.globals as globals
 from emery.helpers import get_current_system_prompt
-from emery.memory import save_user_memory
+from emery.memory import save_user_memory, get_camera_security_log
 
 # Import all tools from tools.py
 from emery.tools import (
@@ -262,6 +262,7 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
 if is_enabled("ENABLE_REOLINK"):
     AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
     AVAILABLE_TOOLS["get_available_cameras"] = get_available_cameras
+    AVAILABLE_TOOLS["get_camera_security_log"] = get_camera_security_log
     
     # Extract camera names from configuration
     raw_cams = os.getenv("REOLINK_CAMERAS", "")
@@ -300,6 +301,26 @@ if is_enabled("ENABLE_REOLINK"):
                 "parameters": {
                     "type": "object",
                     "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_camera_security_log",
+                "description": "Retrieve recent security camera activity logs including AI threat reports and scene descriptions. Use when the user asks what happened on a camera, what activity was detected, or wants a security summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_name": {
+                            "type": "string",
+                            "description": "Optional. Filter by a specific camera name (e.g. 'frontdoor'). Omit to get all cameras."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max number of recent log entries to return. Default 10."
+                        }
+                    }
                 }
             }
         }
@@ -410,6 +431,7 @@ TOOL_STATUS_MESSAGES = {
     "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
     "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night...",
     "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration...",
+    "get_camera_security_log": f"{MODEL_NAME} is reviewing the security log...",
     "add_scheduled_job": f"{MODEL_NAME} is scheduling a job...",
     "list_scheduled_jobs": f"{MODEL_NAME} is retrieving scheduled jobs...",
     "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job..."

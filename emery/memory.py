@@ -5,7 +5,8 @@ import asyncio
 
 from emery.config import (
     MEMORY_FILE_PATH, MEMORY_THRESHOLD, USER_NAME, USER_LOCATION,
-    USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION
+    USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION,
+    CAMERA_LOG_FILE_PATH
 )
 
 def retrieve_relevant_memories(user_query: str) -> str:
@@ -242,3 +243,149 @@ def wipe_memory() -> bool:
     except Exception as e:
         logging.error(f"❌ WIPE MEMORY: Failed to wipe memory file: {e}", exc_info=True)
         return False
+
+async def append_camera_log(camera_name: str, threat_report: str, scene_context: str) -> None:
+    """
+    Appends a new security camera event to camera_log.md and prunes entries older than 7 days.
+    """
+    from datetime import datetime, timedelta
+    now_dt = datetime.now(USER_TIMEZONE)
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M %Z")
+    
+    header = "# Emery Camera Security Log\n"
+    new_entry = f"- [{now_str}] [{camera_name.strip()}] THREAT: {threat_report.strip()} | SCENE: {scene_context.strip()}\n"
+    
+    existing_lines = []
+    if os.path.exists(CAMERA_LOG_FILE_PATH):
+        try:
+            with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
+                existing_lines = f.readlines()
+        except Exception as e:
+            logging.error(f"❌ CAMERA LOG: Error reading camera log: {e}", exc_info=True)
+            
+    # Filter/prune old lines
+    cutoff_date = (now_dt - timedelta(days=7)).date()
+    pruned_lines = []
+    
+    for line in existing_lines:
+        if line.strip() == "# Emery Camera Security Log":
+            continue
+        
+        # Check if line is a log entry
+        match = re.match(r'^-\s+\[(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(?:\s+\w+)?\]', line)
+        if match:
+            date_str = match.group(1)
+            try:
+                entry_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if entry_date < cutoff_date:
+                    continue  # prune
+            except Exception:
+                pass  # Keep if parsing fails
+        
+        if line.strip():
+            pruned_lines.append(line)
+            
+    # Reassemble with the header at the top
+    out_lines = [header, "\n"] + [line for line in pruned_lines if line.strip()]
+    if not out_lines[-1].endswith("\n"):
+        out_lines[-1] = out_lines[-1] + "\n"
+    out_lines.append(new_entry)
+    
+    try:
+        with open(CAMERA_LOG_FILE_PATH, "w", encoding="utf-8") as f:
+            f.writelines(out_lines)
+        logging.info(f"📹 CAMERA LOG: Logged activity for {camera_name} to camera_log.md")
+    except Exception as e:
+        logging.error(f"❌ CAMERA LOG: Failed to write camera log: {e}", exc_info=True)
+
+async def get_camera_security_log(camera_name: str = None, limit: int = 10) -> str:
+    """
+    Retrieve recent security camera activity logs including AI threat reports and scene descriptions.
+    Use when the user asks what happened on a camera, what activity was detected, or wants a security summary.
+    """
+    if not os.path.exists(CAMERA_LOG_FILE_PATH):
+        return "No security camera logs are available."
+        
+    try:
+        with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        entries = []
+        for line in lines:
+            if not line.strip() or line.startswith("#"):
+                continue
+            
+            # Check for camera filter
+            if camera_name:
+                cleaned_filter = camera_name.strip().lower()
+                match = re.search(r'^-\s+\[[^\]]+\]\s+\[([^\]]+)\]', line)
+                if match:
+                    entry_camera = match.group(1).strip().lower()
+                    if cleaned_filter not in entry_camera and entry_camera not in cleaned_filter:
+                        continue
+                else:
+                    if cleaned_filter not in line.lower():
+                        continue
+            
+            entries.append(line.strip())
+            
+        if not entries:
+            filter_msg = f" for camera '{camera_name}'" if camera_name else ""
+            return f"No security camera logs found{filter_msg}."
+            
+        # Get the latest 'limit' entries
+        recent_entries = entries[-limit:]
+        result_str = "\n".join(recent_entries)
+        return f"Recent Security Camera Logs:\n{result_str}"
+    except Exception as e:
+        logging.error(f"❌ CAMERA LOG: Error reading security log: {e}", exc_info=True)
+        return f"Failed to retrieve security logs: {e}"
+
+def get_camera_log_summary() -> str:
+    """
+    Returns a brief, one-line summary of recent camera activity (within the last hour).
+    Called by helper functions to inject a hint into the system prompt.
+    """
+    if not os.path.exists(CAMERA_LOG_FILE_PATH):
+        return ""
+        
+    try:
+        from datetime import datetime, timedelta
+        now_dt = datetime.now(USER_TIMEZONE)
+        one_hour_ago = now_dt - timedelta(hours=1)
+        
+        with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        event_count = 0
+        cameras_seen = set()
+        
+        for line in lines:
+            if not line.strip() or line.startswith("#"):
+                continue
+                
+            match = re.match(r'^-\s+\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})(?:\s+\w+)?\]\s+\[([^\]]+)\]', line)
+            if match:
+                time_str = match.group(1)
+                camera = match.group(2).strip()
+                try:
+                    entry_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                    naive_now = now_dt.replace(tzinfo=None)
+                    naive_one_hour_ago = one_hour_ago.replace(tzinfo=None)
+                    
+                    if naive_one_hour_ago <= entry_dt <= naive_now:
+                        event_count += 1
+                        cameras_seen.add(camera)
+                except Exception:
+                    pass
+                    
+        if event_count == 0:
+            return ""
+            
+        camera_word = "camera" if len(cameras_seen) == 1 else "cameras"
+        camera_list = ", ".join(sorted(cameras_seen))
+        event_word = "event" if event_count == 1 else "events"
+        return f"{event_count} security camera {event_word} detected in the last hour across {len(cameras_seen)} {camera_word} ({camera_list})"
+    except Exception as e:
+        logging.error(f"❌ CAMERA LOG: Error summarizing logs: {e}", exc_info=True)
+        return ""

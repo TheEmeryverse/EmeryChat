@@ -372,6 +372,16 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
     if str(ENABLE_SCHEDULER).lower() == "true":
         scheduler_instruction = "\n- You have the ability to schedule automated background jobs/tasks for the user (like checking the weather daily, fetching news headlines, or setting repeating or one-time reminders/alerts) using the `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job` tools. Encourage scheduling tasks when the user requests regular updates."
 
+    camera_log_hint = ""
+    if re.sub(r'[^a-zA-Z]', '', os.getenv("ENABLE_REOLINK", "false")).lower() == "true":
+        try:
+            from emery.memory import get_camera_log_summary
+            summary = get_camera_log_summary()
+            if summary:
+                camera_log_hint = f"\n\n# Security Camera Activity\n- {summary}. Use the `get_camera_security_log` tool to review specific events."
+        except Exception as e:
+            logging.error(f"❌ SYSTEM PROMPT: Failed to generate camera log summary hint: {e}", exc_info=True)
+
     prompt = f"""# Identity
 Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
 
@@ -391,6 +401,6 @@ Your tone is serious, logical, and straight to the point. You are an expert in m
 - User's name: {USER_NAME}
 - User's birthday: {USER_BIRTHDAY}
 - User's family: {USER_FAMILY}
-- User's profession: {USER_PROFESSION}{notifications}{memory_section}"""
+- User's profession: {USER_PROFESSION}{notifications}{memory_section}{camera_log_hint}"""
 
     return prompt

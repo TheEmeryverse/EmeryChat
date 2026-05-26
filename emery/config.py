@@ -20,6 +20,7 @@ VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Coprocessor model
 VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat") # Coprocessor Ollama URL
 ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "true").lower() == "true" # Toggles memory engine
 MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md") # Path to memory.md
+CAMERA_LOG_FILE_PATH = os.getenv("CAMERA_LOG_FILE_PATH", "camera_log.md") # Path to camera_log.md
 MEMORY_THRESHOLD = int(os.getenv("MEMORY_THRESHOLD", "4000")) # Memory context threshold
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG URL
 NASA_API_KEY = os.getenv("NASA_API_KEY", "blank") # NASA API Key
