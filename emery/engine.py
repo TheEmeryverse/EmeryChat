@@ -438,10 +438,26 @@ TOOL_STATUS_MESSAGES = {
 }
 
 
+def prune_past_tool_responses(history_buffer, max_len=500):
+    """
+    Truncates tool responses from past turns to save context window tokens and reduce
+    prefill response latency for local LLMs, while keeping the API structure intact.
+    """
+    for msg in history_buffer:
+        if msg.get("role") == "tool" and msg.get("content"):
+            content = msg["content"]
+            if len(content) > max_len:
+                msg["content"] = content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
+
+
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID):
+    # Prune past tool responses to prevent context bloat and speed up local inference prefill
+    prune_past_tool_responses(history_buffer)
+
     url = OLLAMA_URL
     ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
+
     
     # Find the latest user query from the history buffer for memory keyword filtering
     user_query = ""

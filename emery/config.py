@@ -55,6 +55,8 @@ ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
 ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true")
 JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", "custom_jobs.json")
+MAX_HISTORY_LEN = int(os.getenv("MAX_HISTORY_LEN", "200")) # Max chat history message count
+
 
 
 # USER PROFILE

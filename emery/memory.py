@@ -55,9 +55,13 @@ def retrieve_relevant_memories(user_query: str) -> str:
                     profile_context_lines.append(line)
                     
         # Tokenize user query to extract keywords
+        # 0. Strip leading timestamp prefix if present (e.g. "[Monday, May 26, 2026 at 04:43 PM]")
+        query_text = re.sub(r'^\[[^\]]+\]\s*', '', user_query)
+        
         # 1. Clean query (lowercase, remove punctuation)
-        clean_query = re.sub(r'[^\w\s]', '', user_query.lower())
+        clean_query = re.sub(r'[^\w\s]', '', query_text.lower())
         words = clean_query.split()
+
         
         # 2. Exclude common stop words
         stop_words = {

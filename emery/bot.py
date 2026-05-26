@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.error import TimedOut
 
 from emery.config import (
-    MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY
+    MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -38,7 +38,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_jobs_with_chat_id(chat_id)
     
     if chat_id not in globals.chat_histories: 
-        globals.chat_histories[chat_id] = deque(maxlen=100)
+        globals.chat_histories[chat_id] = deque(maxlen=MAX_HISTORY_LEN)
     
     is_input_voice = False
     model_to_use = MODEL_ID
