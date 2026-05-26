@@ -28,7 +28,8 @@ from emery.tools import (
     speak_message,
     get_system_stats,
     fetch_web_content,
-    get_reolink_snapshot, get_available_cameras
+    get_reolink_snapshot, get_available_cameras,
+    delegate_to_coprocessor
 )
 
 # Helper to check if a feature is enabled
@@ -411,7 +412,31 @@ if is_enabled("ENABLE_SCHEDULER"):
         }
     ])
 
+AVAILABLE_TOOLS["delegate_to_coprocessor"] = delegate_to_coprocessor
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "delegate_to_coprocessor",
+        "description": "Send a lightweight sub-task, summarization, formatting, or text extraction to the fast secondary model (coprocessor). Use this to offload processing, clean up large text blocks, or analyze documents without bloating your own context.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_prompt": {
+                    "type": "string",
+                    "description": "The specific instruction for the coprocessor (e.g., 'Extract all dates and times', 'Summarize this page')."
+                },
+                "content_to_process": {
+                    "type": "string",
+                    "description": "The target text block, CSV data, email, or webpage content to process."
+                }
+            },
+            "required": ["task_prompt", "content_to_process"]
+        }
+    }
+})
+
 TOOL_STATUS_MESSAGES = {
+    "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",

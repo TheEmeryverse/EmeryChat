@@ -25,7 +25,7 @@ from emery.config import (
     OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME
 )
 import emery.globals as globals
-from emery.helpers import compress_image_bytes, get_image_description
+from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
 
 # --- VOICE / TTS TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
@@ -145,14 +145,30 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
             cleaned_text = re.sub(r'\n{3,}', '\n\n', text).strip()
             cleaned_text = re.sub(r' +', ' ', cleaned_text)
 
-            if len(cleaned_text) > max_chars:
-                cleaned_text = cleaned_text[:max_chars] + "... [Content truncated for length]"
-
             if len(cleaned_text) < 200:
                 return {
                     "success": False,
                     "error": "The page yielded very little text. It may require JavaScript to render or be a login wall."
                 }
+
+            if len(cleaned_text) > 1500:
+                logging.info(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {url}...")
+                summary_prompt = (
+                    f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "
+                    f"Keep it objective, concise, and structured under 600 words.\n\n"
+                    f"Title: {title}\n"
+                    f"URL: {url}\n\n"
+                    f"Content:\n{cleaned_text}"
+                )
+                try:
+                    summary = await query_fast_model(summary_prompt)
+                    if summary:
+                        cleaned_text = f"[Summarized by Coprocessor]:\n{summary}"
+                except Exception as sum_err:
+                    logging.warning(f"⚠️ FAST MODEL: Failed to summarize content, using original text. Error: {sum_err}")
+
+            if len(cleaned_text) > max_chars:
+                cleaned_text = cleaned_text[:max_chars] + "... [Content truncated for length]"
 
             return {
                 "success": True,
@@ -162,6 +178,27 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
             }
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
+
+async def delegate_to_coprocessor(task_prompt: str, content_to_process: str) -> str:
+    """
+    Delegate a lightweight sub-task, summarization, formatting, or extraction query 
+    to the fast secondary model (coprocessor).
+    """
+    logging.info(f"🔧 TOOL: delegate_to_coprocessor | Task: {task_prompt[:50]}...")
+    try:
+        prompt = f"Task: {task_prompt}\n\nContent to process:\n{content_to_process}"
+        system_prompt = (
+            "You are Emery's Coprocessor System. Your job is to process the content provided "
+            "according to the specific task prompt. Be extremely concise, accurate, and direct. "
+            "Provide only the processed result, with no introductory or conversational remarks."
+        )
+        result = await query_fast_model(prompt, system_prompt)
+        if not result:
+            return "Coprocessor returned an empty response."
+        return result
+    except Exception as e:
+        logging.error(f"❌ COPROCESSOR DELEGATION: Tool execution failed: {e}", exc_info=True)
+        return f"Delegation failed: {e}"
 
 # --- UTILITIES ---
 async def get_news_headlines(): # Fetches news headlines from RSS feeds
