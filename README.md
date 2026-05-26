@@ -146,14 +146,22 @@ You can run EmeryChat directly using Python or inside a Docker container.
    python main.py
    ```
 
-#### Option B: Running with Docker (Recommended)
-1. Build the Docker image:
+#### Option B: Running with Docker Compose (Recommended)
+1. **Initialize persistent files** on the host. Docker requires bind-mounted files to exist on the host before starting the container, otherwise it creates directories:
    ```bash
-   docker build -t emerychat .
+   touch memory.md token.json nest_token.json credentials.json nest_credentials.json
    ```
-2. Run the Docker container (passing your `.env` file):
+2. **Build and start the container** in detached mode:
    ```bash
-   docker run -d --name emerychat --env-file .env emerychat
+   docker compose up --build -d
+   ```
+3. **Monitor logs:**
+   ```bash
+   docker compose logs -f
+   ```
+4. **Stop the container:**
+   ```bash
+   docker compose down
    ```
 
 ---

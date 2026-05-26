@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  emerychat:
+    build: .
+    container_name: emerychat
+    restart: unless-stopped
+    # Using host network mode allows the container to easily communicate with local services
+    # (like Ollama on localhost:11434 or Kokoro on localhost:8880).
+    # NOTE: If you are on macOS or Windows and host mode doesn't route properly,
+    # you can comment this out and use 'host.docker.internal' in your .env endpoints instead.
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      # Persist local agentic memory log on the host
+      - ./memory.md:/app/memory.md
+      # Pass authentication tokens and OAuth secrets into the container
+      - ./token.json:/app/token.json
+      - ./nest_token.json:/app/nest_token.json
+      - ./credentials.json:/app/credentials.json
+      - ./nest_credentials.json:/app/nest_credentials.json
