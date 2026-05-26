@@ -124,8 +124,18 @@ async def run_custom_job(context):
     from emery.helpers import emery_format
     
     try:
+        from emery.config import USER_NAME
+        exec_prompt = prompt
+        if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
+            exec_prompt = (
+                f"{prompt}\n\n"
+                f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely to the user, "
+                f"addressing them by name (e.g. '{USER_NAME}, check the chicken's temperature.'). "
+                f"Do not write conversational filler or say 'I have set a reminder'.]"
+            )
+            
         # Run the engine with the job prompt
-        res_text, _ = await emery_engine(deque([{"role": "user", "content": prompt}]))
+        res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
         # Send formatted reply
         await send_safe_job_message(
             context.bot,
