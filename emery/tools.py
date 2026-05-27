@@ -824,16 +824,17 @@ async def get_reolink_snapshot(camera_name: str) -> str:
         logging.info("👁️ VISION [1/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
             Analyze this image and report ONLY the following active elements if present:
-            - People (exact clothing, appearance, behavior)
+            - People (assess sex, race/ethnicity, hair color, exact clothing details, and if they are holding or carrying any objects)
             - Vehicles (type, color, position)
             - Packages, deliveries, or parcels (especially near entryways like the front door)
 
         STRICT SECURITY FILTER RULES:
             1. Do NOT describe static background objects, stationary items, or daily environmental features (e.g., grills, bicycles, stairs, chairs, tables, lawn furniture, toys, structures, siding, or fences).
             2. Do NOT describe domestic pets or local animals unless they represent an active safety/security issue.
-            3. Be highly specific and direct (e.g., "A person in a yellow shirt is walking on the patio").
-            4. Keep your output extremely concise (exactly 1 or 2 sentences max).
-            5. If there are no people, vehicles, or packages in the image, respond EXACTLY with: "No active activity detected." """
+            3. Be highly descriptive when analyzing people: detail their physical characteristics, apparel, and actions.
+            4. If any people are detected in the image, you MUST append a confidence score and a brief explanation of the visual conditions affecting that confidence on a new line (e.g., "Confidence in assessment: 67%. Poor lighting and face partially obscured from view.").
+            5. Keep the description very concise (1 or 2 sentences of description + 1 sentence on a new line for the confidence score and rationale).
+            6. If there are no people, vehicles, or packages in the image, respond EXACTLY with: "No active activity detected." """
             
         concise_report = await get_image_description(b64_image, security_prompt)
         logging.info(f"👁️ VISION [1/2] Raw Response: '{concise_report}'")
