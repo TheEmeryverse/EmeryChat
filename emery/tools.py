@@ -963,7 +963,12 @@ async def trigger_webhook_alert(camera_name: str):
             f"[{now_str}] [SYSTEM SECURITY ALERT] Camera '{camera_name}' triggered a person-detection event. "
             f"Photo sent. Security log updated ({camera_name}, {now_str})."
         )
-        chat_histories[globals.TARGET_CHAT_ID].append({"role": "user", "content": event_content})
+        chat_histories[globals.TARGET_CHAT_ID].append({
+            "role": "user",
+            "content": event_content,
+            "timestamp": now_dt,
+            "message_id": sent_msg.message_id if sent_msg else None
+        })
 
 async def reolink_polling_loop(application):
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
@@ -1079,3 +1084,47 @@ async def reolink_polling_loop(application):
 async def start_reolink_polling(application):
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
         asyncio.create_task(reolink_polling_loop(application))
+
+# --- EMOJI REACTIONS AND THREADING TOOLS ---
+async def react_to_message(emoji: str, message_id: int = None) -> str:
+    """
+    Reacts to a specific message in the chat with an emoji.
+    If message_id is not specified, it defaults to the latest user message in history.
+    Available standard emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'
+    """
+    chat_id = globals.TARGET_CHAT_ID
+    if not chat_id:
+        return "Error: No active chat session to react to."
+        
+    if not message_id:
+        # Try to find the latest user message in history
+        history = globals.chat_histories.get(chat_id)
+        if history:
+            for msg in reversed(history):
+                if msg.get("role") == "user" and msg.get("message_id"):
+                    message_id = msg.get("message_id")
+                    break
+                    
+    if not message_id:
+        return "Error: Could not determine message ID to react to. Please specify a message_id."
+        
+    try:
+        await globals.application_bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=emoji
+        )
+        return f"Successfully reacted to message {message_id} with {emoji}."
+    except Exception as e:
+        logging.error(f"❌ TOOLS: Failed to react to message {message_id}: {e}")
+        return f"Error setting reaction: {e}"
+
+async def reply_to_message(message_id: int) -> str:
+    """
+    Sets the target message for the bot's final response in this turn to reply directly to a specific previous message.
+    """
+    chat_id = globals.TARGET_CHAT_ID
+    if not chat_id:
+        return "Error: No active chat session."
+    globals.chat_reply_targets[chat_id] = message_id
+    return f"Success: The bot's final message will reply to message ID {message_id}."

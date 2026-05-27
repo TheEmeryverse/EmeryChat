@@ -29,7 +29,7 @@ from emery.tools import (
     get_system_stats,
     fetch_web_content,
     get_reolink_snapshot, get_available_cameras,
-    delegate_to_coprocessor
+    delegate_to_coprocessor, react_to_message, reply_to_message
 )
 
 # Helper to check if a feature is enabled
@@ -435,6 +435,48 @@ tools_schema.append({
     }
 })
 
+AVAILABLE_TOOLS["react_to_message"] = react_to_message
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "react_to_message",
+        "description": "Reacts to a specific message in the chat with an emoji. Use this to express reactions (e.g. thumbs up, heart, laugh) when a full text response is not needed, or in addition to text. Use reactions sparingly and only when highly natural.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "description": "The emoji to react with. Must be one of standard Telegram reaction emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'."
+                },
+                "message_id": {
+                    "type": "integer",
+                    "description": "Optional. The ID of the message to react to. If omitted, defaults to the latest user message in history."
+                }
+            },
+            "required": ["emoji"]
+        }
+    }
+})
+
+AVAILABLE_TOOLS["reply_to_message"] = reply_to_message
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "reply_to_message",
+        "description": "Directs the bot's final response in this turn to reply directly to a specific previous message ID in the thread, instead of replying to the latest user message.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "integer",
+                    "description": "The message ID to reply to."
+                }
+            },
+            "required": ["message_id"]
+        }
+    }
+})
+
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
@@ -510,16 +552,39 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         if content is not None:
             if isinstance(content, list):
                 text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-                clean_msg["content"] = " ".join(text_parts) if text_parts else "[Sent an image]"
+                content_str = " ".join(text_parts) if text_parts else "[Sent an image]"
             elif isinstance(content, str):
                 if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
-                    clean_msg["content"] = "[Image base64 data removed]"
+                    content_str = "[Image base64 data removed]"
                 else:
                     if msg.get("role") == "assistant":
-                        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
-                    clean_msg["content"] = content
+                        content_str = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                    else:
+                        content_str = content
             else:
-                clean_msg["content"] = str(content)
+                content_str = str(content)
+                
+            # Append message details (ID, Replies, Reactions) to the content for LLM awareness
+            msg_details = []
+            if msg.get("message_id"):
+                msg_details.append(f"ID: {msg['message_id']}")
+            if msg.get("reply_to_message_id"):
+                msg_details.append(f"Replying to: {msg['reply_to_message_id']}")
+                
+            reactions = msg.get("reactions", {})
+            reaction_parts = []
+            if reactions.get("user"):
+                reaction_parts.append(f"User: {', '.join(reactions['user'])}")
+            if reactions.get("assistant"):
+                reaction_parts.append(f"Emery: {', '.join(reactions['assistant'])}")
+            if reaction_parts:
+                msg_details.append(f"Reactions: {', '.join(reaction_parts)}")
+                
+            if msg_details:
+                prefix = f"[{' | '.join(msg_details)}] "
+                clean_msg["content"] = prefix + content_str
+            else:
+                clean_msg["content"] = content_str
         else:
             clean_msg["content"] = None if "tool_calls" in msg else ""
             
@@ -545,15 +610,16 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         
         if tools_schema:
             payload["tools"] = tools_schema
-
+ 
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
-            r = await globals.http_client.post(url, json=payload, timeout=900)
+            async with globals.main_model_lock:
+                r = await globals.http_client.post(url, json=payload, timeout=900)
             
             if r.status_code != 200:
                 logging.error(f"❌ ENGINE: Ollama returned {r.status_code} — {r.text[:200]}")
                 return "Ollama connection error.", False
-
+ 
             res = r.json()
             msg = res.get('message', {})
             
@@ -564,8 +630,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
                     
-                    status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
-                    await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
+                    if fn not in ("react_to_message", "reply_to_message"):
+                        status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
+                        await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
                     
                     logging.info(f"🔧 TOOL: {fn} | Args: {args}")
                     if fn == "speak_message": 

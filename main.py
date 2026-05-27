@@ -1,15 +1,16 @@
 import logging
 from collections import deque
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, MessageReactionHandler, filters
 from telegram.request import HTTPXRequest
 
 from emery.config import TELEGRAM_TOKEN, USER_TIMEZONE, MODEL_ID, VISION_MODEL_ID, ENABLE_SCHEDULER
 import emery.globals as globals
-from emery.tools import start_reolink_polling
 from emery.bot import (
     error_handler,
     handle_wipe_command,
-    handle_message
+    handle_message,
+    handle_reaction,
+    bot_post_init
 )
 
 if __name__ == '__main__':
@@ -19,7 +20,7 @@ if __name__ == '__main__':
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
         .request(t_request)
-        .post_init(start_reolink_polling)  # Registers active-polling startup
+        .post_init(bot_post_init)  # Registers reolink polling and bot heartbeat
         .build()
     )
     
@@ -39,6 +40,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("clear", lambda u, c: globals.chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
     application.add_handler(CommandHandler("wipe", handle_wipe_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
+    application.add_handler(MessageReactionHandler(handle_reaction))
 
     logging.info(f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | vision: {VISION_MODEL_ID}")
     application.run_polling()

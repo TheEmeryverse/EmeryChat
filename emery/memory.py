@@ -42,8 +42,8 @@ def retrieve_relevant_memories(user_query: str) -> str:
             # Keep header sections intact
             if current_section in ["## user profile & preferences", "## project & system context"]:
                 profile_context_lines.append(line)
-            # Route general facts to a list we will filter
-            elif current_section in ["## general facts & logs", "## raw memory intake"]:
+            # Route general facts and topic logs to a list we will filter
+            elif current_section in ["## general facts & logs", "## raw memory intake", "## conversational topics log"]:
                 # Keep section headers, but only filter bullets
                 if stripped.startswith("## ") or not stripped:
                     general_facts_lines.append(line)
@@ -78,9 +78,27 @@ def retrieve_relevant_memories(user_query: str) -> str:
             "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
             "please", "emery", "remember"
         }
-        keywords = [w for w in words if w not in stop_words and len(w) > 2]
         
-        if not keywords:
+        def stem_word(w: str) -> str:
+            w = w.lower().strip()
+            if w.endswith("'s"):
+                w = w[:-2]
+            elif w.endswith("s'"):
+                w = w[:-2]
+            elif len(w) > 4 and w.endswith("s"):
+                if w.endswith("es"):
+                    if w.endswith("ies") and len(w) > 5:
+                        w = w[:-3] + "y"
+                    else:
+                        w = w[:-2]
+                else:
+                    w = w[:-1]
+            return w
+
+        keywords = [w for w in words if w not in stop_words and len(w) > 2]
+        stemmed_keywords = [stem_word(kw) for kw in keywords]
+        
+        if not stemmed_keywords:
             # If no significant keywords found, just return the profile sections to save space
             return "\n".join(profile_context_lines)
             
@@ -89,9 +107,19 @@ def retrieve_relevant_memories(user_query: str) -> str:
         for line in general_facts_lines:
             stripped = line.strip()
             if stripped.startswith("- ") or stripped.startswith("* "):
-                # It's a fact bullet, check for keyword match
+                # It's a fact bullet, check for keyword match using stemming
                 lower_fact = stripped.lower()
-                if any(kw in lower_fact for kw in keywords):
+                fact_words = re.sub(r'[^\w\s]', '', lower_fact).split()
+                stemmed_fact_words = [stem_word(fw) for fw in fact_words]
+                
+                # Check if any stemmed keyword matches a stemmed fact word
+                match_found = False
+                for kw in stemmed_keywords:
+                    if any((kw in fw or fw in kw) for fw in stemmed_fact_words):
+                        match_found = True
+                        break
+                
+                if match_found:
                     matched_facts.append(line)
             else:
                 # Keep structure/spacing
@@ -182,15 +210,17 @@ async def consolidate_memory_background() -> None:
             
         system_prompt = (
             "You are Emery's Memory Consolidation System. Your job is to process the memory log (written in Markdown) "
-            "and merge any new facts listed under '## Raw Memory Intake' into the main categories:\n"
+            "and merge any new facts or topic logs listed under '## Raw Memory Intake' into the main categories:\n"
             "- '## User Profile & Preferences'\n"
-            "- '## General Facts & Logs'\n\n"
+            "- '## General Facts & Logs'\n"
+            "- '## Conversational Topics Log'\n\n"
             "Rules:\n"
-            "1. Categorize all raw facts from '## Raw Memory Intake' into their appropriate section.\n"
+            "1. Categorize all raw facts and topic logs from '## Raw Memory Intake' into their appropriate section. User preferences/profile details go to 'User Profile & Preferences', general facts go to 'General Facts & Logs', and topic summaries (bullets that start with dates/days and include [Tags: ...] at the end) go to 'Conversational Topics Log'.\n"
             "2. Completely empty/clear the '## Raw Memory Intake' section so it has no bullet points listed under it anymore.\n"
-            "3. Deduplicate facts. If a new fact matches an existing one, merge them or keep the most detailed/recent one.\n"
-            "4. Resolve contradictions: if a new fact directly contradicts an old one (e.g., 'User moved from NYC to Seattle'), update the profile/fact with the newer information and remove the obsolete one.\n"
-            "5. Keep the exact markdown section structure. Maintain bullet points. Output ONLY a single, consolidated markdown document, starting with '# Emery's Memory Log'. Do not duplicate the document, repeat the headers, or output 'before' and 'after' versions. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
+            "3. Deduplicate facts and topic entries. If a new topic summary covers the same discussion as an existing one, merge them or keep the more detailed one.\n"
+            "4. Compact topics log: If there are multiple entries for the same day or week, merge them into a single concise bullet point describing all topics covered (e.g. '- On [Date]: Discussed OpenAI IPO, Artemis program, and weather. [Tags: space, rocket, ai, tech]').\n"
+            "5. Resolve contradictions: if a new fact directly contradicts an old one, update it with the newer information and remove the obsolete one.\n"
+            "6. Keep the exact markdown section structure. Maintain bullet points. Output ONLY a single, consolidated markdown document, starting with '# Emery's Memory Log'. Do not duplicate the document, repeat the headers, or output 'before' and 'after' versions. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
         )
         
         user_prompt = f"Here is the current memory file content:\n\n{current_markdown}\n\nPlease consolidate it now."
@@ -208,6 +238,13 @@ async def consolidate_memory_background() -> None:
             logging.warning("⚠️ CONSOLIDATOR: Model output contained multiple document blocks. Keeping only the first one.")
             consolidated = "# Emery's Memory Log" + consolidated.split("# Emery's Memory Log")[1]
             
+        # Safety check: make sure the Conversational Topics Log section exists
+        if "## Conversational Topics Log" not in consolidated:
+            if "## Raw Memory Intake" in consolidated:
+                consolidated = consolidated.replace("## Raw Memory Intake", "## Conversational Topics Log\n\n## Raw Memory Intake")
+            else:
+                consolidated = consolidated.replace("## Raw Memory Intake", "## Conversational Topics Log\n\n## Raw Memory Intake")
+                
         # Safety check: make sure the Raw Memory Intake section exists
         if "## Raw Memory Intake" not in consolidated:
             consolidated += "\n\n## Raw Memory Intake\n"
@@ -221,7 +258,7 @@ async def consolidate_memory_background() -> None:
         logging.error(f"❌ CONSOLIDATOR: Background task crash: {e}", exc_info=True)
     finally:
         _is_consolidating = False
-
+ 
 def wipe_memory() -> bool:
     """
     Overwrites memory.md with the default baseline template structure,
@@ -238,6 +275,7 @@ def wipe_memory() -> bool:
         f"- Family: {USER_FAMILY}\n"
         f"- Profession: {USER_PROFESSION}\n\n"
         f"## General Facts & Logs\n\n"
+        f"## Conversational Topics Log\n\n"
         f"## Raw Memory Intake\n"
     )
     try:
@@ -393,3 +431,86 @@ def get_camera_log_summary() -> str:
     except Exception as e:
         logging.error(f"❌ CAMERA LOG: Error summarizing logs: {e}", exc_info=True)
         return ""
+
+# --- CONVERSATIONAL TOPIC MONITOR ---
+
+_is_summarizing_topics = False
+_last_summary_hist_len = {}
+
+async def summarize_topics_background(chat_id: int) -> None:
+    """
+    Summarizes the recent chat history topics and appends them
+    to the Raw Memory Intake staging area of memory.md.
+    """
+    global _is_summarizing_topics, _last_summary_hist_len
+    import emery.globals as globals
+    from datetime import datetime
+    
+    # Get active history
+    history = list(globals.chat_histories.get(chat_id, []))
+    hist_len = len(history)
+    
+    # Debounce check: only run if history length increased by at least 2 messages (one full turn)
+    last_len = _last_summary_hist_len.get(chat_id, 0)
+    if hist_len - last_len < 2:
+        return
+        
+    if _is_summarizing_topics:
+        return
+        
+    _is_summarizing_topics = True
+    try:
+        # Only check the last 6 messages (3 turns)
+        recent_history = history[-6:]
+        snippet = []
+        for msg in recent_history:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            # Strip think tags or other system triggers
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+            if not content.startswith("[System"):
+                snippet.append(f"{role.upper()}: {content}")
+                
+        if not snippet:
+            return
+            
+        snippet_text = "\n".join(snippet)
+        
+        # Current localized date
+        now_dt = datetime.now(USER_TIMEZONE)
+        now_str = now_dt.strftime("%A, %B %d, %Y")
+        
+        system_prompt = (
+            "You are Emery's Conversation Topic Summarizer.\n"
+            "Your job is to read a recent snippet of the conversation and write a single, brief bullet point "
+            "summarizing the main topic(s) discussed, including the date, AND append 3-5 high-level conceptual keywords/tags in brackets at the end.\n"
+            "Example format:\n"
+            f"- On {now_str}: Discussed SpaceX IPO valuations and compared it to OpenAI. [Tags: space exploration, rocket, investment, tech ipo]\n"
+            "Rules:\n"
+            "1. Focus ONLY on the topics/subject matters discussed (what was the chat about), not details, conversations, or decisions.\n"
+            "2. Keep it to a single, concise bullet point (maximum 1 sentence).\n"
+            "3. Provide 3 to 5 broad concept tags inside brackets at the very end. The tags must help group the topic conceptually (e.g. if the topic is NASA Artemis, tags should include space exploration, moon, rocket).\n"
+            "4. If the recent snippet is just generic greeting, small talk, or tool command status with no real topic discussed, reply with exactly 'NONE'.\n"
+            "5. Do not include conversational remarks, explanations, or code block formatting."
+        )
+        
+        user_prompt = f"Here is the recent conversation snippet:\n\n{snippet_text}"
+        
+        from emery.helpers import query_fast_model
+        summary = await query_fast_model(user_prompt, system_prompt)
+        summary = summary.strip()
+        
+        if summary and summary.upper() != "NONE" and (summary.startswith("-") or summary.startswith("*")):
+            # Extract raw text from bullet to pass to save_user_memory
+            raw_fact = summary.lstrip("-* ").strip()
+            logging.info(f"💾 TOPIC MONITOR: Identified new topic: '{raw_fact}'")
+            # Save it to raw intake staging area (which triggers memory consolidation automatically)
+            await save_user_memory(raw_fact)
+            
+            # Update last checked history length on success
+            _last_summary_hist_len[chat_id] = hist_len
+            
+    except Exception as e:
+        logging.error(f"❌ TOPIC MONITOR: Background topic summary crash: {e}", exc_info=True)
+    finally:
+        _is_summarizing_topics = False

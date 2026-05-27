@@ -22,9 +22,10 @@ Many AI agent wrappers require massive context, cloud-only models, and heavy tok
    - [Step 4: Google Service Authentication (Calendar & Nest)](#step-4-google-service-authentication-calendar--nest)
    - [Step 5: Run the Application](#step-5-run-the-application)
 5. [🧠 Persistent Memory System](#-persistent-memory-system)
-6. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
-7. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
-8. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
+6. [💬 Advanced Messaging Controls (Reactions, Threading & Heartbeat)](#-advanced-messaging-controls-reactions-threading--heartbeat)
+7. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
+8. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
+9. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
 
 ---
 
@@ -35,6 +36,7 @@ EmeryChat operates under a simple philosophy: **consistency and utility over ins
 * **Scheduled Operations:** Heavy cognitive tasks, research briefings, and long-term planning are handled through background scheduled jobs (e.g. running overnight while you sleep).
 * **CPU-Friendly Inference:** Fully optimized to run on local CPU threads utilizing context-pruning algorithms, local text models, and secondary fast models for background tasks.
 * **Multi-Model Pipeline:** Uses a primary text-generating model (e.g., Qwen 35B or Gemma 26B) and offloads vision/image analysis, background memory consolidation, web summarization, and custom lightweight sub-tasks to a secondary fast "coprocessor" model (e.g. Gemma 4B/9B) to save resources.
+* **Async Concurrency Queuing:** Uses `asyncio.Semaphore` locks to serialize HTTP requests to your main Ollama model (`main_model_lock`) and secondary coprocessor (`fast_model_lock`). If multiple background processes (e.g., security camera polling, memory consolidation, and scheduled briefings) fire at the same time, requests are queued up sequentially, avoiding VRAM spikes and protecting local services from overloading or crashing.
 
 ---
 
@@ -183,6 +185,26 @@ flowchart TD
 * **Memory Management Commands:**
   * Send `/clear` to clear current chat thread context history.
   * Send `/wipe` to wipe the persistent `memory.md` file back to the baseline config template (reads user configurations from `.env`).
+* **Conversational Topics Log (Long-Term Memory):** To track topics discussed over days without clogging the active chat context, EmeryChat monitors chat turns.
+  * **Asynchronous Topic Summarizer:** At the end of every active turn, a background task reads the recent conversation and uses the fast coprocessor model to compile discussed topics into a single chronological bullet point with the date and **AI Tag Expansion** (e.g. `- On Tuesday, May 26, 2026: Discussed SpaceX IPO valuations and OpenAI. [Tags: space exploration, rocket, investment, tech ipo]`).
+  * **Inactivity Debouncing:** Summarization only triggers if the history has grown by at least **2 new messages** since the last successful run, preventing CPU/VRAM load on quick/filler messages.
+  * **Keyword Stemming:** Python's local retrieval engine uses a custom stemmer (removing possessives and plurals) to match user queries to the concept tags. For example, asking about *"SpaceX's rockets"* will match the tags `space exploration`, `rocket`, and `investment`, pulling the topic summary into the context instantly at 0ms query-time latency.
+
+---
+
+## 💬 Advanced Messaging Controls (Reactions, Threading & Heartbeat)
+
+EmeryChat supports rich messaging features to act naturally like a human participant in your Telegram chat:
+
+* **Two-Way Emoji Reactions:**
+  * **Bot Reactions:** The bot can react to user messages using the `react_to_message(emoji, message_id)` tool. Prompts guide the bot to react sparingly.
+  * **User Reactions:** When a user reacts to a bot message, a `MessageReactionHandler` evaluates the update. The bot can decide to react back, respond textually, or remain silent (returning `DONE`).
+* **In-Thread Replies:**
+  * **Context Awareness:** When you reply in-thread to a bot message, the bot parses the reply parent, extracts a snippet, and injects it into context: `(Replying to message ID {id}: '{preview}')`.
+  * **Targeted Replies:** The bot uses `reply_to_message(message_id)` to target its replies directly back to specific messages.
+* **Inactivity Heartbeat Loop:**
+  * If a chat remains silent for more than a configurable threshold (e.g., 4 hours), a background job wakes the bot up to check in.
+  * The bot is directed to only send a check-in message if there's a genuine reason (like an outstanding follow-up). If there's no reason, it returns `DONE` to stay silent and rewrites the last message timestamp to avoid repeating the check-in every hour.
 
 ---
 
@@ -424,3 +446,6 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `TOOL_LOOP` | `15` | Maximum back-and-forth tool call loops in one turn. |
 | `ENABLE_SCHEDULER` | `true` | Enables/disables the custom background scheduler. |
 | `JOBS_FILE_PATH` | `custom_jobs.json` | Local filepath where custom schedules are persisted. |
+| `ENABLE_HEARTBEAT` | `true` | Enables periodic inactivity checks and spontaneous check-ins. |
+| `HEARTBEAT_INTERVAL_SECONDS` | `3600` | Frequency in seconds to check chat inactivity (default: 1 hour). |
+| `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Seconds of chat silence required to trigger check-in (default: 4 hours). |
