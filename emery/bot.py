@@ -11,7 +11,8 @@ from telegram.error import TimedOut
 
 from emery.config import (
     MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
-    ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS
+    ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
+    HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -418,6 +419,29 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     logging.info("💓 HEARTBEAT: Running check...")
     now = datetime.now(USER_TIMEZONE)
     
+    # Check if current time falls within user's sleep window
+    try:
+        from datetime import time
+        start_h, start_m = map(int, HEARTBEAT_SLEEP_START.split(':'))
+        end_h, end_m = map(int, HEARTBEAT_SLEEP_END.split(':'))
+        start_time = time(start_h, start_m)
+        end_time = time(end_h, end_m)
+        curr_time = now.time()
+        
+        is_asleep = False
+        if start_time <= end_time:
+            if start_time <= curr_time <= end_time:
+                is_asleep = True
+        else:
+            if curr_time >= start_time or curr_time <= end_time:
+                is_asleep = True
+                
+        if is_asleep:
+            logging.info(f"💓 HEARTBEAT: Suppressing check-in because current time {curr_time.strftime('%H:%M')} is inside sleep window ({HEARTBEAT_SLEEP_START} - {HEARTBEAT_SLEEP_END}).")
+            return
+    except Exception as e:
+        logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
+        
     for chat_id, history in list(globals.chat_histories.items()):
         if not history:
             continue

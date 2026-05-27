@@ -205,6 +205,7 @@ EmeryChat supports rich messaging features to act naturally like a human partici
 * **Inactivity Heartbeat Loop:**
   * If a chat remains silent for more than a configurable threshold (e.g., 4 hours), a background job wakes the bot up to check in.
   * The bot is directed to only send a check-in message if there's a genuine reason (like an outstanding follow-up). If there's no reason, it returns `DONE` to stay silent and rewrites the last message timestamp to avoid repeating the check-in every hour.
+  * **Sleep Window Suppression:** The heartbeat check can be configured to respect a user's bedtime window (e.g., `21:30` to `03:30` using `HEARTBEAT_SLEEP_START` and `HEARTBEAT_SLEEP_END`). Any heartbeat checks triggered during this period are automatically suppressed to ensure silent hours.
 
 ---
 
@@ -449,3 +450,5 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `ENABLE_HEARTBEAT` | `true` | Enables periodic inactivity checks and spontaneous check-ins. |
 | `HEARTBEAT_INTERVAL_SECONDS` | `3600` | Frequency in seconds to check chat inactivity (default: 1 hour). |
 | `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Seconds of chat silence required to trigger check-in (default: 4 hours). |
+| `HEARTBEAT_SLEEP_START` | `21:30` | User's sleep/bedtime start hour (24-hour format) to suppress check-ins. |
+| `HEARTBEAT_SLEEP_END` | `03:30` | User's sleep/bedtime end hour (24-hour format) to resume check-ins. |
