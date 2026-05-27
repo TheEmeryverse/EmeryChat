@@ -1186,3 +1186,103 @@ async def reply_to_message(message_id: int) -> str:
         return "Error: No active chat session."
     globals.chat_reply_targets[chat_id] = message_id
     return f"Success: The bot's final message will reply to message ID {message_id}."
+
+async def send_sticker(sticker_id_or_emoji: str) -> str:
+    """
+    Sends a sticker to the chat.
+    You can specify a direct Telegram file ID, or a standard emoji (e.g. '👍', '❤️', '🔥') 
+    to look up a sticker in your learned library.
+    """
+    from telegram import ReplyParameters
+    chat_id = globals.TARGET_CHAT_ID
+    if not chat_id:
+        return "Error: No active chat session."
+        
+    file_id = None
+    if sticker_id_or_emoji in globals.learned_stickers:
+        file_id = globals.learned_stickers[sticker_id_or_emoji]
+    else:
+        file_id = sticker_id_or_emoji
+
+    if not file_id:
+        return f"Error: No sticker found in library for emoji/lookup '{sticker_id_or_emoji}'."
+
+    try:
+        reply_to_id = globals.chat_reply_targets.pop(chat_id, None)
+        reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True) if reply_to_id else None
+        
+        await globals.application_bot.send_sticker(
+            chat_id=chat_id,
+            sticker=file_id,
+            reply_parameters=reply_params,
+            message_thread_id=globals.CURRENT_THREAD_ID
+        )
+        return f"Successfully sent sticker: {sticker_id_or_emoji}."
+    except Exception as e:
+        logging.error(f"❌ TOOLS: Failed to send sticker: {e}")
+        return f"Error sending sticker: {e}"
+
+async def search_gif(query: str) -> str:
+    """Helper function to search Giphy and Tenor APIs for a GIF matching the query."""
+    # 1. Try Giphy search first (using custom key if provided, fallback to Giphy public beta key)
+    try:
+        giphy_key = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")
+        url = "https://api.giphy.com/v1/gifs/search"
+        params = {"api_key": giphy_key, "q": query, "limit": 1}
+        r = await globals.http_client.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("data"):
+                return data["data"][0]["images"]["original"]["url"]
+    except Exception as e:
+        logging.error(f"❌ TOOLS: Giphy search failed: {e}")
+
+    # 2. Try Tenor search (using custom key if provided, fallback to Tenor default key)
+    try:
+        tenor_key = os.getenv("TENOR_API_KEY", "LIVDTRZ9VRJH")
+        url = "https://tenor.googleapis.com/v2/posts"
+        params = {"key": tenor_key, "q": query, "limit": 1, "client_key": "emerychat"}
+        r = await globals.http_client.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("results"):
+                return data["results"][0]["media_formats"]["gif"]["url"]
+    except Exception as e:
+        logging.error(f"❌ TOOLS: Tenor search failed: {e}")
+
+    return None
+
+async def send_gif(query_or_url: str) -> str:
+    """
+    Sends a GIF (animation) to the chat.
+    Specify a direct URL to a .gif / .mp4 file, or a search query (e.g. 'happy dance', 'confused') 
+    to automatically search and send a matching GIF.
+    """
+    from telegram import ReplyParameters
+    chat_id = globals.TARGET_CHAT_ID
+    if not chat_id:
+        return "Error: No active chat session."
+
+    gif_url = None
+    if query_or_url.startswith("http://") or query_or_url.startswith("https://"):
+        gif_url = query_or_url
+    else:
+        gif_url = await search_gif(query_or_url)
+
+    if not gif_url:
+        return f"Error: Could not find or resolve any GIF for query '{query_or_url}'."
+
+    try:
+        reply_to_id = globals.chat_reply_targets.pop(chat_id, None)
+        reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True) if reply_to_id else None
+        
+        await globals.application_bot.send_animation(
+            chat_id=chat_id,
+            animation=gif_url,
+            reply_parameters=reply_params,
+            message_thread_id=globals.CURRENT_THREAD_ID
+        )
+        return f"Successfully sent GIF for query/url: '{query_or_url}'."
+    except Exception as e:
+        logging.error(f"❌ TOOLS: Failed to send GIF: {e}")
+        return f"Error sending GIF: {e}"

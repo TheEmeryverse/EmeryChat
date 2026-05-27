@@ -28,3 +28,6 @@ import asyncio
 main_model_lock = asyncio.Semaphore(1)
 fast_model_lock = asyncio.Semaphore(1)
 
+learned_stickers = {}  # Tracks learned sticker file IDs: emoji -> file_id
+
+

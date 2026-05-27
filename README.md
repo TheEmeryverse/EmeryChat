@@ -22,7 +22,7 @@ Many AI agent wrappers require massive context, cloud-only models, and heavy tok
    - [Step 4: Google Service Authentication (Calendar & Nest)](#step-4-google-service-authentication-calendar--nest)
    - [Step 5: Run the Application](#step-5-run-the-application)
 5. [🧠 Persistent Memory System](#-persistent-memory-system)
-6. [💬 Advanced Messaging Controls (Reactions, Threading & Heartbeat)](#-advanced-messaging-controls-reactions-threading--heartbeat)
+6. [💬 Advanced Messaging Controls (Reactions, Threading, Heartbeat, Stickers & GIFs)](#-advanced-messaging-controls-reactions-threading-heartbeat-stickers--gifs)
 7. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
 8. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
 9. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
@@ -192,9 +192,14 @@ flowchart TD
 
 ---
 
-## 💬 Advanced Messaging Controls (Reactions, Threading & Heartbeat)
+## 💬 Advanced Messaging Controls (Reactions, Threading, Heartbeat, Stickers & GIFs)
 
 EmeryChat supports rich messaging features to act naturally like a human participant in your Telegram chat:
+
+* **Two-Way Stickers & GIFs:**
+  * **User to Bot Stickers/GIFs:** When you send a sticker or GIF, the bot logs it in memory/history. It extracts the emoji associated with any sticker and maps it to the sticker's file ID, learning it dynamically.
+  * **Preloading Sticker Sets:** You can configure a default sticker set (e.g. `Classic` or `Animals`) in `.env` using `TELEGRAM_STICKER_SET` to preload reaction stickers on startup.
+  * **Sending Stickers/GIFs:** The model uses `send_sticker(sticker_id_or_emoji)` to send a sticker matching your reaction or emoji lookup, and `send_gif(query_or_url)` to query Tenor/Giphy or direct URLs and post GIFs in-thread.
 
 * **Two-Way Emoji Reactions:**
   * **Bot Reactions:** The bot can react to user messages using the `react_to_message(emoji, message_id)` tool. Prompts guide the bot to react sparingly.
@@ -460,3 +465,6 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Seconds of chat silence required to trigger check-in (default: 4 hours). |
 | `HEARTBEAT_SLEEP_START` | `21:30` | User's sleep/bedtime start hour (24-hour format) to suppress check-ins. |
 | `HEARTBEAT_SLEEP_END` | `03:30` | User's sleep/bedtime end hour (24-hour format) to resume check-ins. |
+| `TELEGRAM_STICKER_SET` | *Optional* | Name of the Telegram sticker set to preload on startup. |
+| `GIPHY_API_KEY` | *Optional* | Custom developer API key for Giphy GIF search (falls back to public test key). |
+| `TENOR_API_KEY` | *Optional* | Custom developer API key for Tenor GIF search (falls back to public test key). |

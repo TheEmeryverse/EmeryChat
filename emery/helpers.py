@@ -387,6 +387,10 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
         "Use this for normal texting interaction when a full text response is not needed, or in addition to text. "
         "Use reactions sparingly and only when highly natural (e.g. laughing at a joke, showing appreciation, or a simple status check-in). Do not react to every message. "
         "If you only want to react to a message and send no text response, call the `react_to_message` tool and then respond with exactly 'DONE'."
+        "\n- You can send a Telegram sticker using the `send_sticker` tool, and you can send a GIF (animation) using the `send_gif` tool. "
+        "Use stickers and GIFs contextually and naturally (just like a human participant in the chat would). "
+        "If the user sends you a sticker or a GIF, you can choose to respond with a text message, react with an emoji, or send a sticker/GIF back. "
+        "If you only want to send a sticker or a GIF without any text response, call `send_sticker` or `send_gif` and then respond with exactly 'DONE'."
     )
 
     reply_instruction = (

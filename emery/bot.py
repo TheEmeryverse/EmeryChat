@@ -106,8 +106,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content_text += f" User's caption: {caption}"
         content_text += f"\nImage Description: {description}"
         content = f"[{now_str}] {content_text}"
+    elif update.message.sticker:
+        sticker = update.message.sticker
+        emoji = sticker.emoji or ""
+        file_id = sticker.file_id
+        set_name = sticker.set_name or "Unknown"
+        
+        if emoji:
+            globals.learned_stickers[emoji] = file_id
+            
+        content_text = f"User sent a sticker: {emoji} (File ID: {file_id}, Set: {set_name})"
+        content = f"[{now_str}] {content_text}"
+    elif update.message.animation:
+        anim = update.message.animation
+        file_id = anim.file_id
+        content_text = f"User sent a GIF / Animation (File ID: {file_id})"
+        content = f"[{now_str}] {content_text}"
+    elif update.message.document and update.message.document.mime_type == "video/mp4":
+        doc = update.message.document
+        file_id = doc.file_id
+        content_text = f"User sent a GIF / Animation (File ID: {file_id})"
+        content = f"[{now_str}] {content_text}"
     else:
-        content = f"[{now_str}] {update.message.text}"
+        text = update.message.text or "[Non-text message]"
+        content = f"[{now_str}] {text}"
         
     # Thread Reply Context Builder
     reply_to = update.message.reply_to_message
@@ -640,3 +662,16 @@ async def bot_post_init(application) -> None:
     from emery.tools import start_reolink_polling
     await start_reolink_polling(application)
     await start_bot_heartbeat(application)
+    
+    # Preload sticker set if configured in environment
+    sticker_set_name = os.getenv("TELEGRAM_STICKER_SET")
+    if sticker_set_name:
+        try:
+            logging.info(f"🎨 STICKERS: Preloading sticker set '{sticker_set_name}'...")
+            sticker_set = await application.bot.get_sticker_set(sticker_set_name)
+            for sticker in sticker_set.stickers:
+                if sticker.emoji:
+                    globals.learned_stickers[sticker.emoji] = sticker.file_id
+            logging.info(f"🎨 STICKERS: Preloaded {len(sticker_set.stickers)} stickers from set.")
+        except Exception as e:
+            logging.error(f"⚠️ STICKERS: Failed to preload sticker set '{sticker_set_name}': {e}")

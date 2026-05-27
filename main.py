@@ -40,7 +40,7 @@ if __name__ == '__main__':
     
     application.add_handler(CommandHandler("clear", handle_clear_command))
     application.add_handler(CommandHandler("wipe", handle_wipe_command))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION | filters.Document.ALL, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))
 
     logging.info(f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | vision: {VISION_MODEL_ID}")

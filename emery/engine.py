@@ -29,7 +29,8 @@ from emery.tools import (
     get_system_stats,
     fetch_web_content,
     get_reolink_snapshot, get_available_cameras,
-    delegate_to_coprocessor, react_to_message, reply_to_message
+    delegate_to_coprocessor, react_to_message, reply_to_message,
+    send_sticker, send_gif
 )
 
 # Helper to check if a feature is enabled
@@ -477,6 +478,44 @@ tools_schema.append({
     }
 })
 
+AVAILABLE_TOOLS["send_sticker"] = send_sticker
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "send_sticker",
+        "description": "Sends a Telegram sticker to the chat. You can specify a standard emoji (e.g. '👍', '❤️', '🔥') to look up a sticker in your library, or pass a direct sticker file ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sticker_id_or_emoji": {
+                    "type": "string",
+                    "description": "The emoji (e.g. '👍') or sticker file ID to send."
+                }
+            },
+            "required": ["sticker_id_or_emoji"]
+        }
+    }
+})
+
+AVAILABLE_TOOLS["send_gif"] = send_gif
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "send_gif",
+        "description": "Sends a GIF (animation) to the chat. You can pass a direct URL to a .gif / .mp4 file, or a search query (e.g. 'happy dance', 'confused') to automatically search and send a matching GIF.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_or_url": {
+                    "type": "string",
+                    "description": "The GIF search query or a direct GIF URL to send."
+                }
+            },
+            "required": ["query_or_url"]
+        }
+    }
+})
+
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
@@ -630,7 +669,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
                     
-                    if fn not in ("react_to_message", "reply_to_message"):
+                    if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
                         status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                         await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML")
                     
