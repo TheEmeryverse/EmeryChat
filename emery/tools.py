@@ -76,7 +76,7 @@ async def generate_image(prompt): # Generates an image based on the prompt using
             await globals.application_bot.send_photo(
                 chat_id=globals.TARGET_CHAT_ID,
                 photo=image_bytes,
-                caption=f"Here's your picture: {prompt[:100]}"
+                caption=f"Here's your picture: {prompt[:1000]}"
             )
             return "Image sent successfully."
         return "Chat context lost."

@@ -363,6 +363,14 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   OVERSEER_USER_ID=1
   ```
 
+### Telegram Stickers (`send_sticker`)
+* **Status Toggle:** Active (Stickers preloaded if `TELEGRAM_STICKER_SET` is configured, or learned dynamically).
+* **Description:** Sends a Telegram sticker to the chat matching a standard reaction emoji lookup (e.g. '👍', '❤️') or a direct sticker file ID.
+
+### GIF Animations (`send_gif`)
+* **Status Toggle:** Active (GIFs searched using Giphy/Tenor APIs).
+* **Description:** Searches for and dispatches animated GIFs to the chat in response to search queries (e.g. 'happy dance', 'confused') or direct URL links.
+
 ### System Stats (`get_system_stats`)
 * **Status Toggle:** `ENABLE_SYSTEM_STATS=true`
 * **Description:** Inspects current host CPU and memory utilization using `psutil`.
