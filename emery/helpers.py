@@ -390,8 +390,9 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
     )
 
     reply_instruction = (
-        "\n- You can thread your response to an earlier message using the `reply_to_message` tool. "
-        "Use this when the user is replying to an older message, or if you want to circle back to an earlier message."
+        "\n- You can quote/thread your response to a specific message using the `reply_to_message` tool. "
+        "Use this ONLY when you want to explicitly quote an older message from earlier in the conversation, or if the user asks a question about a specific past message. "
+        "DO NOT use this tool for normal back-and-forth messaging. For normal replies, just write your response text directly without calling this tool."
     )
 
     camera_log_hint = ""

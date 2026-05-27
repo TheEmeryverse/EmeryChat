@@ -194,7 +194,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(thinking_msg, parse_mode="HTML")
 
     # Determine final reply target
-    reply_target_id = globals.chat_reply_targets.pop(chat_id, None) or update.message.message_id
+    reply_target_id = globals.chat_reply_targets.pop(chat_id, None)
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---
@@ -202,10 +202,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_chat_action("record_voice")
         v_out = await get_voice_audio(clean_response)
         if v_out:
-            sent_msg = await update.message.reply_voice(
-                voice=v_out, 
+            reply_params = ReplyParameters(message_id=reply_target_id, allow_sending_without_reply=True) if reply_target_id else None
+            sent_msg = await globals.application_bot.send_voice(
+                chat_id=chat_id,
+                voice=v_out,
                 caption="Voice message",
-                reply_parameters=ReplyParameters(message_id=reply_target_id, allow_sending_without_reply=True)
+                reply_parameters=reply_params,
+                message_thread_id=globals.CURRENT_THREAD_ID
             )
             sent_msgs = [sent_msg] if sent_msg else []
         else:
@@ -241,14 +244,28 @@ async def send_safe_large_message(update: Update, text: str, reply_to_message_id
         reply_params = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
 
     sent_msgs = []
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id if update.message else None
     
     if len(text) <= MAX_LIMIT:
-        sent_msg = await update.message.reply_text(text, parse_mode="HTML", reply_parameters=reply_params)
+        sent_msg = await globals.application_bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            reply_parameters=reply_params,
+            message_thread_id=thread_id
+        )
         return [sent_msg]
 
     while len(text) > 0:
         if len(text) <= MAX_LIMIT:
-            sent_msg = await update.message.reply_text(text, parse_mode="HTML", reply_parameters=reply_params)
+            sent_msg = await globals.application_bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_parameters=reply_params,
+                message_thread_id=thread_id
+            )
             sent_msgs.append(sent_msg)
             break
             
@@ -257,7 +274,13 @@ async def send_safe_large_message(update: Update, text: str, reply_to_message_id
             split_index = MAX_LIMIT
             
         chunk = text[:split_index]
-        sent_msg = await update.message.reply_text(chunk, parse_mode="HTML", reply_parameters=reply_params)
+        sent_msg = await globals.application_bot.send_message(
+            chat_id=chat_id,
+            text=chunk,
+            parse_mode="HTML",
+            reply_parameters=reply_params,
+            message_thread_id=thread_id
+        )
         sent_msgs.append(sent_msg)
         text = text[split_index:].strip()
         
