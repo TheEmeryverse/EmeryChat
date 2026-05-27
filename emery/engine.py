@@ -653,7 +653,13 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 continue
             
             content = msg.get('content', "")
+            # Strip hallucinated [ID: ...] prefixes that the model imitated from history formatting
+            content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
+            content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
+
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
+            if reasoning:
+                reasoning = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', reasoning, flags=re.IGNORECASE)
             
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {len(reasoning)} chars reasoning" if reasoning else ""))
 
