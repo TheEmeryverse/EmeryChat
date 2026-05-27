@@ -206,6 +206,8 @@ EmeryChat supports rich messaging features to act naturally like a human partici
   * If a chat remains silent for more than a configurable threshold (e.g., 4 hours), a background job wakes the bot up to check in.
   * The bot is directed to only send a check-in message if there's a genuine reason (like an outstanding follow-up). If there's no reason, it returns `DONE` to stay silent and rewrites the last message timestamp to avoid repeating the check-in every hour.
   * **Sleep Window Suppression:** The heartbeat check can be configured to respect a user's bedtime window (e.g., `21:30` to `03:30` using `HEARTBEAT_SLEEP_START` and `HEARTBEAT_SLEEP_END`). Any heartbeat checks triggered during this period are automatically suppressed to ensure silent hours.
+* **Group Chat Topic Routing:** emerychat can be routed to run within a Telegram group with Topics (Forums) enabled. This allows organizing the bot's features into distinct tabs: Camera Alerts land in the **Security** topic, automated daily briefs land in the **Routines** topic, and direct interactions/heartbeats land in the **Chat** topic.
+* **Privacy User Whitelist:** You can restrict bot interactions (messages, commands, reactions) exclusively to authorized users by providing a list of Telegram User IDs. Any unauthorized users trying to search for and DM the bot will be silently ignored.
 
 ---
 
@@ -401,6 +403,12 @@ Below is a detailed list of the configurations available in your `.env` file:
 | Variable | Default Value | Description |
 | :--- | :---: | :--- |
 | `TELEGRAM_TOKEN` | *Required* | API Key generated via @BotFather on Telegram. |
+| `TELEGRAM_GROUP_CHAT_ID` | *Optional* | Dedicated group chat ID (e.g. `-10023456789`) where all group routing operates. |
+| `SECURITY_TOPIC_ID` | *Optional* | Topic/thread ID for the **Security** topic (Reolink alerts). |
+| `ROUTINES_TOPIC_ID` | *Optional* | Topic/thread ID for the **Routines** topic (automated briefs). |
+| `CHAT_TOPIC_ID` | *Optional* | Topic/thread ID for the **Chat** topic (conversations, reminders, heartbeats). |
+| `REOLINK_SILENT_ALERTS` | `true` | Default: true. Set to false to hear alerts. |
+| `TELEGRAM_ALLOWED_USERS` | *Optional* | Comma-separated whitelisted Telegram User IDs. If set, ignores anyone else. |
 | `MODEL_NAME` | `Emery` | Name the bot addresses itself as. |
 | `MODEL_ID` | `qwen3.6:35b-a3b` | Main model ID in Ollama. |
 | `VISION_MODEL_ID` | `gemma4:e4b` | Coprocessor vision and processing model. |

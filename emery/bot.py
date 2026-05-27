@@ -1,3 +1,4 @@
+import os
 import re
 import logging
 import asyncio
@@ -23,24 +24,57 @@ from emery.memory import wipe_memory
 from emery.engine import emery_engine
 from emery.tools import get_voice_audio
 
+def is_user_allowed(update: Update) -> bool:
+    """Checks if the user interacting with the bot is whitelisted in TELEGRAM_ALLOWED_USERS."""
+    user = update.effective_user
+    if not user:
+        return False
+        
+    allowed_users_env = os.getenv("TELEGRAM_ALLOWED_USERS")
+    if not allowed_users_env:
+        return True  # Open by default if not set
+        
+    try:
+        allowed_ids = [int(uid.strip()) for uid in allowed_users_env.split(",") if uid.strip()]
+        return user.id in allowed_ids
+    except ValueError:
+        logging.error(f"❌ Invalid TELEGRAM_ALLOWED_USERS config: {allowed_users_env}")
+        return False
+
 # --- TELEGRAM HANDLERS ---
+async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram handler for /clear command."""
+    if not is_user_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id in globals.chat_histories:
+        globals.chat_histories[chat_id].clear()
+    await update.message.reply_text("Context cleared.")
+
 async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for /wipe command."""
+    if not is_user_allowed(update):
+        return
+        
     if wipe_memory():
         await update.message.reply_text("🧠 Memory wiped successfully and re-initialized to baseline template.")
     else:
         await update.message.reply_text("❌ Failed to wipe memory due to a filesystem error.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_user_allowed(update):
+        return
+        
     chat_id = update.effective_chat.id
     globals.TARGET_CHAT_ID = chat_id
+    globals.CURRENT_THREAD_ID = update.message.message_thread_id if update.message else None
     
     # Dynamically associate user chat ID with any pending jobs (like default briefings)
     from emery.scheduler import update_jobs_with_chat_id
     update_jobs_with_chat_id(chat_id)
     
     if chat_id not in globals.chat_histories: 
-        globals.chat_histories[chat_id] = deque(maxlen=MAX_HISTORY_LEN)
+         globals.chat_histories[chat_id] = deque(maxlen=MAX_HISTORY_LEN)
     
     # Clear any stale custom reply targets for this turn
     globals.chat_reply_targets.pop(chat_id, None)
@@ -97,6 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "content": content + reply_info,
         "message_id": update.message.message_id,
         "reply_to_message_id": reply_to.message_id if reply_to else None,
+        "message_thread_id": update.message.message_thread_id if update.message else None,
         "timestamp": datetime.now(USER_TIMEZONE)
     })
     
@@ -139,6 +174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
+            "message_thread_id": globals.CURRENT_THREAD_ID,
             "timestamp": datetime.now(USER_TIMEZONE)
         })
         return
@@ -182,6 +218,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     assistant_entry = {
         "role": "assistant", 
         "content": response_text,
+        "message_thread_id": globals.CURRENT_THREAD_ID,
         "timestamp": datetime.now(USER_TIMEZONE)
     }
     if sent_msgs:
@@ -237,7 +274,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- REACTION AND HEARTBEAT FUNCTIONALITY ---
 
-async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_message_id: int = None):
+async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_message_id: int = None, message_thread_id: int = None):
     """Sends a safe split message directly to a chat, replying to a specific message ID."""
     MAX_LIMIT = 4000
     reply_params = None
@@ -251,7 +288,8 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
             chat_id=chat_id,
             text=text,
             parse_mode="HTML",
-            reply_parameters=reply_params
+            reply_parameters=reply_params,
+            message_thread_id=message_thread_id
         )
         return [sent_msg]
 
@@ -261,7 +299,8 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
                 chat_id=chat_id,
                 text=text,
                 parse_mode="HTML",
-                reply_parameters=reply_params
+                reply_parameters=reply_params,
+                message_thread_id=message_thread_id
             )
             sent_msgs.append(sent_msg)
             break
@@ -275,7 +314,8 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
             chat_id=chat_id,
             text=chunk,
             parse_mode="HTML",
-            reply_parameters=reply_params
+            reply_parameters=reply_params,
+            message_thread_id=message_thread_id
         )
         sent_msgs.append(sent_msg)
         text = text[split_index:].strip()
@@ -284,6 +324,9 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for message reaction changes (MessageReactionUpdated)."""
+    if not is_user_allowed(update):
+        return
+        
     reaction_update = update.message_reaction
     if not reaction_update:
         return
@@ -417,6 +460,22 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
         return
         
     logging.info("💓 HEARTBEAT: Running check...")
+    
+    group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
+    if not group_chat_id_env:
+        logging.info("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID is not configured. Heartbeat check skipped.")
+        return
+        
+    try:
+        group_chat_id = int(group_chat_id_env)
+    except ValueError:
+        logging.error(f"❌ Invalid TELEGRAM_GROUP_CHAT_ID: {group_chat_id_env}")
+        return
+        
+    history = globals.chat_histories.get(group_chat_id)
+    if not history:
+        return
+        
     now = datetime.now(USER_TIMEZONE)
     
     # Check if current time falls within user's sleep window
@@ -442,25 +501,38 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
         
-    for chat_id, history in list(globals.chat_histories.items()):
-        if not history:
-            continue
-            
-        last_msg = history[-1]
-        last_time = last_msg.get("timestamp")
+    last_msg = history[-1]
+    last_time = last_msg.get("timestamp")
+    
+    if not last_time:
+        last_msg["timestamp"] = now
+        return
         
-        if not last_time:
-            last_msg["timestamp"] = now
-            continue
-            
-        elapsed = (now - last_time).total_seconds()
-        if elapsed > HEARTBEAT_SILENCE_THRESHOLD_SECONDS:
-            logging.info(f"💓 HEARTBEAT: Chat {chat_id} has been silent for {elapsed:.1f}s. Evaluating spontaneous message...")
-            await handle_heartbeat_trigger(chat_id)
+    elapsed = (now - last_time).total_seconds()
+    if elapsed > HEARTBEAT_SILENCE_THRESHOLD_SECONDS:
+        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} has been silent for {elapsed:.1f}s. Evaluating spontaneous message...")
+        await handle_heartbeat_trigger(group_chat_id)
 
 async def handle_heartbeat_trigger(chat_id: int):
     """Triggers the model to potentially circle back or check in on a silent chat."""
     globals.TARGET_CHAT_ID = chat_id
+    
+    # Determine the topic/thread ID for the heartbeats
+    message_thread_id = None
+    chat_topic_env = os.getenv("CHAT_TOPIC_ID")
+    if chat_topic_env:
+        try:
+            message_thread_id = int(chat_topic_env)
+        except ValueError:
+            pass
+            
+    if message_thread_id is None and globals.chat_histories.get(chat_id):
+        for msg in reversed(globals.chat_histories[chat_id]):
+            if msg.get("message_id") and msg.get("message_thread_id"):
+                message_thread_id = msg.get("message_thread_id")
+                break
+                
+    globals.CURRENT_THREAD_ID = message_thread_id
     
     trigger_content = (
         f"[System Trigger (Heartbeat)]: It has been several hours since the last message in this chat. "
@@ -503,6 +575,7 @@ async def handle_heartbeat_trigger(chat_id: int):
     globals.chat_histories[chat_id].append({
         "role": "assistant",
         "content": response_text,
+        "message_thread_id": message_thread_id,
         "timestamp": datetime.now(USER_TIMEZONE)
     })
     
@@ -513,7 +586,7 @@ async def handle_heartbeat_trigger(chat_id: int):
             break
             
     try:
-        sent_msgs = await send_safe_large_message_as_reply(chat_id, clean_response, reply_to_id)
+        sent_msgs = await send_safe_large_message_as_reply(chat_id, clean_response, reply_to_id, message_thread_id)
         if sent_msgs:
             last_entry = globals.chat_histories[chat_id][-1]
             last_entry["message_ids"] = [m.message_id for m in sent_msgs]

@@ -69,16 +69,16 @@ def remove_job_from_store(job_id: str):
         save_jobs_to_file(updated_jobs)
         logging.info(f"📅 SCHEDULER: Removed job {job_id} from persistent store.")
 
-async def send_safe_job_message(bot, chat_id: int, text: str):
+async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
     """Splits large messages to fit Telegram's character limits."""
     MAX_LIMIT = 4000
     if len(text) <= MAX_LIMIT:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
         return
 
     while len(text) > 0:
         if len(text) <= MAX_LIMIT:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
             break
             
         split_index = text.rfind('\n', 0, MAX_LIMIT)
@@ -86,7 +86,7 @@ async def send_safe_job_message(bot, chat_id: int, text: str):
             split_index = MAX_LIMIT
             
         chunk = text[:split_index]
-        await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+        await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", message_thread_id=message_thread_id)
         text = text[split_index:].strip()
 
 async def run_custom_job(context):
@@ -97,8 +97,37 @@ async def run_custom_job(context):
     prompt = job_data.get("prompt")
     description = job_data.get("description")
     chat_id = job_data.get("chat_id")
+    message_thread_id = job_data.get("message_thread_id")
     schedule_type = job_data.get("schedule_type")
     
+    # Check if it is an automated daily or repeating routine
+    is_routine = schedule_type in ("daily", "weekly", "monthly", "yearly", "interval")
+    
+    if is_routine:
+        # Automated routine jobs must go to the designated group and topic
+        group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
+        if group_chat_id_env:
+            try:
+                chat_id = int(group_chat_id_env)
+            except ValueError:
+                pass
+                
+        routines_topic_env = os.getenv("ROUTINES_TOPIC_ID")
+        if routines_topic_env:
+            try:
+                message_thread_id = int(routines_topic_env)
+            except ValueError:
+                pass
+    else:
+        # One-off reminders: fallback to CHAT_TOPIC_ID if they have no thread ID
+        if message_thread_id is None:
+            chat_topic_env = os.getenv("CHAT_TOPIC_ID")
+            if chat_topic_env:
+                try:
+                    message_thread_id = int(chat_topic_env)
+                except ValueError:
+                    pass
+
     if not chat_id:
         chat_id = globals.TARGET_CHAT_ID
         
@@ -140,7 +169,8 @@ async def run_custom_job(context):
         await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
-            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{emery_format(res_text)}"
+            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{emery_format(res_text)}",
+            message_thread_id=message_thread_id
         )
     except Exception as e:
         logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
@@ -374,6 +404,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "prompt": prompt,
         "description": description,
         "chat_id": chat_id,
+        "message_thread_id": getattr(globals, "CURRENT_THREAD_ID", None),
         "created_at": datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     }
     

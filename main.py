@@ -7,6 +7,7 @@ from emery.config import TELEGRAM_TOKEN, USER_TIMEZONE, MODEL_ID, VISION_MODEL_I
 import emery.globals as globals
 from emery.bot import (
     error_handler,
+    handle_clear_command,
     handle_wipe_command,
     handle_message,
     handle_reaction,
@@ -37,7 +38,7 @@ if __name__ == '__main__':
     
 
     
-    application.add_handler(CommandHandler("clear", lambda u, c: globals.chat_histories.get(u.effective_chat.id, deque()).clear() or u.message.reply_text("Context cleared.")))
+    application.add_handler(CommandHandler("clear", handle_clear_command))
     application.add_handler(CommandHandler("wipe", handle_wipe_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))

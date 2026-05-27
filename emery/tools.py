@@ -714,8 +714,36 @@ async def overseer_request_tv_season(tmdb_id, season_number):
         return f"Request failed: {e}"
 
 # --- REOLINK CAMERA NVR INTEGRATIONS ---
-async def get_reolink_snapshot(camera_name: str, reply_to_message_id: int = None) -> str:
+async def get_reolink_snapshot(
+    camera_name: str, 
+    reply_to_message_id: int = None,
+    target_chat_id: int = None,
+    message_thread_id: int = None,
+    update_thread_tracker: bool = False
+) -> str:
     logging.info(f"🔧 TOOL: get_reolink_snapshot | Camera: {camera_name}")
+    
+    # Determine target chat ID and options
+    if target_chat_id is None:
+        target_chat_id = globals.TARGET_CHAT_ID
+        actual_thread_id = getattr(globals, "CURRENT_THREAD_ID", None)
+        use_alert_configs = False
+    else:
+        actual_thread_id = message_thread_id
+        use_alert_configs = True
+
+    # Resolve topics and silent settings
+    silent_alerts = False
+    if use_alert_configs:
+        silent_alerts = os.getenv("REOLINK_SILENT_ALERTS", "true").lower() != "false"
+        if actual_thread_id is None:
+            topic_id_env = os.getenv("SECURITY_TOPIC_ID")
+            if topic_id_env:
+                try:
+                    actual_thread_id = int(topic_id_env)
+                except ValueError:
+                    pass
+
     host = os.getenv("REOLINK_HOST")
     user = os.getenv("REOLINK_USER")
     password = os.getenv("REOLINK_PASSWORD")
@@ -842,15 +870,25 @@ async def get_reolink_snapshot(camera_name: str, reply_to_message_id: int = None
         if not concise_report or not concise_report.strip():
             concise_report = "No active activity detected."
         
-        if globals.TARGET_CHAT_ID:
+        if target_chat_id:
             telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
-            await globals.application_bot.send_photo(
-                chat_id=globals.TARGET_CHAT_ID,
+            sent_photo_msg = await globals.application_bot.send_photo(
+                chat_id=target_chat_id,
                 photo=response_content,
                 caption=telegram_caption,
                 parse_mode="HTML",
-                reply_to_message_id=reply_to_message_id
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=actual_thread_id,
+                disable_notification=silent_alerts
             )
+            
+            if update_thread_tracker and sent_photo_msg:
+                cam_key = matched_camera_name.lower().strip()
+                if reply_to_message_id is None:
+                    globals.reolink_thread_trackers[cam_key] = {
+                        "message_id": sent_photo_msg.message_id,
+                        "timestamp": datetime.now(USER_TIMEZONE)
+                    }
             
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
             logging.info("👁️ VISION [2/2]: Generating scene context...")
@@ -898,12 +936,22 @@ async def get_available_cameras() -> str:
 async def trigger_webhook_alert(camera_name: str):
     logging.info(f"🚨 SECURITY: Person trigger received for '{camera_name}' — dispatching alert...")
     
-    # Recover TARGET_CHAT_ID from active chat histories if not yet set
-    if not globals.TARGET_CHAT_ID and globals.chat_histories:
-        globals.TARGET_CHAT_ID = list(globals.chat_histories.keys())[0]
+    # Resolve the target chat ID for alerts (check TELEGRAM_GROUP_CHAT_ID first, fall back to TARGET_CHAT_ID)
+    group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
+    alert_chat_id = None
+    if group_chat_id_env:
+        try:
+            alert_chat_id = int(group_chat_id_env)
+        except ValueError:
+            logging.error(f"❌ Invalid TELEGRAM_GROUP_CHAT_ID: {group_chat_id_env}")
+
+    if not alert_chat_id:
+        if not globals.TARGET_CHAT_ID and globals.chat_histories:
+            globals.TARGET_CHAT_ID = list(globals.chat_histories.keys())[0]
+        alert_chat_id = globals.TARGET_CHAT_ID
         
-    if not globals.TARGET_CHAT_ID:
-        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
+    if not alert_chat_id:
+        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set TELEGRAM_GROUP_CHAT_ID in .env or message the bot first.")
         return
         
     # Check if threading is enabled and configure parameters
@@ -932,43 +980,53 @@ async def trigger_webhook_alert(camera_name: str):
         else:
             logging.info(f"🧵 REOLINK THREAD: No active thread for camera '{camera_name}'. Starting a new thread.")
             
-    sent_msg = await globals.application_bot.send_message(
-        chat_id=globals.TARGET_CHAT_ID,
-        text=f"🚨 <b>Person Detected:</b> Someone is on the <b>{camera_name.upper()}</b> camera. Running analysis...",
-        parse_mode="HTML",
-        reply_to_message_id=reply_to_message_id
+    # Resolve the SECURITY_TOPIC_ID
+    security_topic_id = None
+    security_topic_env = os.getenv("SECURITY_TOPIC_ID")
+    if security_topic_env:
+        try:
+            security_topic_id = int(security_topic_env)
+        except ValueError:
+            pass
+
+    # Call get_reolink_snapshot directly (skipping the status message)
+    # We pass update_thread_tracker=True so the photo message ID gets tracked if it starts a new thread.
+    result = await get_reolink_snapshot(
+        camera_name,
+        reply_to_message_id=reply_to_message_id,
+        target_chat_id=alert_chat_id,
+        message_thread_id=security_topic_id,
+        update_thread_tracker=True
     )
-    
-    if enable_threading and reply_to_message_id is None and sent_msg:
-        globals.reolink_thread_trackers[cam_key] = {
-            "message_id": sent_msg.message_id,
-            "timestamp": now_dt
-        }
-        
-    photo_reply_id = (sent_msg.message_id if sent_msg else reply_to_message_id) if enable_threading else None
-    result = await get_reolink_snapshot(camera_name, reply_to_message_id=photo_reply_id)
     logging.info(f"✅ SECURITY: Alert dispatched for '{camera_name}'")
 
-    if globals.TARGET_CHAT_ID:
-        from emery.globals import chat_histories
-        if globals.TARGET_CHAT_ID not in chat_histories:
-            from collections import deque
-            from emery.config import MAX_HISTORY_LEN
-            chat_histories[globals.TARGET_CHAT_ID] = deque(maxlen=MAX_HISTORY_LEN)
+    # Get the sent photo's message ID from the thread tracker
+    photo_msg_id = reply_to_message_id
+    if not photo_msg_id:
+        tracker = globals.reolink_thread_trackers.get(cam_key)
+        if tracker:
+            photo_msg_id = tracker["message_id"]
 
-            
-        now_dt = datetime.now(USER_TIMEZONE)
-        now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
-        event_content = (
-            f"[{now_str}] [SYSTEM SECURITY ALERT] Camera '{camera_name}' triggered a person-detection event. "
-            f"Photo sent. Security log updated ({camera_name}, {now_str})."
-        )
-        chat_histories[globals.TARGET_CHAT_ID].append({
-            "role": "user",
-            "content": event_content,
-            "timestamp": now_dt,
-            "message_id": sent_msg.message_id if sent_msg else None
-        })
+    # Append alert info to history using alert_chat_id
+    from emery.globals import chat_histories
+    if alert_chat_id not in chat_histories:
+        from collections import deque
+        from emery.config import MAX_HISTORY_LEN
+        chat_histories[alert_chat_id] = deque(maxlen=MAX_HISTORY_LEN)
+        
+    now_dt = datetime.now(USER_TIMEZONE)
+    now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
+    event_content = (
+        f"[{now_str}] [SYSTEM SECURITY ALERT] Camera '{camera_name}' triggered a person-detection event. "
+        f"Photo sent. Security log updated ({camera_name}, {now_str})."
+    )
+    chat_histories[alert_chat_id].append({
+        "role": "user",
+        "content": event_content,
+        "timestamp": now_dt,
+        "message_id": photo_msg_id,
+        "message_thread_id": security_topic_id
+    })
 
 async def reolink_polling_loop(application):
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
