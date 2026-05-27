@@ -224,6 +224,7 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   * `get_reolink_snapshot(camera_name)`: Grabs a JPEG snapshot from the camera, uploads it to the user via Telegram, runs a dedicated threat audit using the coprocessor model, and sends structural environmental updates to the bot's background memory context.
   * `get_available_cameras()`: Lists online cameras.
 * **Active Security Polling:** If `ENABLE_REOLINK_POLLING=true`, the bot starts a background NVR listener. If the NVR registers an AI "person detected" state, the bot wakes up, notifies the user, fetches a snapshot, runs a vision check, and updates the chat thread with security logs.
+* **Successive Alert Threading:** If `ENABLE_REOLINK_THREADING=true`, successive alerts on the same camera within a configurable window (`REOLINK_THREAD_WINDOW_MINUTES`, default: 10 minutes) reply to the first alert's message. This prevents alert flooding in the main Telegram chat.
 * **Env Config:**
   ```env
   REOLINK_HOST=192.168.1.100  # Local IP/Host of NVR
@@ -418,6 +419,8 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `ENABLE_SYSTEM_STATS` | `false` | Enable CPU and Virtual memory reading tool. |
 | `ENABLE_REOLINK` | `false` | Enable Reolink CCTV snapshots and queries. |
 | `ENABLE_REOLINK_POLLING`| `false` | Enables active background loop checking NVR for AI alerts. |
+| `ENABLE_REOLINK_THREADING`| `true` | Enables grouping successive camera alerts into a Telegram reply thread. |
+| `REOLINK_THREAD_WINDOW_MINUTES`| `10` | Time window (in minutes) to group subsequent alerts under the first alert of the thread. |
 | `TOOL_LOOP` | `15` | Maximum back-and-forth tool call loops in one turn. |
 | `ENABLE_SCHEDULER` | `true` | Enables/disables the custom background scheduler. |
 | `JOBS_FILE_PATH` | `custom_jobs.json` | Local filepath where custom schedules are persisted. |

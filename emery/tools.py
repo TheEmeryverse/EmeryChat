@@ -714,7 +714,7 @@ async def overseer_request_tv_season(tmdb_id, season_number):
         return f"Request failed: {e}"
 
 # --- REOLINK CAMERA NVR INTEGRATIONS ---
-async def get_reolink_snapshot(camera_name: str) -> str:
+async def get_reolink_snapshot(camera_name: str, reply_to_message_id: int = None) -> str:
     logging.info(f"🔧 TOOL: get_reolink_snapshot | Camera: {camera_name}")
     host = os.getenv("REOLINK_HOST")
     user = os.getenv("REOLINK_USER")
@@ -848,7 +848,8 @@ async def get_reolink_snapshot(camera_name: str) -> str:
                 chat_id=globals.TARGET_CHAT_ID,
                 photo=response_content,
                 caption=telegram_caption,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id
             )
             
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
@@ -905,13 +906,47 @@ async def trigger_webhook_alert(camera_name: str):
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no active chat session established. Please send a message to the bot first.")
         return
         
-    await globals.application_bot.send_message(
+    # Check if threading is enabled and configure parameters
+    enable_threading = os.getenv("ENABLE_REOLINK_THREADING", "true").lower() == "true"
+    
+    try:
+        thread_window_minutes = float(os.getenv("REOLINK_THREAD_WINDOW_MINUTES", "10"))
+    except ValueError:
+        thread_window_minutes = 10.0
+        
+    reply_to_message_id = None
+    cam_key = camera_name.lower().strip()
+    now_dt = datetime.now(USER_TIMEZONE)
+    
+    if enable_threading:
+        tracker = globals.reolink_thread_trackers.get(cam_key)
+        if tracker:
+            first_alert_time = tracker["timestamp"]
+            elapsed = (now_dt - first_alert_time).total_seconds()
+            if elapsed < thread_window_minutes * 60:
+                reply_to_message_id = tracker["message_id"]
+                logging.info(f"🧵 REOLINK THREAD: Successive alert within window for camera '{camera_name}'. Replying to message ID {reply_to_message_id} (elapsed: {elapsed:.1f}s)")
+            else:
+                logging.info(f"🧵 REOLINK THREAD: Thread window ({thread_window_minutes}m) expired for camera '{camera_name}'. Starting a new thread.")
+                globals.reolink_thread_trackers.pop(cam_key, None)
+        else:
+            logging.info(f"🧵 REOLINK THREAD: No active thread for camera '{camera_name}'. Starting a new thread.")
+            
+    sent_msg = await globals.application_bot.send_message(
         chat_id=globals.TARGET_CHAT_ID,
         text=f"🚨 <b>Person Detected:</b> Someone is on the <b>{camera_name.upper()}</b> camera. Running analysis...",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_to_message_id=reply_to_message_id
     )
-
-    result = await get_reolink_snapshot(camera_name)
+    
+    if enable_threading and reply_to_message_id is None and sent_msg:
+        globals.reolink_thread_trackers[cam_key] = {
+            "message_id": sent_msg.message_id,
+            "timestamp": now_dt
+        }
+        
+    photo_reply_id = (sent_msg.message_id if sent_msg else reply_to_message_id) if enable_threading else None
+    result = await get_reolink_snapshot(camera_name, reply_to_message_id=photo_reply_id)
     logging.info(f"✅ SECURITY: Alert dispatched for '{camera_name}'")
 
     if globals.TARGET_CHAT_ID:
