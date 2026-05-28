@@ -163,7 +163,7 @@ async def save_user_memory(fact: str, user_id: int = None) -> str:
     if not memory_file_path:
         return "Memory is disabled."
         
-    logging.info(f"💾 MEMORY: Appending new fact to staging area for user {user_id}: '{fact}'")
+    logging.info(f"💾 MEMORY: Appending new fact for user {user_id}: '{fact}'")
     if not os.path.exists(memory_file_path):
         # Create default if missing
         profile = get_user_profile(user_id)
@@ -211,7 +211,7 @@ async def save_user_memory(fact: str, user_id: int = None) -> str:
             f.write(updated_content)
             
         # Trigger background consolidation using the fast model
-        logging.info(f"💾 MEMORY: Scheduling background memory consolidation for user {user_id}...")
+        logging.info(f"💾 MEMORY: Scheduling consolidation for user {user_id}...")
         asyncio.create_task(consolidate_memory_background(user_id))
         
         return f"Successfully saved to memory log staging: '{fact}'"
@@ -233,10 +233,10 @@ async def consolidate_memory_background(user_id: int = None) -> None:
         user_id = globals.current_user_id.get()
         
     if user_id in _is_consolidating:
-        logging.info(f"💾 CONSOLIDATOR: Memory consolidation is already in progress for user {user_id}. Skipping duplicate run.")
+        logging.debug(f"💾 CONSOLIDATOR: Memory consolidation already in progress for user {user_id}. Skipping.")
         return
  
-    logging.info(f"💾 CONSOLIDATOR: Starting background memory consolidation for user {user_id}...")
+    logging.info(f"💾 CONSOLIDATOR: Starting consolidation for user {user_id}...")
     
     memory_file_path = get_memory_file_path(user_id)
     if not memory_file_path or not os.path.exists(memory_file_path):
@@ -296,7 +296,7 @@ async def consolidate_memory_background(user_id: int = None) -> None:
         with open(memory_file_path, "w", encoding="utf-8") as f:
             f.write(consolidated)
             
-        logging.info(f"💾 CONSOLIDATOR: Background memory consolidation for user {user_id} completed successfully!")
+        logging.info(f"💾 CONSOLIDATOR: Consolidation for user {user_id} completed.")
         
     except Exception as e:
         logging.error(f"❌ CONSOLIDATOR: Background task crash for user {user_id}: {e}", exc_info=True)
@@ -315,7 +315,7 @@ def wipe_memory(user_id: int = None) -> bool:
     if not memory_file_path:
         return False
         
-    logging.info(f"🧠 MEMORY: Wiping all memories for user {user_id} and restoring baseline template...")
+    logging.info(f"🧠 MEMORY: Wiping memories for user {user_id}...")
     profile = get_user_profile(user_id)
     baseline_template = (
         f"# Emery's Memory Log\n\n"
@@ -388,7 +388,7 @@ async def append_camera_log(camera_name: str, threat_report: str, scene_context:
     try:
         with open(CAMERA_LOG_FILE_PATH, "w", encoding="utf-8") as f:
             f.writelines(out_lines)
-        logging.info(f"📹 CAMERA LOG: Logged activity for {camera_name} to camera_log.md")
+        logging.info(f"📹 CAMERA LOG: Logged activity for {camera_name}")
     except Exception as e:
         logging.error(f"❌ CAMERA LOG: Failed to write camera log: {e}", exc_info=True)
 
@@ -562,7 +562,7 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
         if summary and summary.upper() != "NONE" and (summary.startswith("-") or summary.startswith("*")):
             # Extract raw text from bullet to pass to save_user_memory
             raw_fact = summary.lstrip("-* ").strip()
-            logging.info(f"💾 TOPIC MONITOR: Identified new topic: '{raw_fact}'")
+            logging.info(f"💾 TOPIC MONITOR: New topic: '{raw_fact}'")
             # Save it to raw intake staging area (which triggers memory consolidation automatically)
             await save_user_memory(raw_fact, user_id)
             

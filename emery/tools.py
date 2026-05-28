@@ -43,7 +43,6 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
         logging.error(f"❌ TTS Error: {e}"); return None
 
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
-    logging.info(f"🔧 TOOL: speak_message")
     audio = await get_voice_audio(text)
     if audio and globals.TARGET_CHAT_ID.get():
         await globals.application_bot.send_voice(chat_id=globals.TARGET_CHAT_ID.get(), voice=audio, caption="Voice message", message_thread_id=globals.CURRENT_THREAD_ID.get())
@@ -52,7 +51,6 @@ async def speak_message(text): # What the model calls to create a voice message 
 
 # --- IMAGE GENERATION ---
 async def generate_image(prompt): # Generates an image based on the prompt using Gemini API
-    logging.info(f"🔧 TOOL: generate_image | {prompt[:80]}")
     URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
@@ -87,7 +85,6 @@ async def generate_image(prompt): # Generates an image based on the prompt using
 
 # --- NOAA WEATHER ---
 async def get_noaa_weather(): # Fetches the forecast
-    logging.info("🔧 TOOL: get_noaa_weather")
     headers = {'User-Agent': f'({MODEL_NAME}-bot, {NOAA_EMAIL})'}
     try:
         r1 = await globals.http_client.get(f"https://api.weather.gov/points/{NOAA_LAT},{NOAA_LONG}", headers=headers)
@@ -102,7 +99,6 @@ async def get_noaa_weather(): # Fetches the forecast
 
 # --- WEB SEARCH & SCRAPING ---
 async def web_search(query): # Searches the internet
-    logging.info(f"🔧 TOOL: web_search | '{query}'")
     try:
         r = await globals.http_client.get(SEARXNG_URL, params={'q': query, 'format': 'json'})
         res = r.json().get('results', [])
@@ -185,7 +181,6 @@ async def delegate_to_coprocessor(task_prompt: str, content_to_process: str) -> 
     Delegate a lightweight sub-task, summarization, formatting, or extraction query 
     to the fast secondary model (coprocessor).
     """
-    logging.info(f"🔧 TOOL: delegate_to_coprocessor | Task: {task_prompt[:50]}...")
     try:
         prompt = f"Task: {task_prompt}\n\nContent to process:\n{content_to_process}"
         system_prompt = (
@@ -213,8 +208,6 @@ async def get_news_headlines(): # Fetches news headlines from RSS feeds
     if not FEEDS:
         FEEDS = {"news": "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en"}
     
-    logging.info(f"🔧 TOOL: get_news_headlines | Sources: {list(FEEDS.keys())}")
-
     async def safe_parse(name, url):
         try:
             feed = await asyncio.to_thread(feedparser.parse, url)
@@ -228,7 +221,6 @@ async def get_news_headlines(): # Fetches news headlines from RSS feeds
     return "\n\n".join(results)
 
 async def get_nasa_apod(): # Fetches NASA's image of the day
-    logging.info("🔧 TOOL: get_nasa_apod")
     try:
         r = await globals.http_client.get(f"https://api.nasa.gov/planetary/apod?api_key={NASA_API_KEY}", timeout=20)
         if r.status_code == 200:
@@ -238,11 +230,9 @@ async def get_nasa_apod(): # Fetches NASA's image of the day
     except Exception: return "NASA APOD connection failed."
 
 async def get_system_stats(): # Fetches system stats
-    logging.info("🔧 TOOL: get_system_stats")
     return f"CPU {psutil.cpu_percent()}% | RAM {psutil.virtual_memory().percent}%"
 
 async def get_today_in_history(): # Fetches historical events for the current day
-    logging.info("🔧 TOOL: get_today_in_history")
     urls = [
         "https://api.dayinhistory.dev/v1/today/events/",
         "https://api.dayinhistory.dev/v1/today/births/",
@@ -268,7 +258,6 @@ async def get_today_in_history(): # Fetches historical events for the current da
         return "Failed to fetch history data."
 
 async def get_calendar_events(): # Fetches User's Google Calendars
-    logging.info("🔧 TOOL: get_calendar_events")
     token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
     raw_cal_ids = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
     calendar_ids = [c.strip() for c in raw_cal_ids.split(",")]
@@ -378,7 +367,6 @@ def get_nest_credentials():
     return creds
 
 async def get_nest_thermostats() -> str:
-    logging.info("🔧 TOOL: get_nest_thermostats")
     project_id = os.getenv("NEST_PROJECT_ID")
     if not project_id or project_id.strip() == "":
         return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
@@ -490,7 +478,6 @@ async def get_nest_thermostats() -> str:
         return f"Nest error: Failed to fetch thermostats: {e}"
 
 async def set_nest_thermostat_mode(device_id: str, mode: str) -> str:
-    logging.info(f"🔧 TOOL: set_nest_thermostat_mode | Device: {device_id} | Mode: {mode}")
     project_id = os.getenv("NEST_PROJECT_ID")
     if not project_id or project_id.strip() == "":
         return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
@@ -527,7 +514,6 @@ async def set_nest_thermostat_mode(device_id: str, mode: str) -> str:
         return f"Nest error: Failed to set mode: {e}"
 
 async def set_nest_thermostat_temperature(device_id: str, temp_celsius: float = None, heat_temp_celsius: float = None, cool_temp_celsius: float = None) -> str:
-    logging.info(f"🔧 TOOL: set_nest_thermostat_temperature | Device: {device_id} | Temp: {temp_celsius} | Heat: {heat_temp_celsius} | Cool: {cool_temp_celsius}")
     project_id = os.getenv("NEST_PROJECT_ID")
     if not project_id or project_id.strip() == "":
         return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
@@ -620,7 +606,6 @@ async def set_nest_thermostat_temperature(device_id: str, temp_celsius: float = 
 
 # --- OVERSEERR MOVIE/TV REQ SYSTEM ---
 async def overseer_search_movie(query: str) -> str:
-    logging.info(f"🔧 TOOL: overseer_search_movie | '{query}'")
     def sync_search():
         encoded_query = quote(query)
         url = f"{OVERSEER_URL}/search?query={encoded_query}"
@@ -658,7 +643,6 @@ async def overseer_request_movie(tmdb_id):
     payload = {"mediaType": "movie", "mediaId": int(float(tmdb_id)), "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await globals.http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
-        logging.info(f"🔧 TOOL: overseer_request_movie | Status: {r.status_code}")
         if r.status_code == 201 or r.status_code == 200:
             return "SUCCESS: Movie requested for user."
         if r.status_code == 409:
@@ -669,7 +653,6 @@ async def overseer_request_movie(tmdb_id):
         return f"Request failed: {e}"
 
 async def overseer_search_tv(query: str) -> str:
-    logging.info(f"🔧 TOOL: overseer_search_tv | '{query}'")
     def sync_search():
         encoded_query = quote(query)
         url = f"{OVERSEER_URL}/search?query={encoded_query}"
@@ -707,7 +690,6 @@ async def overseer_request_tv_season(tmdb_id, season_number):
     payload = {"mediaType": "tv", "mediaId": int(float(tmdb_id)), "seasons": [int(season_number)], "userId": int(OVERSEER_USER_ID), "is4k": False}
     try:
         r = await globals.http_client.post(f"{OVERSEER_URL}/request", headers=headers, json=payload)
-        logging.info(f"🔧 TOOL: overseer_request_tv_season | Status: {r.status_code}")
         if r.status_code == 409: return f"Season {season_number} is already available or pending."
         return f"SUCCESS: Season {season_number} requested for user."
     except Exception as e:
@@ -722,8 +704,6 @@ async def get_reolink_snapshot(
     message_thread_id: int = None,
     update_thread_tracker: bool = False
 ) -> str:
-    logging.info(f"🔧 TOOL: get_reolink_snapshot | Camera: {camera_name}")
-    
     # Determine target chat ID and options
     if target_chat_id is None:
         target_chat_id = globals.TARGET_CHAT_ID.get()
@@ -916,7 +896,6 @@ async def get_reolink_snapshot(
         return f"Successfully grabbed the image, but failed to analyze/send it: {e}"
 
 async def get_available_cameras() -> str:
-    logging.info("🔧 TOOL: get_available_cameras")
     raw_cams = os.getenv("REOLINK_CAMERAS", "")
     if not raw_cams:
         return "No security cameras are currently configured in the system."

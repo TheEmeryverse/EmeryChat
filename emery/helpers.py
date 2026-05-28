@@ -71,7 +71,7 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     }
     
     try:
-        logging.info(f"⚡ FAST MODEL: Querying {VISION_MODEL_ID} on secondary coprocessor...")
+        logging.info(f"⚡ COPROCESSOR: Querying {VISION_MODEL_ID}...")
         async with globals.fast_model_lock:
             r = await globals.http_client.post(url, json=payload, timeout=300)
         if r.status_code != 200:
@@ -107,14 +107,14 @@ def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 
         compressed_bytes = compressed_buffer.getvalue()
         comp_size = len(compressed_bytes)
         
-        logging.info(f"🖼️ COMPRESS: Reduced image size from {orig_size / 1024:.1f}KB to {comp_size / 1024:.1f}KB")
+        logging.info(f"🖼️ COMPRESS: {orig_size / 1024:.1f}KB -> {comp_size / 1024:.1f}KB")
         return compressed_bytes
     except Exception as e:
         logging.warning(f"⚠️ IMAGE COMPRESSION: Failed to compress image ({e}) — using original bytes.")
         return image_bytes
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info(f"👁️ VISION: Analyzing image ({VISION_MODEL_ID})...")
+    logging.info(f"👁️ VISION: Analyzing image with {VISION_MODEL_ID}...")
     try:
         url = VISION_OLLAMA_URL
         if not url.endswith("/api/chat"):
@@ -166,7 +166,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty response.")
             return "No description generated."
             
-        logging.info(f"👁️ VISION: Done ({len(description)} chars)")
+        logging.info(f"👁️ VISION: Completed analysis ({len(description)} chars)")
         return description
         
     except Exception as e:
@@ -213,7 +213,7 @@ from functools import lru_cache
 
 @lru_cache(maxsize=16)
 def get_holidays_for_year(year):
-    logging.info(f"📅 DATE MATH: Generating holiday database for year {year}...")
+    logging.debug(f"📅 DATE MATH: Generating holiday database for year {year}...")
     holidays = {
         "New Year's Day": datetime(year, 1, 1).date(),
         "Valentine's Day": datetime(year, 2, 14).date(),
@@ -248,7 +248,7 @@ def get_holidays_for_year(year):
 
 @lru_cache(maxsize=16)
 def get_active_holiday_info(today_date):
-    logging.info(f"📅 DATE MATH: Checking upcoming holidays for today_date={today_date}...")
+    logging.debug(f"📅 DATE MATH: Checking upcoming holidays for today_date={today_date}...")
     year = today_date.year
     hols_this_year = get_holidays_for_year(year)
     hols_next_year = get_holidays_for_year(year + 1)
@@ -262,7 +262,7 @@ def get_active_holiday_info(today_date):
             active_holidays.append((name, date_obj, diff))
             
     if not active_holidays:
-        logging.info("📅 DATE MATH: No active holidays or alerts in the next 5 days.")
+        logging.debug("📅 DATE MATH: No active holidays or alerts in the next 5 days.")
         return ""
         
     lines = []
@@ -276,7 +276,7 @@ def get_active_holiday_info(today_date):
         else:
             lines.append(f"- Upcoming holiday: {name} on {day_str} (in {diff} day{'s' if diff > 1 else ''}).")
             
-    logging.info(f"📅 DATE MATH: Active holidays detected: {', '.join(detected_hols)}")
+    logging.debug(f"📅 DATE MATH: Active holidays detected: {', '.join(detected_hols)}")
     return "\n" + "\n".join(lines)
 
 @lru_cache(maxsize=16)
@@ -284,7 +284,7 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
     if not birthday_str or birthday_str.upper() == "UNKNOWN":
         return ""
         
-    logging.info(f"🎂 DATE MATH: Checking birthday alerts for '{birthday_str}', today_date={today_date}...")
+    logging.debug(f"🎂 DATE MATH: Checking birthday alerts for '{birthday_str}', today_date={today_date}...")
     month = None
     day = None
     
@@ -317,7 +317,7 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
                 day = int(m2.group(2))
                 
     if not month or not day:
-        logging.info(f"🎂 DATE MATH: Unable to parse birthday format '{birthday_str}', defaulting to static text.")
+        logging.debug(f"🎂 DATE MATH: Unable to parse birthday format '{birthday_str}', defaulting to static text.")
         return f"\n- {user_name}'s birthday: {birthday_str}."
         
     # Calculate this year's birthday
@@ -348,7 +348,7 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
             logging.info(f"🎂 DATE MATH: Birthday alert active for {user_name} (in {diff} days on {day_str})")
             return f"\n- Upcoming event: {user_name}'s birthday is on {day_str} (in {diff} day{'s' if diff > 1 else ''})."
             
-    logging.info(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
+    logging.debug(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
     return ""
 
 def get_current_system_prompt(user_query="", user_id=None): # Injects the system prompt into model's context

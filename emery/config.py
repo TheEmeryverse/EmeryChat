@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import pytz
 from dotenv import load_dotenv
@@ -6,7 +7,66 @@ from dotenv import load_dotenv
 load_dotenv() # Load docker env variables
 
 # --- LOGGING SETUP ---
-logging.basicConfig(format='%(asctime)s - [EMERYCHAT] - %(levelname)s - %(message)s', level=logging.INFO)
+class ColoredFormatter(logging.Formatter):
+    GREY = "\x1b[90m"
+    CYAN = "\x1b[36m"
+    GREEN = "\x1b[32m"
+    YELLOW = "\x1b[33m"
+    RED = "\x1b[31m"
+    BOLD_RED = "\x1b[1;31m"
+    RESET = "\x1b[0m"
+
+    LEVEL_COLORS = {
+        logging.DEBUG: CYAN,
+        logging.INFO: GREEN,
+        logging.WARNING: YELLOW,
+        logging.ERROR: RED,
+        logging.CRITICAL: BOLD_RED
+    }
+
+    def __init__(self, use_color: bool = True):
+        super().__init__()
+        self.use_color = use_color
+
+    def format(self, record):
+        asctime = self.formatTime(record, "%Y-%m-%d %H:%M:%S")
+        levelname = f"{record.levelname:<7}"
+        message = record.getMessage()
+
+        if self.use_color:
+            color = self.LEVEL_COLORS.get(record.levelno, self.RESET)
+            formatted_time = f"{self.GREY}{asctime}{self.RESET}"
+            formatted_level = f"{color}{levelname}{self.RESET}"
+            
+            if record.exc_info:
+                if not record.exc_text:
+                    record.exc_text = self.formatException(record.exc_info)
+            if record.exc_text:
+                message = f"{message}\n{self.RED}{record.exc_text}{self.RESET}"
+                
+            return f"{formatted_time} | {formatted_level} | {message}"
+        else:
+            if record.exc_info:
+                if not record.exc_text:
+                    record.exc_text = self.formatException(record.exc_info)
+            if record.exc_text:
+                message = f"{message}\n{record.exc_text}"
+            return f"{asctime} | {levelname} | {message}"
+
+# Detect if stdout supports colors
+use_color = sys.stdout.isatty() if hasattr(sys, 'stdout') else False
+
+# Custom StreamHandler
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColoredFormatter(use_color=use_color))
+
+# Root logger setup
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.handlers = []
+root_logger.addHandler(handler)
+
+# Mute noisy logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 

@@ -150,7 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preview = replied_text[:80] + "..." if len(replied_text) > 80 else replied_text
         reply_info = f" (Replying to message ID {reply_to_id}: '{preview}')"
 
-    logging.info(f"💬 USER (chat {chat_id}): {str(content + reply_info)[:120]}")
+    logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {content_text[:120]}{reply_info}")
     globals.chat_histories[chat_id].append({
         "role": "user", 
         "content": content + reply_info,
@@ -201,13 +201,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Cancel existing debounce task for this chat
     if chat_id in globals.chat_debounce_tasks:
         globals.chat_debounce_tasks[chat_id].cancel()
-        logging.info(f"⏱️ DEBOUNCE: Cancelled existing timer for chat {chat_id} (resetting delay)")
+        logging.info(f"⏱️ DEBOUNCE: Cancelled timer for chat {chat_id}")
 
     # Define the worker that will run after CHAT_DEBOUNCE_DELAY seconds
     async def debounce_worker(delay):
         try:
             await asyncio.sleep(delay)
-            logging.info(f"⏱️ DEBOUNCE: Delay of {delay}s expired for chat {chat_id}. Processing batch...")
+            logging.info(f"⏱️ DEBOUNCE: Delay of {delay}s expired, processing chat {chat_id}...")
             await run_engine_for_chat(update, context, model_to_use, is_input_voice)
         except asyncio.CancelledError:
             pass
@@ -264,7 +264,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info("🤫 HANDSHAKE: Suppressing final text message because camera photo was already delivered or model chose silence.")
+        logging.info("🤫 HANDSHAKE: Suppressed text reply (silent check)")
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
@@ -478,7 +478,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if "reactions" not in found_msg:
             found_msg["reactions"] = {}
         found_msg["reactions"][actor_key] = emojis
-        logging.info(f"🎭 REACTION: Updated {actor_key} reactions on message {message_id}: {emojis}")
+        logging.info(f"🎭 REACTION: {actor_key} reaction on {message_id} -> {emojis}")
         
     # Trigger response evaluation if the user added/changed their reaction
     if not is_bot:
@@ -491,7 +491,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 
         if set(emojis) != set(old_emojis):
             if emojis:
-                logging.info(f"🎭 REACTION: Triggering reaction check for user reaction {emojis} on message {message_id}...")
+                logging.info(f"🎭 REACTION: Triggering evaluation for reaction {emojis} on {message_id}")
                 asyncio.create_task(handle_user_reaction_trigger(chat_id, message_id, emojis, user.id))
 
 async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: list[str], user_id: int):
@@ -559,7 +559,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info("🤫 REACTION HANDSHAKE: Suppressing final text response because model chose to remain silent.")
+        logging.info("🤫 REACTION: Suppressed response (model chose silence)")
         return
         
     globals.chat_histories[chat_id].append({
@@ -582,11 +582,11 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_HEARTBEAT:
         return
         
-    logging.info("💓 HEARTBEAT: Running check...")
+    logging.info("💓 HEARTBEAT: Checking activity...")
     
     group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
     if not group_chat_id_env:
-        logging.info("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID is not configured. Heartbeat check skipped.")
+        logging.info("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID not set, skipping check.")
         return
         
     try:
@@ -619,7 +619,7 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
                 is_asleep = True
                 
         if is_asleep:
-            logging.info(f"💓 HEARTBEAT: Suppressing check-in because current time {curr_time.strftime('%H:%M')} is inside sleep window ({HEARTBEAT_SLEEP_START} - {HEARTBEAT_SLEEP_END}).")
+            logging.info(f"💓 HEARTBEAT: Suppressed check-in (inside sleep window: {HEARTBEAT_SLEEP_START}-{HEARTBEAT_SLEEP_END})")
             return
     except Exception as e:
         logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
@@ -633,7 +633,7 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
         
     elapsed = (now - last_time).total_seconds()
     if elapsed > HEARTBEAT_SILENCE_THRESHOLD_SECONDS:
-        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} has been silent for {elapsed:.1f}s. Evaluating spontaneous message...")
+        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} silent for {elapsed:.1f}s, evaluating check-in...")
         await handle_heartbeat_trigger(group_chat_id)
 
 async def handle_heartbeat_trigger(chat_id: int):
@@ -690,7 +690,7 @@ async def handle_heartbeat_trigger(chat_id: int):
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info(f"🤫 HEARTBEAT HANDSHAKE: Chat {chat_id} remains silent.")
+        logging.info(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
         if globals.chat_histories[chat_id]:
             globals.chat_histories[chat_id][-1]["timestamp"] = datetime.now(USER_TIMEZONE)
         return
@@ -720,7 +720,7 @@ async def handle_heartbeat_trigger(chat_id: int):
 async def start_bot_heartbeat(application) -> None:
     """Registers the bot heartbeat job in the Telegram JobQueue on startup."""
     if not ENABLE_HEARTBEAT:
-        logging.info("💓 HEARTBEAT: Spontaneous heartbeat is disabled.")
+        logging.info("💓 HEARTBEAT: Spontaneous heartbeat disabled.")
         return
         
     if not application.job_queue:
@@ -733,7 +733,7 @@ async def start_bot_heartbeat(application) -> None:
         first=60,
         name="bot_heartbeat"
     )
-    logging.info(f"💓 HEARTBEAT: Registered heartbeat job to check every {HEARTBEAT_INTERVAL_SECONDS}s.")
+    logging.info(f"💓 HEARTBEAT: Active (checking every {HEARTBEAT_INTERVAL_SECONDS}s)")
 
 async def bot_post_init(application) -> None:
     """Consolidated post_init wrapper to launch Reolink polling and start the bot heartbeat."""
@@ -745,11 +745,10 @@ async def bot_post_init(application) -> None:
     sticker_set_name = os.getenv("TELEGRAM_STICKER_SET")
     if sticker_set_name:
         try:
-            logging.info(f"🎨 STICKERS: Preloading sticker set '{sticker_set_name}'...")
             sticker_set = await application.bot.get_sticker_set(sticker_set_name)
             for sticker in sticker_set.stickers:
                 if sticker.emoji:
                     globals.learned_stickers[sticker.emoji] = sticker.file_id
-            logging.info(f"🎨 STICKERS: Preloaded {len(sticker_set.stickers)} stickers from set.")
+            logging.info(f"🎨 STICKERS: Preloaded {len(sticker_set.stickers)} stickers from '{sticker_set_name}'")
         except Exception as e:
             logging.error(f"⚠️ STICKERS: Failed to preload sticker set '{sticker_set_name}': {e}")

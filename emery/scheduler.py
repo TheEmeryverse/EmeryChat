@@ -67,7 +67,7 @@ def remove_job_from_store(job_id: str):
     updated_jobs = [j for j in jobs if j.get("id") != job_id]
     if len(jobs) != len(updated_jobs):
         save_jobs_to_file(updated_jobs)
-        logging.info(f"📅 SCHEDULER: Removed job {job_id} from persistent store.")
+        logging.info(f"📅 SCHEDULER: Removed job {job_id} from store")
 
 async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
     """Splits large messages to fit Telegram's character limits."""
@@ -159,12 +159,12 @@ async def run_custom_job(context):
                 target_month = int(parts[0].split("-")[0])
                 now = datetime.now(USER_TIMEZONE)
                 if now.month != target_month:
-                    logging.info(f"📅 SCHEDULER: Skipping yearly job '{description}' ({job_id}) because the current month ({now.month}) does not match target month ({target_month}).")
+                    logging.info(f"📅 SCHEDULER: Skipping yearly job '{job_id}' (month mismatch: {now.month} != {target_month})")
                     return
         except Exception as e:
             logging.error(f"❌ SCHEDULER: Error filtering month for yearly job {job_id}: {e}", exc_info=True)
         
-    logging.info(f"📅 CUSTOM JOB: '{description}' ({job_id}) starting...")
+    logging.info(f"📅 SCHEDULER: Running custom job '{description}' ({job_id})")
     from emery.engine import emery_engine
     from emery.helpers import emery_format
     
@@ -224,7 +224,7 @@ def remove_job_from_queue(job_id: str):
         if current_jobs:
             for j in current_jobs:
                 j.schedule_removal()
-            logging.info(f"📅 SCHEDULER: Removed job '{job_id}' from Telegram JobQueue.")
+            logging.info(f"📅 SCHEDULER: Cancelled job '{job_id}' in queue")
 
 def schedule_in_tg_queue(job_data: dict) -> bool:
     """Registers the job in the active Telegram JobQueue based on its configuration."""
@@ -250,7 +250,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled daily job '{job_id}' at {sval}")
+            logging.info(f"📅 SCHEDULER: Scheduled daily '{job_id}' at {sval}")
             return True
             
         elif stype == "interval":
@@ -262,7 +262,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled repeating job '{job_id}' every {seconds}s")
+            logging.info(f"📅 SCHEDULER: Scheduled repeating '{job_id}' every {seconds}s")
             return True
             
         elif stype == "once":
@@ -287,7 +287,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled one-off job '{job_id}' at {dt_localized}")
+            logging.info(f"📅 SCHEDULER: Scheduled one-off '{job_id}' at {dt_localized.strftime('%Y-%m-%d %H:%M:%S')}")
             return True
             
         elif stype == "weekly":
@@ -304,7 +304,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled weekly job '{job_id}' on {day_name}s at {time_str}")
+            logging.info(f"📅 SCHEDULER: Scheduled weekly '{job_id}' on {day_name}s at {time_str}")
             return True
             
         elif stype == "monthly":
@@ -321,7 +321,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled monthly job '{job_id}' on day {day_of_month} at {time_str}")
+            logging.info(f"📅 SCHEDULER: Scheduled monthly '{job_id}' on day {day_of_month} at {time_str}")
             return True
             
         elif stype == "yearly":
@@ -338,7 +338,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled yearly job '{job_id}' on {month}-{day} at {time_str} (via monthly trigger)")
+            logging.info(f"📅 SCHEDULER: Scheduled yearly '{job_id}' on {month}-{day} at {time_str}")
             return True
             
     except Exception as e:
@@ -526,13 +526,12 @@ async def remove_scheduled_job(job_id: str) -> str:
 
 def load_and_register_all_jobs():
     """Loads all saved custom jobs from file and schedules them in the queue on boot."""
-    logging.info("📅 SCHEDULER: Loading and registering persistent jobs...")
     jobs = load_jobs_from_file()
     count = 0
     for job_data in jobs:
         if schedule_in_tg_queue(job_data):
             count += 1
-    logging.info(f"📅 SCHEDULER: Loaded and scheduled {count}/{len(jobs)} jobs from file.")
+    logging.info(f"📅 SCHEDULER: Loaded {count}/{len(jobs)} persistent jobs")
 
 def update_jobs_with_chat_id(chat_id: int):
     """
@@ -545,7 +544,7 @@ def update_jobs_with_chat_id(chat_id: int):
     for job_data in jobs:
         if job_data.get("chat_id") is None:
             job_data["chat_id"] = chat_id
-            logging.info(f"📅 SCHEDULER: Associating job '{job_data['description']}' ({job_data['id']}) with chat_id {chat_id}")
+            logging.info(f"📅 SCHEDULER: Associated job '{job_data['id']}' with chat {chat_id}")
             # Reschedule it so it uses the updated chat_id in memory
             schedule_in_tg_queue(job_data)
             updated = True
