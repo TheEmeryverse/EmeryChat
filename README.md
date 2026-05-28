@@ -175,7 +175,7 @@ Unlike typical single-user personal assistants, EmeryChat is designed to act as 
 
 ### 1. Dynamic Profiles & Memory Segregation
 * **Context Sharing:** Family members share the exact same group chat history buffer (`globals.chat_histories[chat_id]`), letting the bot understand the collective discussion context.
-* **Identified Senders:** The bot prefixes incoming messages in its context history with the sender's name (e.g. `Hudson: Hello!` or `Anyssa: Hey!`), allowing the LLM to know exactly who said what.
+* **Identified Senders:** The bot prefixes incoming messages in its context history with the sender's name (e.g. `Alice: Hello!` or `Bob: Hey!`), allowing the LLM to know exactly who said what.
 * **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse).
 * **Cross-User Memory Access:** During prompt generation, the bot retrieves matching facts from *both* family members' memory files (labeling them clearly as active partner memories vs. spouse memories). This allows the LLM to hold background knowledge about the spouse's preferences and logs during a conversation with the primary user (and vice versa), behaving like an organic, connected family assistant.
 
@@ -190,7 +190,7 @@ When you or your spouse send multiple rapid messages in succession (e.g. split t
 * **Single Cohesive Response:** Once the timer expires with no new incoming messages, the engine executes once on the accumulated history, replying to the entire block of messages in a single response rather than replying to each message in isolation.
 
 ### 4. Targeted Scheduled Jobs & Reminders
-* **Personalized Reminders:** When scheduling a task or reminder (e.g., *"remind my wife in 10 minutes to switch the laundry"*), the bot can accept an optional `target_user` argument (e.g. `target_user="Anyssa"`, `target_user="Hudson"`, or `target_user="both"`).
+* **Personalized Reminders:** When scheduling a task or reminder (e.g., *"remind my wife in 10 minutes to switch the laundry"*), the bot can accept an optional `target_user` argument (e.g. `target_user="Alice"`, `target_user="Bob"`, or `target_user="both"`).
 * **Context Preservation:** When the reminder triggers, the bot executes it under the target user's context (loading their profile details and personal memories).
 * **HTML Mentions:** The bot formats the outgoing message to explicitly tag the target user(s) using their Telegram user IDs (e.g., `<a href="tg://user?id=USER_ID">Name</a>`), ensuring they receive a direct push notification.
 
@@ -450,7 +450,7 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `CHAT_TOPIC_ID` | *Optional* | Topic/thread ID for the **Chat** topic (conversations, reminders, heartbeats). |
 | `REOLINK_SILENT_ALERTS` | `true` | Default: true. Set to false to hear alerts. |
 | `TELEGRAM_ALLOWED_USERS` | *Optional* | Comma-separated whitelisted Telegram User IDs. If set, ignores anyone else. |
-| `PRIMARY_USER_ID` | `0` | Primary Telegram User ID (Hudson). |
+| `PRIMARY_USER_ID` | `0` | Primary Telegram User ID. |
 | `SECONDARY_USER_ID` | `0` | The secondary user's Telegram User ID. |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Delay in seconds to buffer rapid-fire text messages in history before generating a response. |
 | `MODEL_NAME` | `Emery` | Name the bot addresses itself as. |

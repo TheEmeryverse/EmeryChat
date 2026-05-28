@@ -185,7 +185,7 @@ async def run_custom_job(context):
                 exec_prompt = (
                     f"{prompt}\n\n"
                     f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely. "
-                    f"Address both users (e.g. 'Hudson and Anyssa, time to head out'). "
+                    f"Address both users (e.g. '{USER_NAME} and {USER_2_NAME}, time to head out'). "
                     f"Do not write conversational filler or say 'I have set a reminder'.]"
                 )
             else:
@@ -353,7 +353,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     - schedule_value: The scheduling specification. E.g. '08:30' for daily, '30m' or '3600' for interval, or '2026-05-26 15:30:00' / '15m' for once.
     - prompt: The text prompt the bot executes when the job runs.
     - description: A short, user-friendly label/description of the job.
-    - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Hudson', 'Anyssa', or 'both').
+    - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both').
     """
     chat_id = globals.TARGET_CHAT_ID
     if not chat_id:
@@ -443,10 +443,10 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         if clean_name in ("both", "us", "family", "everyone", "all"):
             target_user_id = -1
             target_name = "both"
-        elif clean_name in (USER_NAME.lower(), "hudson", "me", "myself"):
+        elif clean_name in (USER_NAME.lower(), "me", "myself"):
             target_user_id = PRIMARY_USER_ID
             target_name = USER_NAME
-        elif SECONDARY_USER_ID != 0 and clean_name in (USER_2_NAME.lower(), "anyssa", "wife", "spouse", "her"):
+        elif SECONDARY_USER_ID != 0 and clean_name in (USER_2_NAME.lower(), "wife", "spouse", "her"):
             target_user_id = SECONDARY_USER_ID
             target_name = USER_2_NAME
 
