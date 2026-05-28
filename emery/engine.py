@@ -380,6 +380,10 @@ if is_enabled("ENABLE_SCHEDULER"):
                         "description": {
                             "type": "string",
                             "description": "A short, user-friendly label/description of the job (e.g. 'Daily Weather Briefing')."
+                        },
+                        "target_user": {
+                            "type": "string",
+                            "description": "Optional name or alias of the family member this job/reminder is targeted at (e.g. 'Hudson', 'Anyssa', or 'both'). If specified, the bot will run the job under that user's context and explicitly tag them in the chat notification."
                         }
                     },
                     "required": ["schedule_type", "schedule_value", "prompt", "description"]

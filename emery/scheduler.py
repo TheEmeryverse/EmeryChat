@@ -97,7 +97,12 @@ async def run_custom_job(context):
     
     # Restore user context for this task
     user_id = job_data.get("user_id")
-    if user_id is not None:
+    target_user_id = job_data.get("target_user_id")
+    target_user_name = job_data.get("target_user_name")
+    
+    if target_user_id is not None and target_user_id != -1:
+        globals.current_user_id.set(target_user_id)
+    elif user_id is not None:
         globals.current_user_id.set(user_id)
         
     prompt = job_data.get("prompt")
@@ -159,17 +164,37 @@ async def run_custom_job(context):
     from emery.helpers import emery_format
     
     try:
+        active_user_id = globals.current_user_id.get() or user_id
         from emery.config import get_user_profile
-        profile = get_user_profile(user_id)
+        profile = get_user_profile(active_user_id)
         user_name = profile["name"]
+        
+        mention_prefix = ""
+        if target_user_id == -1:
+            from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME
+            if SECONDARY_USER_ID != 0:
+                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a> & <a href=\"tg://user?id={SECONDARY_USER_ID}\">{USER_2_NAME}</a>: "
+            else:
+                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a>: "
+        elif target_user_id and target_user_id != 0:
+            mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{target_user_name}</a>: "
+            
         exec_prompt = prompt
         if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
-            exec_prompt = (
-                f"{prompt}\n\n"
-                f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely to the user, "
-                f"addressing them by name (e.g. '{user_name}, check the chicken's temperature.'). "
-                f"Do not write conversational filler or say 'I have set a reminder'.]"
-            )
+            if target_user_id == -1:
+                exec_prompt = (
+                    f"{prompt}\n\n"
+                    f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely. "
+                    f"Address both users (e.g. 'Hudson and Anyssa, time to head out'). "
+                    f"Do not write conversational filler or say 'I have set a reminder'.]"
+                )
+            else:
+                exec_prompt = (
+                    f"{prompt}\n\n"
+                    f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely to the user, "
+                    f"addressing them by name (e.g. '{user_name}, check the chicken's temperature.'). "
+                    f"Do not write conversational filler or say 'I have set a reminder'.]"
+                )
             
         # Run the engine with the job prompt
         res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
@@ -177,7 +202,7 @@ async def run_custom_job(context):
         await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
-            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{emery_format(res_text)}",
+            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{mention_prefix}{emery_format(res_text)}",
             message_thread_id=message_thread_id
         )
     except Exception as e:
@@ -319,7 +344,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
 
 # --- LLM TOOL CALLABLE FUNCTIONS ---
 
-async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None) -> str:
+async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None, target_user: str = None) -> str:
     """
     Schedule a new automated job/task.
     
@@ -328,6 +353,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     - schedule_value: The scheduling specification. E.g. '08:30' for daily, '30m' or '3600' for interval, or '2026-05-26 15:30:00' / '15m' for once.
     - prompt: The text prompt the bot executes when the job runs.
     - description: A short, user-friendly label/description of the job.
+    - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Hudson', 'Anyssa', or 'both').
     """
     chat_id = globals.TARGET_CHAT_ID
     if not chat_id:
@@ -405,6 +431,25 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     except Exception as e:
         return f"Error validating schedule_value '{schedule_value}': {e}"
         
+    creator_user_id = globals.current_user_id.get()
+    
+    # Resolve target user
+    from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME, get_user_profile
+    target_user_id = creator_user_id
+    target_name = get_user_profile(creator_user_id)["name"]
+    
+    if target_user:
+        clean_name = target_user.strip().lower()
+        if clean_name in ("both", "us", "family", "everyone", "all"):
+            target_user_id = -1
+            target_name = "both"
+        elif clean_name in (USER_NAME.lower(), "hudson", "me", "myself"):
+            target_user_id = PRIMARY_USER_ID
+            target_name = USER_NAME
+        elif SECONDARY_USER_ID != 0 and clean_name in (USER_2_NAME.lower(), "anyssa", "wife", "spouse", "her"):
+            target_user_id = SECONDARY_USER_ID
+            target_name = USER_2_NAME
+
     job_data = {
         "id": job_id,
         "schedule_type": stype,
@@ -413,7 +458,9 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "description": description,
         "chat_id": chat_id,
         "message_thread_id": getattr(globals, "CURRENT_THREAD_ID", None),
-        "user_id": globals.current_user_id.get(),
+        "user_id": creator_user_id,
+        "target_user_id": target_user_id,
+        "target_user_name": target_name,
         "created_at": datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     }
     

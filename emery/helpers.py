@@ -377,8 +377,29 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
         # Resolve circular import locally
         from emery.memory import retrieve_relevant_memories
         recalled = retrieve_relevant_memories(user_query, user_id)
-        if recalled:
-            memory_section = f"\n\n# Long-Term Persistent Memory\n{recalled}"
+        
+        # Also retrieve spouse's memories if a secondary user exists
+        from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, get_user_profile
+        spouse_recalled = ""
+        spouse_name = ""
+        if SECONDARY_USER_ID != 0:
+            spouse_id = None
+            if user_id == PRIMARY_USER_ID:
+                spouse_id = SECONDARY_USER_ID
+            elif user_id == SECONDARY_USER_ID:
+                spouse_id = PRIMARY_USER_ID
+                
+            if spouse_id is not None:
+                spouse_profile = get_user_profile(spouse_id)
+                spouse_name = spouse_profile["name"]
+                spouse_recalled = retrieve_relevant_memories(user_query, spouse_id)
+                
+        if recalled or spouse_recalled:
+            memory_section = "\n\n# Long-Term Persistent Memory"
+            if recalled:
+                memory_section += f"\n## Memories of {user_name} (Active Conversational Partner):\n{recalled}"
+            if spouse_recalled:
+                memory_section += f"\n## Memories of {spouse_name} (Spouse):\n{spouse_recalled}"
         memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
 
     scheduler_instruction = ""

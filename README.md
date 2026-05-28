@@ -176,7 +176,8 @@ Unlike typical single-user personal assistants, EmeryChat is designed to act as 
 ### 1. Dynamic Profiles & Memory Segregation
 * **Context Sharing:** Family members share the exact same group chat history buffer (`globals.chat_histories[chat_id]`), letting the bot understand the collective discussion context.
 * **Identified Senders:** The bot prefixes incoming messages in its context history with the sender's name (e.g. `Hudson: Hello!` or `Anyssa: Hey!`), allowing the LLM to know exactly who said what.
-* **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse). Memory retrieval dynamically pulls the matching user's memory, so the bot remembers unique personal details about each family member.
+* **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse).
+* **Cross-User Memory Access:** During prompt generation, the bot retrieves matching facts from *both* family members' memory files (labeling them clearly as active partner memories vs. spouse memories). This allows the LLM to hold background knowledge about the spouse's preferences and logs during a conversation with the primary user (and vice versa), behaving like an organic, connected family assistant.
 
 ### 2. Silent Log Observer ("Speak only when Spoken to")
 To prevent the bot from interrupting every casual message between family members in a group:
@@ -187,6 +188,11 @@ To prevent the bot from interrupting every casual message between family members
 When you or your spouse send multiple rapid messages in succession (e.g. split thoughts like *"Hi!"* -> *"How's it going?"* -> *"@EmeryBot check Nest temperature"*), the bot groups them:
 * **Debouncer Queue:** Triggers a configurable timer (`CHAT_DEBOUNCE_DELAY`, default: `4.0` seconds) when a message requires a reply. Subsequent incoming messages cancel the previous timer and restart it.
 * **Single Cohesive Response:** Once the timer expires with no new incoming messages, the engine executes once on the accumulated history, replying to the entire block of messages in a single response rather than replying to each message in isolation.
+
+### 4. Targeted Scheduled Jobs & Reminders
+* **Personalized Reminders:** When scheduling a task or reminder (e.g., *"remind my wife in 10 minutes to switch the laundry"*), the bot can accept an optional `target_user` argument (e.g. `target_user="Anyssa"`, `target_user="Hudson"`, or `target_user="both"`).
+* **Context Preservation:** When the reminder triggers, the bot executes it under the target user's context (loading their profile details and personal memories).
+* **HTML Mentions:** The bot formats the outgoing message to explicitly tag the target user(s) using their Telegram user IDs (e.g., `<a href="tg://user?id=USER_ID">Name</a>`), ensuring they receive a direct push notification.
 
 ---
 
