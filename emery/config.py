@@ -55,6 +55,7 @@ ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
 ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true")
 JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", "custom_jobs.json")
+CHAT_DEBOUNCE_DELAY = float(os.getenv("CHAT_DEBOUNCE_DELAY", "4.0"))
 MAX_HISTORY_LEN = int(os.getenv("MAX_HISTORY_LEN", "200")) # Max chat history message count
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "true").lower() == "true"
 HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "3600"))

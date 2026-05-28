@@ -21,11 +21,12 @@ Many AI agent wrappers require massive context, cloud-only models, and heavy tok
    - [Step 3: Environment Configuration](#step-3-environment-configuration)
    - [Step 4: Google Service Authentication (Calendar & Nest)](#step-4-google-service-authentication-calendar--nest)
    - [Step 5: Run the Application](#step-5-run-the-application)
-5. [🧠 Persistent Memory System](#-persistent-memory-system)
-6. [💬 Advanced Messaging Controls (Reactions, Threading, Heartbeat, Stickers & GIFs)](#-advanced-messaging-controls-reactions-threading-heartbeat-stickers--gifs)
-7. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
-8. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
-9. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
+5. [👨‍👩‍👧‍👦 Cooperative Family AI (Multi-User, Silent-Listening, Debouncing)](#-cooperative-family-ai)
+6. [🧠 Persistent Memory System](#-persistent-memory-system)
+7. [💬 Advanced Messaging Controls (Reactions, Threading, Heartbeat, Stickers & GIFs)](#-advanced-messaging-controls-reactions-threading-heartbeat-stickers--gifs)
+8. [🛠️ Tool Library & Configuration](#%EF%B8%8F-tool-library--configuration)
+9. [📅 Task Scheduling & Automated Briefings](#-task-scheduling--automated-briefings)
+10. [⚙️ Environment Variables Reference](#%EF%B8%8F-environment-variables-reference)
 
 ---
 
@@ -165,6 +166,27 @@ You can run EmeryChat directly using Python or inside a Docker container.
    ```bash
    docker compose down
    ```
+
+---
+
+## 👨‍👩‍👧‍👦 Cooperative Family AI
+
+Unlike typical single-user personal assistants, EmeryChat is designed to act as a **cooperative family assistant** when running in a shared group chat (such as a chat with your spouse). It shifts the agent's focus from individual assistance to a shared family support structure.
+
+### 1. Dynamic Profiles & Memory Segregation
+* **Context Sharing:** Family members share the exact same group chat history buffer (`globals.chat_histories[chat_id]`), letting the bot understand the collective discussion context.
+* **Identified Senders:** The bot prefixes incoming messages in its context history with the sender's name (e.g. `Hudson: Hello!` or `Anyssa: Hey!`), allowing the LLM to know exactly who said what.
+* **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse). Memory retrieval dynamically pulls the matching user's memory, so the bot remembers unique personal details about each family member.
+
+### 2. Silent Log Observer ("Speak only when Spoken to")
+To prevent the bot from interrupting every casual message between family members in a group:
+* **Background Observation:** The bot silently intercepts and appends all group messages to its chat history to maintain up-to-date conversational context.
+* **Silent Return:** It suppresses the engine execution and remains silent *unless* it is directly mentioned (e.g. `@EmeryBot`), replied to on one of its own messages, or sent a slash command.
+
+### 3. Async Message Debouncing
+When you or your spouse send multiple rapid messages in succession (e.g. split thoughts like *"Hi!"* -> *"How's it going?"* -> *"@EmeryBot check Nest temperature"*), the bot groups them:
+* **Debouncer Queue:** Triggers a configurable timer (`CHAT_DEBOUNCE_DELAY`, default: `4.0` seconds) when a message requires a reply. Subsequent incoming messages cancel the previous timer and restart it.
+* **Single Cohesive Response:** Once the timer expires with no new incoming messages, the engine executes once on the accumulated history, replying to the entire block of messages in a single response rather than replying to each message in isolation.
 
 ---
 
@@ -422,6 +444,9 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `CHAT_TOPIC_ID` | *Optional* | Topic/thread ID for the **Chat** topic (conversations, reminders, heartbeats). |
 | `REOLINK_SILENT_ALERTS` | `true` | Default: true. Set to false to hear alerts. |
 | `TELEGRAM_ALLOWED_USERS` | *Optional* | Comma-separated whitelisted Telegram User IDs. If set, ignores anyone else. |
+| `PRIMARY_USER_ID` | `0` | Primary Telegram User ID (Hudson). |
+| `SECONDARY_USER_ID` | `0` | The secondary user's Telegram User ID. |
+| `CHAT_DEBOUNCE_DELAY` | `4.0` | Delay in seconds to buffer rapid-fire text messages in history before generating a response. |
 | `MODEL_NAME` | `Emery` | Name the bot addresses itself as. |
 | `MODEL_ID` | `qwen3.6:35b-a3b` | Main model ID in Ollama. |
 | `VISION_MODEL_ID` | `gemma4:e4b` | Coprocessor vision and processing model. |
@@ -441,6 +466,10 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `USER_LOCATION` | `New York City, NY` | User city location (for default coordinate and weather maths). |
 | `USER_TIMEZONE` | `America/New_York` | User timezone identifier (for schedule parsing and date math). |
 | `USER_PROFESSION` | `AI Enthusiast` | User job details (helps customize recommendations). |
+| `USER_2_NAME` | `Wife` | Secondary user's first name. |
+| `USER_2_BIRTHDAY` | `UNKNOWN` | Secondary user's birthday (for notifications). |
+| `USER_2_PROFESSION`| `Unemployed` | Secondary user's job details (used to personalize prompts). |
+| `USER_2_FAMILY` | *Optional* | Secondary user's family and relationships context. |
 | `ENABLE_CALENDAR` | `false` | Enable Google Calendar tool. |
 | `GOOGLE_CALENDAR_IDS` | `primary` | Comma-separated list of calendars to parse. |
 | `ENABLE_NEST` | `false` | Enable Google Nest Thermostat tools. |

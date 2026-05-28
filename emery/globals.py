@@ -25,6 +25,7 @@ chat_reply_targets = {}       # Tracks custom reply message ID per chat: chat_id
 
 import contextvars
 current_user_id = contextvars.ContextVar("current_user_id", default=None)
+chat_debounce_tasks = {}  # Tracks active debounce timers: chat_id -> asyncio.Task
 
 
 # Concurrency locks to protect Ollama endpoints from concurrent load

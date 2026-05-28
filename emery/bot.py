@@ -162,13 +162,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.now(USER_TIMEZONE)
     })
     
+    # Check if this chat is a group chat
+    is_group = (chat_id < 0)
+    
+    # By default, we reply in DMs (positive chat_id)
+    should_reply = not is_group
+    
+    # If it is a group chat, we only reply if:
+    # 1. The bot is mentioned (e.g. @EmeryBot)
+    # 2. It is a reply to one of the bot's own messages
+    # 3. The message starts with a slash command
+    if is_group:
+        bot_username = (await context.bot.get_me()).username.lower()
+        
+        # Check mentions in text or caption
+        text_lower = ""
+        if update.message.text:
+            text_lower = update.message.text.lower()
+        elif update.message.caption:
+            text_lower = update.message.caption.lower()
+            
+        is_mentioned = f"@{bot_username}" in text_lower
+        
+        is_reply_to_bot = False
+        if update.message.reply_to_message:
+            is_reply_to_bot = (update.message.reply_to_message.from_user.id == context.bot.id)
+            
+        is_command = text_lower.startswith("/")
+        
+        if is_mentioned or is_reply_to_bot or is_command:
+            should_reply = True
+
+    if not should_reply:
+        logging.info(f"🤫 SILENT LISTEN: Recorded group message from {sender_name} (chat {chat_id}) for context, but not replying.")
+        return
+
+    # --- DEBOUNCE LOGIC ---
+    # Cancel existing debounce task for this chat
+    if chat_id in globals.chat_debounce_tasks:
+        globals.chat_debounce_tasks[chat_id].cancel()
+        logging.info(f"⏱️ DEBOUNCE: Cancelled existing timer for chat {chat_id} (resetting delay)")
+
+    # Define the worker that will run after CHAT_DEBOUNCE_DELAY seconds
+    async def debounce_worker(delay):
+        try:
+            await asyncio.sleep(delay)
+            logging.info(f"⏱️ DEBOUNCE: Delay of {delay}s expired for chat {chat_id}. Processing batch...")
+            await run_engine_for_chat(update, context, model_to_use, is_input_voice)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            globals.chat_debounce_tasks.pop(chat_id, None)
+
+    # Start the debounce worker
+    from emery.config import CHAT_DEBOUNCE_DELAY
+    globals.chat_debounce_tasks[chat_id] = asyncio.create_task(debounce_worker(CHAT_DEBOUNCE_DELAY))
+
+async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, model_to_use: str, is_input_voice: bool) -> None:
+    chat_id = update.effective_chat.id
+    
+    # Determine final reply target from globals
+    reply_target_id = globals.chat_reply_targets.pop(chat_id, None)
+
     # --- TYPING INDICATOR LOOP ---
     typing_stop = asyncio.Event()
 
     async def keep_typing():
         while not typing_stop.is_set():
             try:
-                await update.message.reply_chat_action("typing")
+                await globals.application_bot.send_chat_action(chat_id=chat_id, action="typing")
             except Exception as e:
                 logging.debug(f"Typing action failed: {e}")
             await asyncio.sleep(4)
@@ -176,7 +238,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     typing_task = asyncio.create_task(keep_typing())
 
     try:
+        from emery.engine import emery_engine
         response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id], model_to_use=model_to_use)
+    except Exception as e:
+        logging.error(f"Error running engine in debounce worker: {e}", exc_info=True)
+        response_text = "EMERYCHAT engine failure."
+        voice_sent_via_tool = False
     finally:
         typing_stop.set()
         await typing_task
@@ -218,15 +285,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
 
             thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
-            await update.message.reply_text(thinking_msg, parse_mode="HTML")
-
-    # Determine final reply target
-    reply_target_id = globals.chat_reply_targets.pop(chat_id, None)
+            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID)
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---
     if is_input_voice and not voice_sent_via_tool:
-        await update.message.reply_chat_action("record_voice")
+        await globals.application_bot.send_chat_action(chat_id=chat_id, action="record_voice")
+        from emery.tools import get_voice_audio
         v_out = await get_voice_audio(clean_response)
         if v_out:
             reply_params = ReplyParameters(message_id=reply_target_id, allow_sending_without_reply=True) if reply_target_id else None
@@ -239,12 +304,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             sent_msgs = [sent_msg] if sent_msg else []
         else:
-            sent_msgs = await send_safe_large_message(update, emery_format(clean_response), reply_to_message_id=reply_target_id)
+            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID)
     else:
         if clean_response:
-            sent_msgs = await send_safe_large_message(update, emery_format(clean_response), reply_to_message_id=reply_target_id)
+            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID)
 
-    # Save the assistant text (with raw think tags intact) to history
+    # Save the assistant text to history
     assistant_entry = {
         "role": "assistant", 
         "content": response_text,
@@ -258,7 +323,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Trigger background topic summarization
     from emery.memory import summarize_topics_background
-    asyncio.create_task(summarize_topics_background(chat_id, update.effective_user.id))
+    last_user_id = None
+    for msg in reversed(globals.chat_histories[chat_id]):
+        if msg.get("role") == "user" and msg.get("user_id"):
+            last_user_id = msg.get("user_id")
+            break
+    asyncio.create_task(summarize_topics_background(chat_id, last_user_id))
 
 async def send_safe_large_message(update: Update, text: str, reply_to_message_id: int = None):
     """
