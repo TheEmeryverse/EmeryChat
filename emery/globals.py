@@ -23,6 +23,10 @@ application = None      # Populated dynamically by main.py
 reolink_thread_trackers = {}  # Tracks camera alerts: camera_name -> {"message_id": int, "timestamp": datetime}
 chat_reply_targets = {}       # Tracks custom reply message ID per chat: chat_id -> message_id
 
+import contextvars
+current_user_id = contextvars.ContextVar("current_user_id", default=None)
+
+
 # Concurrency locks to protect Ollama endpoints from concurrent load
 import asyncio
 main_model_lock = asyncio.Semaphore(1)

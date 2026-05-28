@@ -56,7 +56,8 @@ async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_user_allowed(update):
         return
         
-    if wipe_memory():
+    globals.current_user_id.set(update.effective_user.id)
+    if wipe_memory(update.effective_user.id):
         await update.message.reply_text("🧠 Memory wiped successfully and re-initialized to baseline template.")
     else:
         await update.message.reply_text("❌ Failed to wipe memory due to a filesystem error.")
@@ -65,6 +66,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_user_allowed(update):
         return
         
+    globals.current_user_id.set(update.effective_user.id)
     chat_id = update.effective_chat.id
     globals.TARGET_CHAT_ID = chat_id
     globals.CURRENT_THREAD_ID = update.message.message_thread_id if update.message else None
@@ -83,6 +85,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_to_use = MODEL_ID
     
     now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p")
+    sender_name = update.effective_user.first_name or "User"
 
     if update.message.voice:
         is_input_voice = True
@@ -90,7 +93,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         transcription = await transcribe_audio(await v_file.download_as_bytearray())
         if not transcription: 
             return
-        content = f"[{now_str}] {transcription}"
+        content_text = transcription
     elif update.message.photo:
         p_file = await update.message.photo[-1].get_file()
         photo_bytes = await p_file.download_as_bytearray()
@@ -101,11 +104,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_chat_action("typing")
         description = await get_image_description(b64, caption)
         
-        content_text = "User sent an image."
+        content_text = "sent an image."
         if caption:
-            content_text += f" User's caption: {caption}"
+            content_text += f" Caption: {caption}"
         content_text += f"\nImage Description: {description}"
-        content = f"[{now_str}] {content_text}"
     elif update.message.sticker:
         sticker = update.message.sticker
         emoji = sticker.emoji or ""
@@ -115,21 +117,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if emoji:
             globals.learned_stickers[emoji] = file_id
             
-        content_text = f"User sent a sticker: {emoji} (File ID: {file_id}, Set: {set_name})"
-        content = f"[{now_str}] {content_text}"
+        content_text = f"sent a sticker: {emoji} (File ID: {file_id}, Set: {set_name})"
     elif update.message.animation:
         anim = update.message.animation
         file_id = anim.file_id
-        content_text = f"User sent a GIF / Animation (File ID: {file_id})"
-        content = f"[{now_str}] {content_text}"
+        content_text = f"sent a GIF / Animation (File ID: {file_id})"
     elif update.message.document and update.message.document.mime_type == "video/mp4":
         doc = update.message.document
         file_id = doc.file_id
-        content_text = f"User sent a GIF / Animation (File ID: {file_id})"
-        content = f"[{now_str}] {content_text}"
+        content_text = f"sent a GIF / Animation (File ID: {file_id})"
     else:
-        text = update.message.text or "[Non-text message]"
-        content = f"[{now_str}] {text}"
+        content_text = update.message.text or "[Non-text message]"
+        
+    content = f"[{now_str}] {sender_name}: {content_text}"
         
     # Thread Reply Context Builder
     reply_to = update.message.reply_to_message
@@ -152,6 +152,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "role": "user", 
         "content": content + reply_info,
         "message_id": update.message.message_id,
+        "user_id": update.effective_user.id,
+        "sender_name": sender_name,
         "reply_to_message_id": reply_to.message_id if reply_to else None,
         "message_thread_id": update.message.message_thread_id if update.message else None,
         "timestamp": datetime.now(USER_TIMEZONE)
@@ -253,7 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Trigger background topic summarization
     from emery.memory import summarize_topics_background
-    asyncio.create_task(summarize_topics_background(chat_id))
+    asyncio.create_task(summarize_topics_background(chat_id, update.effective_user.id))
 
 async def send_safe_large_message(update: Update, text: str, reply_to_message_id: int = None):
     """
@@ -417,11 +419,12 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if set(emojis) != set(old_emojis):
             if emojis:
                 logging.info(f"🎭 REACTION: Triggering reaction check for user reaction {emojis} on message {message_id}...")
-                asyncio.create_task(handle_user_reaction_trigger(chat_id, message_id, emojis))
+                asyncio.create_task(handle_user_reaction_trigger(chat_id, message_id, emojis, user.id))
 
-async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: list[str]):
+async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: list[str], user_id: int):
     """Invokes the engine contextually when a user reacts to a message."""
     globals.TARGET_CHAT_ID = chat_id
+    globals.current_user_id.set(user_id)
     
     msg_text = ""
     for msg in globals.chat_histories.get(chat_id, []):
@@ -444,9 +447,11 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
         f"If no text response is necessary, you MUST reply with exactly 'DONE' to remain silent.]"
     )
     
+    globals.current_user_id.set(user_id)
     trigger_msg = {
         "role": "user",
         "content": trigger_content,
+        "user_id": user_id,
         "is_reaction_trigger": True,
         "timestamp": datetime.now(USER_TIMEZONE)
     }

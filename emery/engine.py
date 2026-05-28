@@ -565,14 +565,21 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
 
     
-    # Find the latest user query from the history buffer for memory keyword filtering
+    # Find the latest user query and sender info from the history buffer
     user_query = ""
+    sender_user_id = None
     for msg in reversed(history_buffer):
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not msg.get("is_heartbeat_trigger") and not msg.get("is_reaction_trigger"):
             user_query = msg.get("content", "")
+            sender_user_id = msg.get("user_id")
             break
             
-    system_msg = {"role": "system", "content": get_current_system_prompt(user_query)}
+    if sender_user_id is not None:
+        globals.current_user_id.set(sender_user_id)
+    else:
+        sender_user_id = globals.current_user_id.get()
+        
+    system_msg = {"role": "system", "content": get_current_system_prompt(user_query, sender_user_id)}
     voice_sent_via_tool = False
     
     ollama_history = []

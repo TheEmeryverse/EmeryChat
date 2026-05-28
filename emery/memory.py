@@ -6,19 +6,24 @@ import asyncio
 from emery.config import (
     MEMORY_FILE_PATH, MEMORY_THRESHOLD, USER_NAME, USER_LOCATION,
     USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION,
-    CAMERA_LOG_FILE_PATH
+    CAMERA_LOG_FILE_PATH, get_user_profile, get_memory_file_path
 )
+import emery.globals as globals
 
-def retrieve_relevant_memories(user_query: str) -> str:
+def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
     """
     Reads memory.md and performs keyword filtering against the user's latest query
     to load only relevant memories, keeping the CPU-only prompt evaluation window small.
     """
-    if not os.path.exists(MEMORY_FILE_PATH):
+    if user_id is None:
+        user_id = globals.current_user_id.get()
+        
+    memory_file_path = get_memory_file_path(user_id)
+    if not memory_file_path or not os.path.exists(memory_file_path):
         return ""
         
     try:
-        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+        with open(memory_file_path, "r", encoding="utf-8") as f:
             content = f.read()
             
         # If the file is small, load it entirely to ensure maximum context
@@ -133,20 +138,41 @@ def retrieve_relevant_memories(user_query: str) -> str:
         logging.error(f"❌ MEMORY ENGINE: Error retrieving memories: {e}", exc_info=True)
         return ""
 
-async def save_user_memory(fact: str) -> str:
+async def save_user_memory(fact: str, user_id: int = None) -> str:
     """
     Saves a new fact, preference, or critical piece of information about the user or their environment
     to the persistent memory log. Use when the user shares something they expect you to remember long-term.
     """
-    logging.info(f"💾 MEMORY: Appending new fact to staging area: '{fact}'")
-    if not os.path.exists(MEMORY_FILE_PATH):
+    if user_id is None:
+        user_id = globals.current_user_id.get()
+        
+    memory_file_path = get_memory_file_path(user_id)
+    if not memory_file_path:
+        return "Memory is disabled."
+        
+    logging.info(f"💾 MEMORY: Appending new fact to staging area for user {user_id}: '{fact}'")
+    if not os.path.exists(memory_file_path):
         # Create default if missing
-        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
-            f.write("# Emery's Memory Log\n\n## User Profile & Preferences\n\n## General Facts & Logs\n\n## Raw Memory Intake\n")
+        profile = get_user_profile(user_id)
+        baseline_template = (
+            f"# Emery's Memory Log\n\n"
+            f"## User Profile & Preferences\n"
+            f"- Name: {profile['name']}\n"
+            f"- Location: {USER_LOCATION}\n"
+            f"- Timezone: {USER_TIMEZONE}\n"
+            f"- Birthday: {profile['birthday']}\n"
+            f"- Family: {profile['family']}\n"
+            f"- Profession: {profile['profession']}\n\n"
+            f"## General Facts & Logs\n\n"
+            f"## Conversational Topics Log\n\n"
+            f"## Raw Memory Intake\n"
+        )
+        with open(memory_file_path, "w", encoding="utf-8") as f:
+            f.write(baseline_template)
 
     try:
         # Append to the Raw Memory Intake section of memory.md
-        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+        with open(memory_file_path, "r", encoding="utf-8") as f:
             content = f.read()
             
         # Standardize Raw Memory Intake heading presence
@@ -168,12 +194,12 @@ async def save_user_memory(fact: str) -> str:
             
         updated_content = f"{prefix}\n\n{heading}{updated_suffix}\n"
         
-        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+        with open(memory_file_path, "w", encoding="utf-8") as f:
             f.write(updated_content)
             
         # Trigger background consolidation using the fast model
-        logging.info("💾 MEMORY: Scheduling background memory consolidation...")
-        asyncio.create_task(consolidate_memory_background())
+        logging.info(f"💾 MEMORY: Scheduling background memory consolidation for user {user_id}...")
+        asyncio.create_task(consolidate_memory_background(user_id))
         
         return f"Successfully saved to memory log staging: '{fact}'"
         
@@ -181,31 +207,35 @@ async def save_user_memory(fact: str) -> str:
         logging.error(f"❌ MEMORY TOOL: Failed to write memory: {e}", exc_info=True)
         return f"Failed to save fact to memory: {e}"
 
-_is_consolidating = False
-
-async def consolidate_memory_background() -> None:
+_is_consolidating = set()
+ 
+async def consolidate_memory_background(user_id: int = None) -> None:
     """
     A background consolidation task that reads memory.md, runs the coprocessor model
     to deduplicate, sort, and organize the list, and then saves it.
     This keeps the main chat model from blocking on heavy processing task execution.
     """
     global _is_consolidating
-    if _is_consolidating:
-        logging.info("💾 CONSOLIDATOR: Memory consolidation is already in progress. Skipping duplicate run.")
+    if user_id is None:
+        user_id = globals.current_user_id.get()
+        
+    if user_id in _is_consolidating:
+        logging.info(f"💾 CONSOLIDATOR: Memory consolidation is already in progress for user {user_id}. Skipping duplicate run.")
         return
-
-    logging.info("💾 CONSOLIDATOR: Starting background memory consolidation...")
+ 
+    logging.info(f"💾 CONSOLIDATOR: Starting background memory consolidation for user {user_id}...")
     
-    if not os.path.exists(MEMORY_FILE_PATH):
-        logging.warning("⚠️ CONSOLIDATOR: memory.md does not exist. Aborting consolidation.")
+    memory_file_path = get_memory_file_path(user_id)
+    if not memory_file_path or not os.path.exists(memory_file_path):
+        logging.warning(f"⚠️ CONSOLIDATOR: Memory file '{memory_file_path}' does not exist. Aborting consolidation.")
         return
         
-    _is_consolidating = True
+    _is_consolidating.add(user_id)
     try:
         # Prevent concurrent file reads/writes using a simple sleep
         await asyncio.sleep(0.5)
         
-        with open(MEMORY_FILE_PATH, "r", encoding="utf-8") as f:
+        with open(memory_file_path, "r", encoding="utf-8") as f:
             current_markdown = f.read()
             
         system_prompt = (
@@ -228,6 +258,7 @@ async def consolidate_memory_background() -> None:
         # Local import to break circular dependency
         from emery.helpers import query_fast_model
         consolidated = await query_fast_model(user_prompt, system_prompt)
+        consolidated = consolidated.strip()
         
         if not consolidated or not consolidated.startswith("# Emery's Memory Log"):
             logging.error(f"❌ CONSOLIDATOR: Fast model returned invalid markdown. Aborting overwrite. Response: '{consolidated[:200]}...'")
@@ -249,37 +280,45 @@ async def consolidate_memory_background() -> None:
         if "## Raw Memory Intake" not in consolidated:
             consolidated += "\n\n## Raw Memory Intake\n"
             
-        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+        with open(memory_file_path, "w", encoding="utf-8") as f:
             f.write(consolidated)
             
-        logging.info("💾 CONSOLIDATOR: Background memory consolidation completed successfully!")
+        logging.info(f"💾 CONSOLIDATOR: Background memory consolidation for user {user_id} completed successfully!")
         
     except Exception as e:
-        logging.error(f"❌ CONSOLIDATOR: Background task crash: {e}", exc_info=True)
+        logging.error(f"❌ CONSOLIDATOR: Background task crash for user {user_id}: {e}", exc_info=True)
     finally:
-        _is_consolidating = False
+        _is_consolidating.discard(user_id)
  
-def wipe_memory() -> bool:
+def wipe_memory(user_id: int = None) -> bool:
     """
     Overwrites memory.md with the default baseline template structure,
     clearing all custom saved facts and preferences.
     """
-    logging.info("🧠 MEMORY: Wiping all memories and restoring baseline template...")
+    if user_id is None:
+        user_id = globals.current_user_id.get()
+        
+    memory_file_path = get_memory_file_path(user_id)
+    if not memory_file_path:
+        return False
+        
+    logging.info(f"🧠 MEMORY: Wiping all memories for user {user_id} and restoring baseline template...")
+    profile = get_user_profile(user_id)
     baseline_template = (
         f"# Emery's Memory Log\n\n"
         f"## User Profile & Preferences\n"
-        f"- Name: {USER_NAME}\n"
+        f"- Name: {profile['name']}\n"
         f"- Location: {USER_LOCATION}\n"
         f"- Timezone: {USER_TIMEZONE}\n"
-        f"- Birthday: {USER_BIRTHDAY}\n"
-        f"- Family: {USER_FAMILY}\n"
-        f"- Profession: {USER_PROFESSION}\n\n"
+        f"- Birthday: {profile['birthday']}\n"
+        f"- Family: {profile['family']}\n"
+        f"- Profession: {profile['profession']}\n\n"
         f"## General Facts & Logs\n\n"
         f"## Conversational Topics Log\n\n"
         f"## Raw Memory Intake\n"
     )
     try:
-        with open(MEMORY_FILE_PATH, "w", encoding="utf-8") as f:
+        with open(memory_file_path, "w", encoding="utf-8") as f:
             f.write(baseline_template)
         return True
     except Exception as e:
@@ -437,7 +476,7 @@ def get_camera_log_summary() -> str:
 _is_summarizing_topics = False
 _last_summary_hist_len = {}
 
-async def summarize_topics_background(chat_id: int) -> None:
+async def summarize_topics_background(chat_id: int, user_id: int = None) -> None:
     """
     Summarizes the recent chat history topics and appends them
     to the Raw Memory Intake staging area of memory.md.
@@ -445,6 +484,9 @@ async def summarize_topics_background(chat_id: int) -> None:
     global _is_summarizing_topics, _last_summary_hist_len
     import emery.globals as globals
     from datetime import datetime
+    
+    if user_id is None:
+        user_id = globals.current_user_id.get()
     
     # Get active history
     history = list(globals.chat_histories.get(chat_id, []))
@@ -505,7 +547,7 @@ async def summarize_topics_background(chat_id: int) -> None:
             raw_fact = summary.lstrip("-* ").strip()
             logging.info(f"💾 TOPIC MONITOR: Identified new topic: '{raw_fact}'")
             # Save it to raw intake staging area (which triggers memory consolidation automatically)
-            await save_user_memory(raw_fact)
+            await save_user_memory(raw_fact, user_id)
             
             # Update last checked history length on success
             _last_summary_hist_len[chat_id] = hist_len

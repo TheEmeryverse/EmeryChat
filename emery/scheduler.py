@@ -94,6 +94,12 @@ async def run_custom_job(context):
     job = context.job
     job_data = job.data
     job_id = job_data.get("id")
+    
+    # Restore user context for this task
+    user_id = job_data.get("user_id")
+    if user_id is not None:
+        globals.current_user_id.set(user_id)
+        
     prompt = job_data.get("prompt")
     description = job_data.get("description")
     chat_id = job_data.get("chat_id")
@@ -153,13 +159,15 @@ async def run_custom_job(context):
     from emery.helpers import emery_format
     
     try:
-        from emery.config import USER_NAME
+        from emery.config import get_user_profile
+        profile = get_user_profile(user_id)
+        user_name = profile["name"]
         exec_prompt = prompt
         if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
             exec_prompt = (
                 f"{prompt}\n\n"
                 f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely to the user, "
-                f"addressing them by name (e.g. '{USER_NAME}, check the chicken's temperature.'). "
+                f"addressing them by name (e.g. '{user_name}, check the chicken's temperature.'). "
                 f"Do not write conversational filler or say 'I have set a reminder'.]"
             )
             
@@ -405,6 +413,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "description": description,
         "chat_id": chat_id,
         "message_thread_id": getattr(globals, "CURRENT_THREAD_ID", None),
+        "user_id": globals.current_user_id.get(),
         "created_at": datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     }
     

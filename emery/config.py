@@ -65,6 +65,9 @@ HEARTBEAT_SLEEP_END = os.getenv("HEARTBEAT_SLEEP_END", "03:30")
 
 
 # USER PROFILE
+PRIMARY_USER_ID = int(os.getenv("PRIMARY_USER_ID", "0"))
+SECONDARY_USER_ID = int(os.getenv("SECONDARY_USER_ID", "0"))
+
 USER_NAME = os.getenv("USER_NAME", "User")
 USER_LOCATION = os.getenv("USER_LOCATION", "Earth")
 USER_TIMEZONE = pytz.timezone(os.getenv("USER_TIMEZONE", "America/New_York"))
@@ -76,3 +79,36 @@ USER_BIO = f"""User's name: {USER_NAME}.
             {USER_NAME}'s timezone: {USER_TIMEZONE}.
             {USER_NAME}'s family: {USER_FAMILY}.
             {USER_NAME}'s profession: {USER_PROFESSION}."""
+
+# SECONDARY USER PROFILE
+USER_2_NAME = os.getenv("USER_2_NAME", "Wife")
+USER_2_BIRTHDAY = os.getenv("USER_2_BIRTHDAY", "UNKNOWN")
+USER_2_PROFESSION = os.getenv("USER_2_PROFESSION", "Unemployed")
+USER_2_FAMILY = os.getenv("USER_2_FAMILY", "")
+
+def get_user_profile(user_id: int) -> dict:
+    """Returns profile details for the given user ID. Fallbacks to primary user profile."""
+    if SECONDARY_USER_ID != 0 and user_id == SECONDARY_USER_ID:
+        return {
+            "name": USER_2_NAME,
+            "birthday": USER_2_BIRTHDAY,
+            "profession": USER_2_PROFESSION,
+            "family": USER_2_FAMILY
+        }
+    return {
+        "name": USER_NAME,
+        "birthday": USER_BIRTHDAY,
+        "profession": USER_PROFESSION,
+        "family": USER_FAMILY
+    }
+
+def get_memory_file_path(user_id: int) -> str:
+    """Returns the path to the user's specific long-term memory file."""
+    if not ENABLE_MEMORY:
+        return ""
+    if SECONDARY_USER_ID != 0 and user_id == SECONDARY_USER_ID:
+        base, ext = os.path.splitext(MEMORY_FILE_PATH)
+        name = USER_2_NAME.lower().replace(" ", "_")
+        return f"{base}_{name}{ext}"
+    return MEMORY_FILE_PATH
+

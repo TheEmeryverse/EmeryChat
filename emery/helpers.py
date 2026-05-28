@@ -12,7 +12,8 @@ from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER,
+    get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
 
@@ -279,7 +280,7 @@ def get_active_holiday_info(today_date):
     return "\n" + "\n".join(lines)
 
 @lru_cache(maxsize=16)
-def get_active_birthday_info(birthday_str, today_date):
+def get_active_birthday_info(birthday_str, today_date, user_name):
     if not birthday_str or birthday_str.upper() == "UNKNOWN":
         return ""
         
@@ -317,7 +318,7 @@ def get_active_birthday_info(birthday_str, today_date):
                 
     if not month or not day:
         logging.info(f"🎂 DATE MATH: Unable to parse birthday format '{birthday_str}', defaulting to static text.")
-        return f"\n- {USER_NAME}'s birthday: {birthday_str}."
+        return f"\n- {user_name}'s birthday: {birthday_str}."
         
     # Calculate this year's birthday
     try:
@@ -341,21 +342,30 @@ def get_active_birthday_info(birthday_str, today_date):
     if 0 <= diff <= 5:
         day_str = bday_date.strftime("%A, %B %d")
         if diff == 0:
-            logging.info(f"🎂 DATE MATH: Birthday alert active today for {USER_NAME}!")
-            return f"\n- Today is {USER_NAME}'s birthday!"
+            logging.info(f"🎂 DATE MATH: Birthday alert active today for {user_name}!")
+            return f"\n- Today is {user_name}'s birthday!"
         else:
-            logging.info(f"🎂 DATE MATH: Birthday alert active for {USER_NAME} (in {diff} days on {day_str})")
-            return f"\n- Upcoming event: {USER_NAME}'s birthday is on {day_str} (in {diff} day{'s' if diff > 1 else ''})."
+            logging.info(f"🎂 DATE MATH: Birthday alert active for {user_name} (in {diff} days on {day_str})")
+            return f"\n- Upcoming event: {user_name}'s birthday is on {day_str} (in {diff} day{'s' if diff > 1 else ''})."
             
-    logging.info(f"🎂 DATE MATH: No active birthday alerts for {USER_NAME} (next occurrence is in {diff} days).")
+    logging.info(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
     return ""
 
-def get_current_system_prompt(user_query=""): # Injects the system prompt into model's context
+def get_current_system_prompt(user_query="", user_id=None): # Injects the system prompt into model's context
+    if user_id is None:
+        user_id = globals.current_user_id.get()
+        
+    profile = get_user_profile(user_id)
+    user_name = profile["name"]
+    user_birthday = profile["birthday"]
+    user_profession = profile["profession"]
+    user_family = profile["family"]
+
     now = datetime.now(USER_TIMEZONE)
     now_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
     today_date = now.date()
     
-    active_bday = get_active_birthday_info(USER_BIRTHDAY, today_date)
+    active_bday = get_active_birthday_info(user_birthday, today_date, user_name)
     active_hols = get_active_holiday_info(today_date)
     notifications = ""
     if active_bday or active_hols:
@@ -366,7 +376,7 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
     if ENABLE_MEMORY:
         # Resolve circular import locally
         from emery.memory import retrieve_relevant_memories
-        recalled = retrieve_relevant_memories(user_query)
+        recalled = retrieve_relevant_memories(user_query, user_id)
         if recalled:
             memory_section = f"\n\n# Long-Term Persistent Memory\n{recalled}"
         memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
@@ -410,7 +420,7 @@ def get_current_system_prompt(user_query=""): # Injects the system prompt into m
             logging.error(f"❌ SYSTEM PROMPT: Failed to generate camera log summary hint: {e}", exc_info=True)
 
     prompt = f"""# Identity
-Your name is {MODEL_NAME}. You are a Professional Assistant for {USER_NAME}.
+Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 
 # Constraints
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
@@ -425,9 +435,9 @@ Your tone is serious, logical, and straight to the point. You are an expert in m
 - Location: {USER_LOCATION}
 - Current date and time: {now_str}
 - Timezone: {USER_TIMEZONE}
-- User's name: {USER_NAME}
-- User's birthday: {USER_BIRTHDAY}
-- User's family: {USER_FAMILY}
-- User's profession: {USER_PROFESSION}{notifications}{memory_section}{camera_log_hint}"""
+- User's name: {user_name}
+- User's birthday: {user_birthday}
+- User's family: {user_family}
+- User's profession: {user_profession}{notifications}{memory_section}{camera_log_hint}"""
 
     return prompt
