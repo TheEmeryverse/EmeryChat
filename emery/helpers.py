@@ -379,7 +379,7 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
         recalled = retrieve_relevant_memories(user_query, user_id)
         
         # Also retrieve spouse's memories if a secondary user exists
-        from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, get_user_profile
+        from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID
         spouse_recalled = ""
         spouse_name = ""
         if SECONDARY_USER_ID != 0:
