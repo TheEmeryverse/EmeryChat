@@ -63,6 +63,9 @@ async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Failed to wipe memory due to a filesystem error.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+        
     if not is_user_allowed(update):
         return
         
