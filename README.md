@@ -223,6 +223,7 @@ flowchart TD
   * **Asynchronous Topic Summarizer:** At the end of every active turn, a background task reads the recent conversation and uses the fast coprocessor model to compile discussed topics into a single chronological bullet point with the date and **AI Tag Expansion** (e.g. `- On Tuesday, May 26, 2026: Discussed SpaceX IPO valuations and OpenAI. [Tags: space exploration, rocket, investment, tech ipo]`).
   * **Inactivity Debouncing:** Summarization only triggers if the history has grown by at least **2 new messages** since the last successful run, preventing CPU/VRAM load on quick/filler messages.
   * **Keyword Stemming:** Python's local retrieval engine uses a custom stemmer (removing possessives and plurals) to match user queries to the concept tags. For example, asking about *"SpaceX's rockets"* will match the tags `space exploration`, `rocket`, and `investment`, pulling the topic summary into the context instantly at 0ms query-time latency.
+* **Cross-Chat Topic Awareness & Privacy:** EmeryChat extracts the last 5 conversation topics discussed across DMs and group chats, placing them in a `Recent Conversation Topics` section in the system prompt. This allows queries like *"What were we just talking about?"* to succeed across chats even though their individual history deques are segregated. To prevent leaks, if the bot is in a group chat, it runs under a **Group Privacy Guard** constraint that forbids disclosing details of private DM conversations.
 
 ---
 
@@ -426,7 +427,7 @@ You can ask the bot to schedule tasks with triggers such as:
 3. **One-off schedules / reminders**: *"Remind me to check the oven in 15 minutes"* or *"Remind me on 2026-05-26 at 15:30:00 to run backups"* (triggers once and automatically deletes itself from storage after running).
 
 Emery utilizes three specific tool call routines behind the scenes to manage this:
-* `add_scheduled_job(schedule_type, schedule_value, prompt, description)`: Registers and schedules a task.
+* `add_scheduled_job(schedule_type, schedule_value, prompt, description, target_user, route_to_routines)`: Registers and schedules a task. If `route_to_routines` is `True` (default for group chats), the repeating routine is routed to the designated routines topic. If `False` (default for DMs), it outputs directly to the originating chat/thread.
 * `list_scheduled_jobs()`: Returns all active user-scheduled jobs.
 * `remove_scheduled_job(job_id)`: Deletes and cancels a job trigger.
 

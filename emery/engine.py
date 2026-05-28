@@ -384,6 +384,10 @@ if is_enabled("ENABLE_SCHEDULER"):
                         "target_user": {
                             "type": "string",
                             "description": "Optional name or alias of the family member this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both'). If specified, the bot will run the job under that user's context and explicitly tag them in the chat notification."
+                        },
+                        "route_to_routines": {
+                            "type": "boolean",
+                            "description": "Optional. If true (default for group chats), the scheduled repeating routine is routed to the designated routines topic. If false (default for DMs), it is sent to the original chat/topic where it was scheduled."
                         }
                     },
                     "required": ["schedule_type", "schedule_value", "prompt", "description"]
@@ -682,7 +686,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     
                     if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
                         status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
-                        await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID, text=f"<i>{status_msg}</i>", parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID)
+                        await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID.get(), text=f"<i>{status_msg}</i>", parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
                     
                     logging.info(f"🔧 TOOL: {fn} | Args: {args}")
                     if fn == "speak_message": 

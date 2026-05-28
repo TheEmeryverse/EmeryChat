@@ -110,11 +110,12 @@ async def run_custom_job(context):
     chat_id = job_data.get("chat_id")
     message_thread_id = job_data.get("message_thread_id")
     schedule_type = job_data.get("schedule_type")
+    route_to_routines = job_data.get("route_to_routines", True)
     
     # Check if it is an automated daily or repeating routine
     is_routine = schedule_type in ("daily", "weekly", "monthly", "yearly", "interval")
     
-    if is_routine:
+    if is_routine and route_to_routines:
         # Automated routine jobs must go to the designated group and topic
         group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
         if group_chat_id_env:
@@ -140,11 +141,15 @@ async def run_custom_job(context):
                     pass
 
     if not chat_id:
-        chat_id = globals.TARGET_CHAT_ID
+        chat_id = globals.TARGET_CHAT_ID.get()
         
     if not chat_id:
         logging.warning(f"⚠️ Custom job '{description}' ({job_id}) triggered without chat_id.")
         return
+
+    # Set context variables for target chat and thread/topic
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(message_thread_id)
         
     if schedule_type == "yearly":
         try:
@@ -344,7 +349,7 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
 
 # --- LLM TOOL CALLABLE FUNCTIONS ---
 
-async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None, target_user: str = None) -> str:
+async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None, target_user: str = None, route_to_routines: bool = None) -> str:
     """
     Schedule a new automated job/task.
     
@@ -354,13 +359,18 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     - prompt: The text prompt the bot executes when the job runs.
     - description: A short, user-friendly label/description of the job.
     - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both').
+    - route_to_routines: Optional boolean. If True, the routine is routed to the global routines topic. If False, it goes to the origin chat.
     """
-    chat_id = globals.TARGET_CHAT_ID
+    chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session to associate with this job. Run this command from within a chat."
         
     if not description:
         description = f"Reminder: {prompt[:30]}..." if len(prompt) > 30 else f"Reminder: {prompt}"
+
+    if route_to_routines is None:
+        # Default to False for DMs (chat_id > 0), True for Groups (chat_id < 0)
+        route_to_routines = False if chat_id > 0 else True
 
         
     stype = schedule_type.lower().strip()
@@ -457,7 +467,8 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "prompt": prompt,
         "description": description,
         "chat_id": chat_id,
-        "message_thread_id": getattr(globals, "CURRENT_THREAD_ID", None),
+        "message_thread_id": globals.CURRENT_THREAD_ID.get(),
+        "route_to_routines": route_to_routines,
         "user_id": creator_user_id,
         "target_user_id": target_user_id,
         "target_user_name": target_name,

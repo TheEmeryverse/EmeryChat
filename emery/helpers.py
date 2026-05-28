@@ -446,6 +446,16 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
     if SECONDARY_USER_ID != 0 and USER_RELATIONSHIP:
         relationship_line = f"\n- {USER_NAME} and {USER_2_NAME} are {USER_RELATIONSHIP}."
 
+    group_privacy_instruction = ""
+    chat_id = globals.TARGET_CHAT_ID.get()
+    if chat_id and chat_id < 0:
+        group_privacy_instruction = (
+            "\n- IMPORTANT: You are currently running inside a GROUP CHAT. "
+            "To protect user privacy, do NOT disclose any sensitive details or topics "
+            "from the user's private one-on-one DM history (found under 'Recent Conversation Topics' or memories) "
+            "in your public group responses unless the user explicitly requests it in this group chat."
+        )
+
     prompt = f"""# Identity
 Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 
@@ -453,7 +463,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{group_privacy_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.

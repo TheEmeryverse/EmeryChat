@@ -71,8 +71,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     globals.current_user_id.set(update.effective_user.id)
     chat_id = update.effective_chat.id
-    globals.TARGET_CHAT_ID = chat_id
-    globals.CURRENT_THREAD_ID = update.message.message_thread_id if update.message else None
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(update.message.message_thread_id if update.message else None)
     
     # Dynamically associate user chat ID with any pending jobs (like default briefings)
     from emery.scheduler import update_jobs_with_chat_id
@@ -268,7 +268,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
-            "message_thread_id": globals.CURRENT_THREAD_ID,
+            "message_thread_id": globals.CURRENT_THREAD_ID.get(),
             "timestamp": datetime.now(USER_TIMEZONE)
         })
         return
@@ -285,7 +285,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
 
             thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
-            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID)
+            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---
@@ -300,20 +300,20 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 voice=v_out,
                 caption="Voice message",
                 reply_parameters=reply_params,
-                message_thread_id=globals.CURRENT_THREAD_ID
+                message_thread_id=globals.CURRENT_THREAD_ID.get()
             )
             sent_msgs = [sent_msg] if sent_msg else []
         else:
-            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID)
+            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
     else:
         if clean_response:
-            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID)
+            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     # Save the assistant text to history
     assistant_entry = {
         "role": "assistant", 
         "content": response_text,
-        "message_thread_id": globals.CURRENT_THREAD_ID,
+        "message_thread_id": globals.CURRENT_THREAD_ID.get(),
         "timestamp": datetime.now(USER_TIMEZONE)
     }
     if sent_msgs:
@@ -496,7 +496,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: list[str], user_id: int):
     """Invokes the engine contextually when a user reacts to a message."""
-    globals.TARGET_CHAT_ID = chat_id
+    globals.TARGET_CHAT_ID.set(chat_id)
     globals.current_user_id.set(user_id)
     
     msg_text = ""
@@ -638,7 +638,7 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_heartbeat_trigger(chat_id: int):
     """Triggers the model to potentially circle back or check in on a silent chat."""
-    globals.TARGET_CHAT_ID = chat_id
+    globals.TARGET_CHAT_ID.set(chat_id)
     
     # Determine the topic/thread ID for the heartbeats
     message_thread_id = None
@@ -655,7 +655,7 @@ async def handle_heartbeat_trigger(chat_id: int):
                 message_thread_id = msg.get("message_thread_id")
                 break
                 
-    globals.CURRENT_THREAD_ID = message_thread_id
+    globals.CURRENT_THREAD_ID.set(message_thread_id)
     
     trigger_content = (
         f"[System Trigger (Heartbeat)]: It has been several hours since the last message in this chat. "

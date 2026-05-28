@@ -39,6 +39,7 @@ def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
         general_facts_lines = []
         
         current_section = None
+        recent_topics_lines = []
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("## "):
@@ -47,13 +48,17 @@ def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
             # Keep header sections intact
             if current_section in ["## user profile & preferences", "## project & system context"]:
                 profile_context_lines.append(line)
-            # Route general facts and topic logs to a list we will filter
-            elif current_section in ["## general facts & logs", "## raw memory intake", "## conversational topics log"]:
+            # Route general facts and raw memory intake to general_facts_lines for filtering
+            elif current_section in ["## general facts & logs", "## raw memory intake"]:
                 # Keep section headers, but only filter bullets
                 if stripped.startswith("## ") or not stripped:
                     general_facts_lines.append(line)
                 elif stripped.startswith("- ") or stripped.startswith("* "):
                     general_facts_lines.append(line)
+            # Route conversational topics log to its own list so we can pull the latest N
+            elif current_section in ["## conversational topics log"]:
+                if stripped.startswith("- ") or stripped.startswith("* "):
+                    recent_topics_lines.append(line)
             else:
                 # Outside major sections (like main title)
                 if not stripped.startswith("## "):
@@ -130,8 +135,16 @@ def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
                 # Keep structure/spacing
                 matched_facts.append(line)
                 
-        # Combine profile context with matched facts
-        final_memories = profile_context_lines + ["\n## Relevant Recalled Memories"] + matched_facts
+        # Extract the N most recent topic log entries
+        N = 5
+        recent_topics = recent_topics_lines[-N:]
+        
+        # Combine profile context with matched facts and recent topics
+        final_memories = profile_context_lines
+        if recent_topics:
+            final_memories += ["\n## Recent Conversation Topics"] + recent_topics
+            
+        final_memories += ["\n## Relevant Recalled Memories"] + matched_facts
         return "\n".join(final_memories)
         
     except Exception as e:
@@ -522,18 +535,22 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
         now_dt = datetime.now(USER_TIMEZONE)
         now_str = now_dt.strftime("%A, %B %d, %Y")
         
+        chat_type = "DM" if chat_id > 0 else "Group Chat"
+        
         system_prompt = (
             "You are Emery's Conversation Topic Summarizer.\n"
             "Your job is to read a recent snippet of the conversation and write a single, brief bullet point "
-            "summarizing the main topic(s) discussed, including the date, AND append 3-5 high-level conceptual keywords/tags in brackets at the end.\n"
+            "summarizing the main topic(s) discussed, including the date and the channel type (DM or Group Chat), "
+            "AND append 3-5 high-level conceptual keywords/tags in brackets at the end.\n"
             "Example format:\n"
-            f"- On {now_str}: Discussed SpaceX IPO valuations and compared it to OpenAI. [Tags: space exploration, rocket, investment, tech ipo]\n"
+            f"- On {now_str} (in {chat_type}): Discussed SpaceX IPO valuations and compared it to OpenAI. [Tags: space exploration, rocket, investment, tech ipo]\n"
             "Rules:\n"
             "1. Focus ONLY on the topics/subject matters discussed (what was the chat about), not details, conversations, or decisions.\n"
             "2. Keep it to a single, concise bullet point (maximum 1 sentence).\n"
-            "3. Provide 3 to 5 broad concept tags inside brackets at the very end. The tags must help group the topic conceptually (e.g. if the topic is NASA Artemis, tags should include space exploration, moon, rocket).\n"
-            "4. If the recent snippet is just generic greeting, small talk, or tool command status with no real topic discussed, reply with exactly 'NONE'.\n"
-            "5. Do not include conversational remarks, explanations, or code block formatting."
+            f"3. Explicitly state that this occurred in the {chat_type} as shown in the example format.\n"
+            "4. Provide 3 to 5 broad concept tags inside brackets at the very end. The tags must help group the topic conceptually (e.g. if the topic is NASA Artemis, tags should include space exploration, moon, rocket).\n"
+            "5. If the recent snippet is just generic greeting, small talk, or tool command status with no real topic discussed, reply with exactly 'NONE'.\n"
+            "6. Do not include conversational remarks, explanations, or code block formatting."
         )
         
         user_prompt = f"Here is the recent conversation snippet:\n\n{snippet_text}"

@@ -6,16 +6,18 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+import contextvars
+
+group_chat_id = None
 group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
 if group_chat_id_env:
     try:
-        TARGET_CHAT_ID = int(group_chat_id_env)
+        group_chat_id = int(group_chat_id_env)
     except ValueError:
-        TARGET_CHAT_ID = None
-else:
-    TARGET_CHAT_ID = None
+        pass
 
-CURRENT_THREAD_ID = None  # Tracks the topic/thread ID of the active conversation
+TARGET_CHAT_ID = contextvars.ContextVar("TARGET_CHAT_ID", default=group_chat_id)
+CURRENT_THREAD_ID = contextvars.ContextVar("CURRENT_THREAD_ID", default=None)
 
 http_client = httpx.AsyncClient(timeout=900, verify=False, follow_redirects=True)
 application_bot = None  # Populated dynamically by main.py

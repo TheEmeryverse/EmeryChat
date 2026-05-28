@@ -45,9 +45,9 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
     logging.info(f"🔧 TOOL: speak_message")
     audio = await get_voice_audio(text)
-    if audio and globals.TARGET_CHAT_ID:
-        await globals.application_bot.send_voice(chat_id=globals.TARGET_CHAT_ID, voice=audio, caption="Voice message")
-        return "Voice message sent successfully to User."
+    if audio and globals.TARGET_CHAT_ID.get():
+        await globals.application_bot.send_voice(chat_id=globals.TARGET_CHAT_ID.get(), voice=audio, caption="Voice message", message_thread_id=globals.CURRENT_THREAD_ID.get())
+        return "Voice message sent successfully."
     return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
 
 # --- IMAGE GENERATION ---
@@ -72,11 +72,12 @@ async def generate_image(prompt): # Generates an image based on the prompt using
                 break
         if not image_bytes:
             return "No image data found in response parts."
-        if globals.TARGET_CHAT_ID:
+        if globals.TARGET_CHAT_ID.get():
             await globals.application_bot.send_photo(
-                chat_id=globals.TARGET_CHAT_ID,
+                chat_id=globals.TARGET_CHAT_ID.get(),
                 photo=image_bytes,
-                caption=f"Here's your picture: {prompt[:1000]}"
+                caption=f"Here's your picture: {prompt[:1000]}",
+                message_thread_id=globals.CURRENT_THREAD_ID.get()
             )
             return "Image sent successfully."
         return "Chat context lost."
@@ -725,8 +726,8 @@ async def get_reolink_snapshot(
     
     # Determine target chat ID and options
     if target_chat_id is None:
-        target_chat_id = globals.TARGET_CHAT_ID
-        actual_thread_id = getattr(globals, "CURRENT_THREAD_ID", None)
+        target_chat_id = globals.TARGET_CHAT_ID.get()
+        actual_thread_id = globals.CURRENT_THREAD_ID.get()
         use_alert_configs = False
     else:
         actual_thread_id = message_thread_id
@@ -946,9 +947,9 @@ async def trigger_webhook_alert(camera_name: str):
             logging.error(f"❌ Invalid TELEGRAM_GROUP_CHAT_ID: {group_chat_id_env}")
 
     if not alert_chat_id:
-        if not globals.TARGET_CHAT_ID and globals.chat_histories:
-            globals.TARGET_CHAT_ID = list(globals.chat_histories.keys())[0]
-        alert_chat_id = globals.TARGET_CHAT_ID
+        if not globals.TARGET_CHAT_ID.get() and globals.chat_histories:
+            globals.TARGET_CHAT_ID.set(list(globals.chat_histories.keys())[0])
+        alert_chat_id = globals.TARGET_CHAT_ID.get()
         
     if not alert_chat_id:
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set TELEGRAM_GROUP_CHAT_ID in .env or message the bot first.")
@@ -1150,7 +1151,7 @@ async def react_to_message(emoji: str, message_id: int = None) -> str:
     If message_id is not specified, it defaults to the latest user message in history.
     Available standard emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'
     """
-    chat_id = globals.TARGET_CHAT_ID
+    chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session to react to."
         
@@ -1181,7 +1182,7 @@ async def reply_to_message(message_id: int) -> str:
     """
     Sets the target message for the bot's final response in this turn to reply directly to a specific previous message.
     """
-    chat_id = globals.TARGET_CHAT_ID
+    chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session."
     globals.chat_reply_targets[chat_id] = message_id
@@ -1194,7 +1195,7 @@ async def send_sticker(sticker_id_or_emoji: str) -> str:
     to look up a sticker in your learned library.
     """
     from telegram import ReplyParameters
-    chat_id = globals.TARGET_CHAT_ID
+    chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session."
         
@@ -1215,7 +1216,7 @@ async def send_sticker(sticker_id_or_emoji: str) -> str:
             chat_id=chat_id,
             sticker=file_id,
             reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID
+            message_thread_id=globals.CURRENT_THREAD_ID.get()
         )
         return f"Successfully sent sticker: {sticker_id_or_emoji}."
     except Exception as e:
@@ -1259,7 +1260,7 @@ async def send_gif(query_or_url: str) -> str:
     to automatically search and send a matching GIF.
     """
     from telegram import ReplyParameters
-    chat_id = globals.TARGET_CHAT_ID
+    chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session."
 
@@ -1280,7 +1281,7 @@ async def send_gif(query_or_url: str) -> str:
             chat_id=chat_id,
             animation=gif_url,
             reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID
+            message_thread_id=globals.CURRENT_THREAD_ID.get()
         )
         return f"Successfully sent GIF for query/url: '{query_or_url}'."
     except Exception as e:
