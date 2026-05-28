@@ -12,7 +12,7 @@ from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER,
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP,
     get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
@@ -440,6 +440,12 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
         except Exception as e:
             logging.error(f"❌ SYSTEM PROMPT: Failed to generate camera log summary hint: {e}", exc_info=True)
 
+    # Build relationship line for secondary user context
+    from emery.config import SECONDARY_USER_ID, USER_2_NAME
+    relationship_line = ""
+    if SECONDARY_USER_ID != 0 and USER_RELATIONSHIP:
+        relationship_line = f"\n- {USER_NAME} and {USER_2_NAME} are {USER_RELATIONSHIP}."
+
     prompt = f"""# Identity
 Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 
@@ -459,6 +465,6 @@ Your tone is serious, logical, and straight to the point. You are an expert in m
 - User's name: {user_name}
 - User's birthday: {user_birthday}
 - User's family: {user_family}
-- User's profession: {user_profession}{notifications}{memory_section}{camera_log_hint}"""
+- User's profession: {user_profession}{relationship_line}{notifications}{memory_section}{camera_log_hint}"""
 
     return prompt

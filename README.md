@@ -482,6 +482,7 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `USER_2_BIRTHDAY` | `UNKNOWN` | Secondary user's birthday (for notifications). |
 | `USER_2_PROFESSION`| `Unemployed` | Secondary user's job details (used to personalize prompts). |
 | `USER_2_FAMILY` | *Optional* | Secondary user's family and relationships context. |
+| `USER_RELATIONSHIP` | *Optional* | Describes the relationship between the two users, injected into the system prompt (e.g. `"married"`, `"siblings"`, `"friends"`). |
 | `ENABLE_CALENDAR` | `false` | Enable Google Calendar tool. |
 | `GOOGLE_CALENDAR_IDS` | `primary` | Comma-separated list of calendars to parse. |
 | `ENABLE_NEST` | `false` | Enable Google Nest Thermostat tools. |

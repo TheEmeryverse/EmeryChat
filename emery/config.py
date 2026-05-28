@@ -86,6 +86,7 @@ USER_2_NAME = os.getenv("USER_2_NAME", "Wife")
 USER_2_BIRTHDAY = os.getenv("USER_2_BIRTHDAY", "UNKNOWN")
 USER_2_PROFESSION = os.getenv("USER_2_PROFESSION", "Unemployed")
 USER_2_FAMILY = os.getenv("USER_2_FAMILY", "")
+USER_RELATIONSHIP = os.getenv("USER_RELATIONSHIP", "")  # e.g. "married", "siblings", "friends"
 
 def get_user_profile(user_id: int) -> dict:
     """Returns profile details for the given user ID. Fallbacks to primary user profile."""
