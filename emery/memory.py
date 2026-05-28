@@ -505,9 +505,9 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
     history = list(globals.chat_histories.get(chat_id, []))
     hist_len = len(history)
     
-    # Debounce check: only run if history length increased by at least 2 messages (one full turn)
+    # Debounce check: only run if history length increased by at least 8 messages (4 full turns)
     last_len = _last_summary_hist_len.get(chat_id, 0)
-    if hist_len - last_len < 2:
+    if hist_len - last_len < 8:
         return
         
     if _is_summarizing_topics:
