@@ -874,7 +874,7 @@ async def get_reolink_snapshot(
             telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
             sent_photo_msg = await globals.application_bot.send_photo(
                 chat_id=target_chat_id,
-                photo=response_content,
+                photo=compressed_bytes,
                 caption=telegram_caption,
                 parse_mode="HTML",
                 reply_to_message_id=reply_to_message_id,
