@@ -1305,6 +1305,54 @@ async def list_portainer_environments() -> str:
     except Exception as e:
         return f"Error listing Portainer environments: {str(e)}"
 
+async def list_portainer_containers(environment_name: str) -> str:
+    """
+    Lists all containers (running and stopped) in a specific Portainer environment.
+    """
+    if str(ENABLE_PORTAINER).lower() != "true" or not PORTAINER_URL:
+        return "Portainer integration is not enabled or configured."
+
+    import httpx
+    verify_ssl = PORTAINER_SSL_VERIFY
+
+    try:
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=15.0) as client:
+            headers = get_portainer_headers()
+
+            # 1. Resolve environment_name -> env_id
+            r_envs = await client.get(f"{PORTAINER_URL}/api/endpoints", headers=headers)
+            if r_envs.status_code != 200:
+                return f"Failed to list environments: HTTP {r_envs.status_code}"
+            
+            env_id = None
+            for env in r_envs.json():
+                if env.get("Name").lower().strip() == environment_name.lower().strip():
+                    env_id = env.get("Id")
+                    break
+            
+            if env_id is None:
+                return f"Environment '{environment_name}' not found."
+
+            # 2. List containers
+            url = f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/json?all=true"
+            r_containers = await client.get(url, headers=headers)
+            if r_containers.status_code != 200:
+                return f"Failed to fetch containers: HTTP {r_containers.status_code}"
+            
+            containers = r_containers.json()
+            if not containers:
+                return f"No containers found in environment '{environment_name}'."
+
+            lines = [f"Containers in Environment '{environment_name}':"]
+            for c in containers:
+                names = ", ".join(c.get("Names", [])).lstrip("/")
+                state = c.get("State")
+                image = c.get("Image")
+                lines.append(f"- {names} ({state}) - Image: {image}")
+            return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing containers: {str(e)}"
+
 async def update_portainer_container(environment_name: str, container_name: str) -> str:
     """
     Recreates and restarts a container in the specified Portainer environment.

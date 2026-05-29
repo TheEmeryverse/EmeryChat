@@ -31,7 +31,7 @@ from emery.tools import (
     get_reolink_snapshot, get_available_cameras,
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
-    list_portainer_environments, update_portainer_container
+    list_portainer_environments, list_portainer_containers, update_portainer_container
 )
 
 # Helper to check if a feature is enabled
@@ -351,6 +351,7 @@ if ENABLE_MEMORY:
 
 if is_enabled("ENABLE_PORTAINER"):
     AVAILABLE_TOOLS["list_portainer_environments"] = list_portainer_environments
+    AVAILABLE_TOOLS["list_portainer_containers"] = list_portainer_containers
     AVAILABLE_TOOLS["update_portainer_container"] = update_portainer_container
     tools_schema.extend([
         {
@@ -359,6 +360,23 @@ if is_enabled("ENABLE_PORTAINER"):
                 "name": "list_portainer_environments",
                 "description": "List all active environments configured in Portainer. Use this to find the target environment names and IDs.",
                 "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_portainer_containers",
+                "description": "List all containers (running and stopped) in a specific Portainer environment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "environment_name": {
+                            "type": "string",
+                            "description": "The exact name of the Portainer environment (e.g., 'emeryverse', 'thegrand')."
+                        }
+                    },
+                    "required": ["environment_name"]
+                }
             }
         },
         {
@@ -587,6 +605,7 @@ TOOL_STATUS_MESSAGES = {
     "list_scheduled_jobs": f"{MODEL_NAME} is retrieving scheduled jobs...",
     "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job...",
     "list_portainer_environments": f"{MODEL_NAME} is retrieving Portainer environments...",
+    "list_portainer_containers": f"{MODEL_NAME} is listing Portainer containers...",
     "update_portainer_container": f"{MODEL_NAME} is updating a container in Portainer..."
 }
 
