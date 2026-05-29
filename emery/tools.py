@@ -22,7 +22,8 @@ from emery.config import (
     VISION_OLLAMA_URL, SEARXNG_URL, NASA_API_KEY, GEMINI_API_KEY,
     IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, raw_cal_string,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,
-    OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME
+    OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME,
+    ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
@@ -1266,3 +1267,167 @@ async def send_gif(query_or_url: str) -> str:
     except Exception as e:
         logging.error(f"❌ TOOLS: Failed to send GIF: {e}")
         return f"Error sending GIF: {e}"
+
+# --- PORTAINER INTEGRATION TOOLS ---
+def get_portainer_headers():
+    return {
+        "X-API-Key": PORTAINER_API_KEY,
+        "Accept": "application/json"
+    }
+
+async def list_portainer_environments() -> str:
+    """
+    Fetches the list of all environments (endpoints) configured in Portainer.
+    Returns names, IDs, types, and status.
+    """
+    if str(ENABLE_PORTAINER).lower() != "true" or not PORTAINER_URL:
+        return "Portainer integration is not enabled or configured."
+
+    import httpx
+    url = f"{PORTAINER_URL}/api/endpoints"
+    try:
+        verify_ssl = PORTAINER_SSL_VERIFY
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=15.0) as client:
+            r = await client.get(url, headers=get_portainer_headers())
+            if r.status_code != 200:
+                return f"Failed to fetch Portainer environments: HTTP {r.status_code}"
+            
+            envs = r.json()
+            if not envs:
+                return "No environments found in Portainer."
+
+            lines = ["Available Portainer Environments:"]
+            for env in envs:
+                env_type = "Docker" if env.get("Type") in [1, 2, 4] else "Kubernetes/Other"
+                status = "Online" if env.get("Status") == 1 else "Offline"
+                lines.append(f"- '{env.get('Name')}' (ID: {env.get('Id')}, Type: {env_type}, Status: {status})")
+            return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing Portainer environments: {str(e)}"
+
+async def update_portainer_container(environment_name: str, container_name: str) -> str:
+    """
+    Recreates and restarts a container in the specified Portainer environment.
+    Always pulls the latest image before recreation.
+    """
+    if str(ENABLE_PORTAINER).lower() != "true" or not PORTAINER_URL:
+        return "Portainer integration is not enabled or configured."
+
+    import httpx
+    # Clean the container name (strip leading slashes if the LLM includes it)
+    clean_target_name = container_name.lstrip("/").strip()
+    verify_ssl = PORTAINER_SSL_VERIFY
+    always_pull = True
+
+    try:
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=30.0) as client:
+            headers = get_portainer_headers()
+
+            # 1. Resolve environment_name -> env_id
+            r_envs = await client.get(f"{PORTAINER_URL}/api/endpoints", headers=headers)
+            if r_envs.status_code != 200:
+                return f"Failed to list environments: HTTP {r_envs.status_code}"
+            
+            env_id = None
+            for env in r_envs.json():
+                if env.get("Name").lower().strip() == environment_name.lower().strip():
+                    env_id = env.get("Id")
+                    break
+            
+            if env_id is None:
+                return f"Environment '{environment_name}' not found."
+
+            # 2. Find target container -> container_id and full name
+            r_containers = await client.get(f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/json?all=true", headers=headers)
+            if r_containers.status_code != 200:
+                return f"Failed to list containers in environment '{environment_name}': HTTP {r_containers.status_code}"
+            
+            container_id = None
+            image_name = None
+            for c in r_containers.json():
+                names = [n.lstrip("/") for n in c.get("Names", [])]
+                if clean_target_name in names:
+                    container_id = c.get("Id")
+                    image_name = c.get("Image")
+                    break
+
+            if not container_id:
+                return f"Container '{container_name}' not found in environment '{environment_name}'."
+
+            # 3. Retrieve container details for recreation settings
+            r_inspect = await client.get(f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/{container_id}/json", headers=headers)
+            if r_inspect.status_code != 200:
+                return f"Failed to inspect container: HTTP {r_inspect.status_code}"
+            
+            container_config = r_inspect.json()
+            config = container_config.get("Config", {})
+            host_config = container_config.get("HostConfig", {})
+            networking_config = container_config.get("NetworkSettings", {}).get("Networks", {})
+            
+            endpoints_config = {}
+            for net_name, net_detail in networking_config.items():
+                endpoints_config[net_name] = {
+                    "IPAMConfig": net_detail.get("IPAMConfig"),
+                    "Links": net_detail.get("Links"),
+                    "Aliases": net_detail.get("Aliases")
+                }
+
+            creation_payload = {
+                "Hostname": config.get("Hostname"),
+                "Domainname": config.get("Domainname"),
+                "User": config.get("User"),
+                "AttachStdin": config.get("AttachStdin", False),
+                "AttachStdout": config.get("AttachStdout", True),
+                "AttachStderr": config.get("AttachStderr", True),
+                "Tty": config.get("Tty", False),
+                "OpenStdin": config.get("OpenStdin", False),
+                "StdinOnce": config.get("StdinOnce", False),
+                "Env": config.get("Env"),
+                "Cmd": config.get("Cmd"),
+                "Image": image_name,
+                "Volumes": config.get("Volumes"),
+                "WorkingDir": config.get("WorkingDir"),
+                "Entrypoint": config.get("Entrypoint"),
+                "OnBuild": config.get("OnBuild"),
+                "Labels": config.get("Labels"),
+                "HostConfig": host_config,
+                "NetworkingConfig": {
+                    "EndpointsConfig": endpoints_config
+                }
+            }
+
+            # 4. Pull new image
+            if always_pull:
+                pull_url = f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/images/create?fromImage={image_name}"
+                r_pull = await client.post(pull_url, headers=headers, timeout=120.0)
+                if r_pull.status_code != 200:
+                    return f"Failed to pull image '{image_name}': HTTP {r_pull.status_code}. Aborting recreation."
+
+            # 5. Stop old container
+            r_stop = await client.post(f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/{container_id}/stop", headers=headers)
+            if r_stop.status_code not in [204, 304, 200]:
+                return f"Failed to stop container: HTTP {r_stop.status_code}"
+
+            # 6. Delete old container
+            r_del = await client.delete(f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/{container_id}", headers=headers)
+            if r_del.status_code not in [204, 200]:
+                return f"Failed to delete old container: HTTP {r_del.status_code}"
+
+            # 7. Create new container
+            create_url = f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/create?name={clean_target_name}"
+            r_create = await client.post(create_url, headers=headers, json=creation_payload)
+            if r_create.status_code not in [200, 201]:
+                return f"Failed to create new container: HTTP {r_create.status_code}. Payload: {r_create.text}"
+            
+            new_container_id = r_create.json().get("Id")
+
+            # 8. Start new container
+            r_start = await client.post(f"{PORTAINER_URL}/api/endpoints/{env_id}/docker/containers/{new_container_id}/start", headers=headers)
+            if r_start.status_code not in [204, 200]:
+                return f"Recreated container (ID: {new_container_id}) but failed to start it: HTTP {r_start.status_code}"
+
+            return f"Success: Container '{clean_target_name}' in environment '{environment_name}' has been successfully recreated and started with the latest image."
+            
+    except Exception as e:
+        return f"Error updating container: {str(e)}"
+

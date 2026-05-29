@@ -299,6 +299,19 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   REOLINK_CAMERA_DESCRIPTIONS=frontdoor:doorbell_camera_facing_porch... # Helps vision model understand context
   ENABLE_REOLINK_POLLING=true  # Background person detection trigger
   ```
+
+### Portainer Container Management
+* **Status Toggle:** `ENABLE_PORTAINER=true`
+* **Description:** Connects to a Portainer instance to list environments and recreate/update running containers with the latest image.
+* **Available Functions:**
+  * `list_portainer_environments()`: Lists all configured Docker or Kubernetes environments and their status.
+  * `update_portainer_container(environment_name, container_name)`: Stops, pulls the latest image, removes, and recreates a container with its original network and volume configurations.
+* **Env Config:**
+  ```env
+  PORTAINER_URL=https://192.168.1.126:9443
+  PORTAINER_API_KEY=your_access_token_here
+  PORTAINER_SSL_VERIFY=false
+  ```
 </details>
 
 <details>
@@ -519,3 +532,8 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `TELEGRAM_STICKER_SET` | *Optional* | Name of the Telegram sticker set to preload on startup. |
 | `GIPHY_API_KEY` | *Optional* | Custom developer API key for Giphy GIF search (falls back to public test key). |
 | `TENOR_API_KEY` | *Optional* | Custom developer API key for Tenor GIF search (falls back to public test key). |
+| `ENABLE_PORTAINER` | `false` | Enable Portainer container management tools. |
+| `PORTAINER_URL` | *Required if Portainer active* | Base URL of your Portainer instance. |
+| `PORTAINER_API_KEY` | *Required if Portainer active* | Personal access key from Portainer Account Settings. |
+| `PORTAINER_SSL_VERIFY` | `true` | Set to false to disable SSL validation for self-signed certificates. |
+

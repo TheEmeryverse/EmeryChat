@@ -30,7 +30,8 @@ from emery.tools import (
     fetch_web_content,
     get_reolink_snapshot, get_available_cameras,
     delegate_to_coprocessor, react_to_message, reply_to_message,
-    send_sticker, send_gif
+    send_sticker, send_gif,
+    list_portainer_environments, update_portainer_container
 )
 
 # Helper to check if a feature is enabled
@@ -348,6 +349,42 @@ if ENABLE_MEMORY:
         }
     })
 
+if is_enabled("ENABLE_PORTAINER"):
+    AVAILABLE_TOOLS["list_portainer_environments"] = list_portainer_environments
+    AVAILABLE_TOOLS["update_portainer_container"] = update_portainer_container
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "list_portainer_environments",
+                "description": "List all active environments configured in Portainer. Use this to find the target environment names and IDs.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_portainer_container",
+                "description": "Update, recreate, and upgrade a specific container in a Portainer environment. This stops, pulls the latest image, deletes, and recreates the container, preserving its original configuration. WARNING: This is a powerful administrative action. DO NOT invoke this tool unless the user has explicitly asked you to update, restart, or recreate a container.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "environment_name": {
+                            "type": "string",
+                            "description": "The exact name of the Portainer environment (e.g., 'emeryverse', 'thegrand')."
+                        },
+                        "container_name": {
+                            "type": "string",
+                            "description": "The name of the container to update (e.g., 'seerr', 'plex')."
+                        }
+                    },
+                    "required": ["environment_name", "container_name"]
+                }
+            }
+        }
+    ])
+
+
 if is_enabled("ENABLE_SCHEDULER"):
     from emery.scheduler import add_scheduled_job, list_scheduled_jobs, remove_scheduled_job
     AVAILABLE_TOOLS.update({
@@ -548,7 +585,9 @@ TOOL_STATUS_MESSAGES = {
     "get_camera_security_log": f"{MODEL_NAME} is reviewing the security log...",
     "add_scheduled_job": f"{MODEL_NAME} is scheduling a job...",
     "list_scheduled_jobs": f"{MODEL_NAME} is retrieving scheduled jobs...",
-    "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job..."
+    "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job...",
+    "list_portainer_environments": f"{MODEL_NAME} is retrieving Portainer environments...",
+    "update_portainer_container": f"{MODEL_NAME} is updating a container in Portainer..."
 }
 
 
