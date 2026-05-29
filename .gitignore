@@ -1,6 +1,8 @@
 .env
 token.json
 credentials.json
+nest_token.json
+nest_credentials.json
 script.py
 .DS_Store
 
@@ -115,3 +117,23 @@ dist
 .DS_Store
 
 .venv/
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Personal Memory & Log files
+memory.md
+memory.md.bak
+test_memory_temp.md
+camera_log.md
+camera_log.md.bak
+test_camera_log.md
+custom_jobs.json
+
+# Local Tests Folder
+tests/
+
+
+# Backups
+*.bak

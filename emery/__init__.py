@@ -1,0 +1,1 @@
+# EmeryChat core package
