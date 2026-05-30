@@ -11,6 +11,12 @@ const express = require('express')
 const app = express()
 
 const http = require('http').createServer(app)
+const io = require('socket.io')(http, {
+  cors: {
+    origin: "http://localhost:4000",
+    methods: ["GET", "POST"]
+  }
+})
 
 app.disable("X-Powered-By")
 app.set("trust proxy", 1)
@@ -40,6 +46,10 @@ require('./middleware/session.js').then(session => {
     app.use('/user', require('./routes/user.js'))
 
     app.use(authentication.required())
+
+    io.on('connection', (socket) => {
+        require('./socket/index.js')(io, socket);
+    })
 
     app.use('/api', require('./routes/api.js'))
     
