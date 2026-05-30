@@ -29,8 +29,7 @@ from emery.tools import (
     get_system_stats,
     fetch_web_content,
     get_reolink_snapshot, get_available_cameras,
-    delegate_to_coprocessor, react_to_message, reply_to_message,
-    send_sticker, send_gif,
+    delegate_to_coprocessor,
     list_portainer_environments, list_portainer_containers, update_portainer_container
 )
 
@@ -499,85 +498,7 @@ tools_schema.append({
     }
 })
 
-AVAILABLE_TOOLS["react_to_message"] = react_to_message
-tools_schema.append({
-    "type": "function",
-    "function": {
-        "name": "react_to_message",
-        "description": "Reacts to a specific message in the chat with an emoji. Use this to express reactions (e.g. thumbs up, heart, laugh) when a full text response is not needed, or in addition to text. Use reactions sparingly and only when highly natural.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "emoji": {
-                    "type": "string",
-                    "description": "The emoji to react with. Must be one of standard Telegram reaction emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'."
-                },
-                "message_id": {
-                    "type": "integer",
-                    "description": "Optional. The ID of the message to react to. If omitted, defaults to the latest user message in history."
-                }
-            },
-            "required": ["emoji"]
-        }
-    }
-})
 
-AVAILABLE_TOOLS["reply_to_message"] = reply_to_message
-tools_schema.append({
-    "type": "function",
-    "function": {
-        "name": "reply_to_message",
-        "description": "Directs the bot's final response in this turn to reply directly to a specific previous message ID in the thread, instead of replying to the latest user message.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "message_id": {
-                    "type": "integer",
-                    "description": "The message ID to reply to."
-                }
-            },
-            "required": ["message_id"]
-        }
-    }
-})
-
-AVAILABLE_TOOLS["send_sticker"] = send_sticker
-tools_schema.append({
-    "type": "function",
-    "function": {
-        "name": "send_sticker",
-        "description": "Sends a Telegram sticker to the chat. You can specify a standard emoji (e.g. '👍', '❤️', '🔥') to look up a sticker in your library, or pass a direct sticker file ID.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sticker_id_or_emoji": {
-                    "type": "string",
-                    "description": "The emoji (e.g. '👍') or sticker file ID to send."
-                }
-            },
-            "required": ["sticker_id_or_emoji"]
-        }
-    }
-})
-
-AVAILABLE_TOOLS["send_gif"] = send_gif
-tools_schema.append({
-    "type": "function",
-    "function": {
-        "name": "send_gif",
-        "description": "Sends a GIF (animation) to the chat. You can pass a direct URL to a .gif / .mp4 file, or a search query (e.g. 'happy dance', 'confused') to automatically search and send a matching GIF.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query_or_url": {
-                    "type": "string",
-                    "description": "The GIF search query or a direct GIF URL to send."
-                }
-            },
-            "required": ["query_or_url"]
-        }
-    }
-})
 
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
@@ -742,9 +663,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     fn = tc['function']['name']
                     args = tc['function'].get('arguments', {})
                     
-                    if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
-                        status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
-                        await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID.get(), text=f"<i>{status_msg}</i>", parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
+
                     
                     logging.info(f"🔧 TOOL: {fn} | Args: {args}")
                     if fn == "speak_message": 

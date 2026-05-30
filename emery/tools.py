@@ -45,10 +45,17 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
 
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
     audio = await get_voice_audio(text)
-    if audio and globals.TARGET_CHAT_ID.get():
-        await globals.application_bot.send_voice(chat_id=globals.TARGET_CHAT_ID.get(), voice=audio, caption="Voice message", message_thread_id=globals.CURRENT_THREAD_ID.get())
-        return "Voice message sent successfully."
-    return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
+    if audio:
+        responses = globals.outgoing_responses.get()
+        if responses is not None:
+            v_b64 = base64.b64encode(audio).decode('utf-8')
+            responses.append({
+                "type": "voice",
+                "data": v_b64,
+                "caption": "Voice message"
+            })
+            return "Voice message generated successfully."
+    return "Failed to generate voice message."
 
 # --- IMAGE GENERATION ---
 async def generate_image(prompt): # Generates an image based on the prompt using Gemini API
@@ -71,15 +78,16 @@ async def generate_image(prompt): # Generates an image based on the prompt using
                 break
         if not image_bytes:
             return "No image data found in response parts."
-        if globals.TARGET_CHAT_ID.get():
-            await globals.application_bot.send_photo(
-                chat_id=globals.TARGET_CHAT_ID.get(),
-                photo=image_bytes,
-                caption=f"Here's your picture: {prompt[:1000]}",
-                message_thread_id=globals.CURRENT_THREAD_ID.get()
-            )
-            return "Image sent successfully."
-        return "Chat context lost."
+        responses = globals.outgoing_responses.get()
+        if responses is not None:
+            img_b64 = base64.b64encode(image_bytes).decode('utf-8')
+            responses.append({
+                "type": "photo",
+                "data": img_b64,
+                "caption": f"Here's your picture: {prompt[:1000]}"
+            })
+            return "Image generated successfully."
+        return "Asset context lost."
     except Exception as e:
         logging.error(f"❌ Image Tool Crash: {e}")
         return f"Error: {e}"
@@ -852,25 +860,13 @@ async def get_reolink_snapshot(
         if not concise_report or not concise_report.strip():
             concise_report = "No active activity detected."
         
-        if target_chat_id:
-            telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
-            sent_photo_msg = await globals.application_bot.send_photo(
-                chat_id=target_chat_id,
-                photo=compressed_bytes,
-                caption=telegram_caption,
-                parse_mode="HTML",
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=actual_thread_id,
-                disable_notification=silent_alerts
-            )
-            
-            if update_thread_tracker and sent_photo_msg:
-                cam_key = matched_camera_name.lower().strip()
-                if reply_to_message_id is None:
-                    globals.reolink_thread_trackers[cam_key] = {
-                        "message_id": sent_photo_msg.message_id,
-                        "timestamp": datetime.now(USER_TIMEZONE)
-                    }
+        responses = globals.outgoing_responses.get()
+        if responses is not None:
+            responses.append({
+                "type": "photo",
+                "data": b64_image,
+                "caption": f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
+            })
             
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
             logging.info("👁️ VISION [2/2]: Generating scene context...")
@@ -887,11 +883,45 @@ async def get_reolink_snapshot(
             await append_camera_log(matched_camera_name, concise_report, scene_context)
             
             return (
-                f"SUCCESS: Photo sent. Security log updated ({matched_camera_name}, {now_str}). "
+                f"SUCCESS: Photo generated. Security log updated ({matched_camera_name}, {now_str}). "
                 f"You must now output exactly the word 'DONE' and absolutely nothing else as your final response to close the turn."
             )
-            
-        return "Failed to send photo: Chat context lost."
+        else:
+            if target_chat_id:
+                alert_responses = [
+                    {
+                        "type": "photo",
+                        "data": b64_image,
+                        "caption": f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
+                    }
+                ]
+                
+                if update_thread_tracker:
+                    cam_key = matched_camera_name.lower().strip()
+                    globals.reolink_thread_trackers[cam_key] = {
+                        "message_id": int(datetime.now().timestamp()),
+                        "timestamp": datetime.now(USER_TIMEZONE)
+                    }
+
+                # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
+                logging.info("👁️ VISION [2/2]: Generating scene context...")
+                context_prompt = (
+                    f"This is a live feed from the {matched_camera_name} camera{desc_context}.{time_context} "
+                    "Concisely describe the layout, stationary structures, background, "
+                    "and visible inanimate objects in the frame."
+                )
+                scene_context = await get_image_description(b64_image, context_prompt)
+                logging.info(f"👁️ VISION [2/2] Raw Response: '{scene_context}'")
+                
+                # Write to out-of-context log
+                from emery.memory import append_camera_log
+                await append_camera_log(matched_camera_name, concise_report, scene_context)
+
+                from emery.api_helpers import send_responses_to_webhook
+                await send_responses_to_webhook(str(target_chat_id), alert_responses, thinking="Security Alert")
+                
+                return f"SUCCESS: Webhook alert sent for camera {matched_camera_name}."
+            return "Failed to send photo: target_chat_id is missing."
     except Exception as e:
         logging.error(f"❌ Reolink Tool Analysis/Send Crash: {e}", exc_info=True)
         return f"Successfully grabbed the image, but failed to analyze/send it: {e}"
@@ -1009,7 +1039,7 @@ async def trigger_webhook_alert(camera_name: str):
         "message_thread_id": security_topic_id
     })
 
-async def reolink_polling_loop(application):
+async def reolink_polling_loop():
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
         return
         
@@ -1120,153 +1150,11 @@ async def reolink_polling_loop(application):
         except Exception as outer_e:
             logging.error(f"❌ REOLINK POLLING: Global polling loop exception: {outer_e}")
 
-async def start_reolink_polling(application):
+async def start_reolink_polling():
     if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
-        asyncio.create_task(reolink_polling_loop(application))
+        asyncio.create_task(reolink_polling_loop())
 
-# --- EMOJI REACTIONS AND THREADING TOOLS ---
-async def react_to_message(emoji: str, message_id: int = None) -> str:
-    """
-    Reacts to a specific message in the chat with an emoji.
-    If message_id is not specified, it defaults to the latest user message in history.
-    Available standard emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'
-    """
-    chat_id = globals.TARGET_CHAT_ID.get()
-    if not chat_id:
-        return "Error: No active chat session to react to."
-        
-    if not message_id:
-        # Try to find the latest user message in history
-        history = globals.chat_histories.get(chat_id)
-        if history:
-            for msg in reversed(history):
-                if msg.get("role") == "user" and msg.get("message_id"):
-                    message_id = msg.get("message_id")
-                    break
-                    
-    if not message_id:
-        return "Error: Could not determine message ID to react to. Please specify a message_id."
-        
-    try:
-        await globals.application_bot.set_message_reaction(
-            chat_id=chat_id,
-            message_id=message_id,
-            reaction=emoji
-        )
-        return f"Successfully reacted to message {message_id} with {emoji}."
-    except Exception as e:
-        logging.error(f"❌ TOOLS: Failed to react to message {message_id}: {e}")
-        return f"Error setting reaction: {e}"
 
-async def reply_to_message(message_id: int) -> str:
-    """
-    Sets the target message for the bot's final response in this turn to reply directly to a specific previous message.
-    """
-    chat_id = globals.TARGET_CHAT_ID.get()
-    if not chat_id:
-        return "Error: No active chat session."
-    globals.chat_reply_targets[chat_id] = message_id
-    return f"Success: The bot's final message will reply to message ID {message_id}."
-
-async def send_sticker(sticker_id_or_emoji: str) -> str:
-    """
-    Sends a sticker to the chat.
-    You can specify a direct Telegram file ID, or a standard emoji (e.g. '👍', '❤️', '🔥') 
-    to look up a sticker in your learned library.
-    """
-    from telegram import ReplyParameters
-    chat_id = globals.TARGET_CHAT_ID.get()
-    if not chat_id:
-        return "Error: No active chat session."
-        
-    file_id = None
-    if sticker_id_or_emoji in globals.learned_stickers:
-        file_id = globals.learned_stickers[sticker_id_or_emoji]
-    else:
-        file_id = sticker_id_or_emoji
-
-    if not file_id:
-        return f"Error: No sticker found in library for emoji/lookup '{sticker_id_or_emoji}'."
-
-    try:
-        reply_to_id = globals.chat_reply_targets.pop(chat_id, None)
-        reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True) if reply_to_id else None
-        
-        await globals.application_bot.send_sticker(
-            chat_id=chat_id,
-            sticker=file_id,
-            reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID.get()
-        )
-        return f"Successfully sent sticker: {sticker_id_or_emoji}."
-    except Exception as e:
-        logging.error(f"❌ TOOLS: Failed to send sticker: {e}")
-        return f"Error sending sticker: {e}"
-
-async def search_gif(query: str) -> str:
-    """Helper function to search Giphy and Tenor APIs for a GIF matching the query."""
-    # 1. Try Giphy search first (using custom key if provided, fallback to Giphy public beta key)
-    try:
-        giphy_key = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")
-        url = "https://api.giphy.com/v1/gifs/search"
-        params = {"api_key": giphy_key, "q": query, "limit": 1}
-        r = await globals.http_client.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("data"):
-                return data["data"][0]["images"]["original"]["url"]
-    except Exception as e:
-        logging.error(f"❌ TOOLS: Giphy search failed: {e}")
-
-    # 2. Try Tenor search (using custom key if provided, fallback to Tenor default key)
-    try:
-        tenor_key = os.getenv("TENOR_API_KEY", "LIVDTRZ9VRJH")
-        url = "https://tenor.googleapis.com/v2/posts"
-        params = {"key": tenor_key, "q": query, "limit": 1, "client_key": "emerychat"}
-        r = await globals.http_client.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("results"):
-                return data["results"][0]["media_formats"]["gif"]["url"]
-    except Exception as e:
-        logging.error(f"❌ TOOLS: Tenor search failed: {e}")
-
-    return None
-
-async def send_gif(query_or_url: str) -> str:
-    """
-    Sends a GIF (animation) to the chat.
-    Specify a direct URL to a .gif / .mp4 file, or a search query (e.g. 'happy dance', 'confused') 
-    to automatically search and send a matching GIF.
-    """
-    from telegram import ReplyParameters
-    chat_id = globals.TARGET_CHAT_ID.get()
-    if not chat_id:
-        return "Error: No active chat session."
-
-    gif_url = None
-    if query_or_url.startswith("http://") or query_or_url.startswith("https://"):
-        gif_url = query_or_url
-    else:
-        gif_url = await search_gif(query_or_url)
-
-    if not gif_url:
-        return f"Error: Could not find or resolve any GIF for query '{query_or_url}'."
-
-    try:
-        reply_to_id = globals.chat_reply_targets.pop(chat_id, None)
-        reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True) if reply_to_id else None
-        
-        await globals.application_bot.send_animation(
-            chat_id=chat_id,
-            animation=gif_url,
-            reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID.get()
-        )
-        return f"Successfully sent GIF for query/url: '{query_or_url}'."
-    except Exception as e:
-        logging.error(f"❌ TOOLS: Failed to send GIF: {e}")
-        return f"Error sending GIF: {e}"
 
 # --- PORTAINER INTEGRATION TOOLS ---
 def get_portainer_headers():

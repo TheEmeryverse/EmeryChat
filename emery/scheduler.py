@@ -5,8 +5,13 @@ import logging
 import re
 from datetime import datetime, time, timedelta
 from collections import deque
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from emery.config import USER_TIMEZONE, JOBS_FILE_PATH
+from emery.config import (
+    USER_TIMEZONE, JOBS_FILE_PATH, ENABLE_HEARTBEAT,
+    HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
+    HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END
+)
 import emery.globals as globals
 
 WEEKDAYS = {
@@ -19,12 +24,7 @@ WEEKDAYS = {
     "sunday": 6, "sun": 6
 }
 
-
 def parse_duration_to_seconds(val: str) -> int:
-    """
-    Parses duration strings like '1h', '30m', '10s', '1d', or a raw integer string
-    into seconds.
-    """
     val = val.strip().lower()
     if val.isdigit():
         return int(val)
@@ -43,7 +43,6 @@ def parse_duration_to_seconds(val: str) -> int:
     raise ValueError(f"Invalid duration format: '{val}'. Use e.g. '1h', '30m', '10s', '1d', or a number of seconds.")
 
 def load_jobs_from_file() -> list:
-    """Loads scheduled jobs from the custom_jobs.json file."""
     if not os.path.exists(JOBS_FILE_PATH):
         return []
     try:
@@ -54,7 +53,6 @@ def load_jobs_from_file() -> list:
         return []
 
 def save_jobs_to_file(jobs: list):
-    """Saves scheduled jobs to the custom_jobs.json file."""
     try:
         with open(JOBS_FILE_PATH, "w", encoding="utf-8") as f:
             json.dump(jobs, f, indent=2)
@@ -62,37 +60,14 @@ def save_jobs_to_file(jobs: list):
         logging.error(f"❌ SCHEDULER: Error saving jobs file: {e}", exc_info=True)
 
 def remove_job_from_store(job_id: str):
-    """Removes a job definition from the persistent JSON storage."""
     jobs = load_jobs_from_file()
     updated_jobs = [j for j in jobs if j.get("id") != job_id]
     if len(jobs) != len(updated_jobs):
         save_jobs_to_file(updated_jobs)
         logging.info(f"📅 SCHEDULER: Removed job {job_id} from store")
 
-async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
-    """Splits large messages to fit Telegram's character limits."""
-    MAX_LIMIT = 4000
-    if len(text) <= MAX_LIMIT:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
-        return
-
-    while len(text) > 0:
-        if len(text) <= MAX_LIMIT:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
-            break
-            
-        split_index = text.rfind('\n', 0, MAX_LIMIT)
-        if split_index == -1 or split_index < 3000:
-            split_index = MAX_LIMIT
-            
-        chunk = text[:split_index]
-        await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", message_thread_id=message_thread_id)
-        text = text[split_index:].strip()
-
-async def run_custom_job(context):
-    """Callback triggered by APScheduler/JobQueue when a job fires."""
-    job = context.job
-    job_data = job.data
+async def run_custom_job(job_data: dict):
+    """Callback triggered by APScheduler when a scheduled job fires."""
     job_id = job_data.get("id")
     
     # Restore user context for this task
@@ -116,53 +91,24 @@ async def run_custom_job(context):
     is_routine = schedule_type in ("daily", "weekly", "monthly", "yearly", "interval")
     
     if is_routine and route_to_routines:
-        # Automated routine jobs must go to the designated group and topic
-        group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
-        if group_chat_id_env:
-            try:
-                chat_id = int(group_chat_id_env)
-            except ValueError:
-                pass
-                
-        routines_topic_env = os.getenv("ROUTINES_TOPIC_ID")
-        if routines_topic_env:
-            try:
-                message_thread_id = int(routines_topic_env)
-            except ValueError:
-                pass
-    else:
-        # One-off reminders: fallback to CHAT_TOPIC_ID if they have no thread ID
-        if message_thread_id is None:
-            chat_topic_env = os.getenv("CHAT_TOPIC_ID")
-            if chat_topic_env:
-                try:
-                    message_thread_id = int(chat_topic_env)
-                except ValueError:
-                    pass
-
+        # Check environment for alert configurations fallback
+        alert_chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("TELEGRAM_GROUP_CHAT_ID")
+        if alert_chat_id:
+            chat_id = alert_chat_id
+    
     if not chat_id:
         chat_id = globals.TARGET_CHAT_ID.get()
         
     if not chat_id:
-        logging.warning(f"⚠️ Custom job '{description}' ({job_id}) triggered without chat_id.")
-        return
-
+        # Fallback default chat id if none configured
+        chat_id = "default_system_job"
+        
     # Set context variables for target chat and thread/topic
     globals.TARGET_CHAT_ID.set(chat_id)
     globals.CURRENT_THREAD_ID.set(message_thread_id)
-        
-    if schedule_type == "yearly":
-        try:
-            # schedule_value format: "MM-DD HH:MM", e.g., "12-19 08:30"
-            parts = job_data.get("schedule_value", "").split()
-            if parts:
-                target_month = int(parts[0].split("-")[0])
-                now = datetime.now(USER_TIMEZONE)
-                if now.month != target_month:
-                    logging.info(f"📅 SCHEDULER: Skipping yearly job '{job_id}' (month mismatch: {now.month} != {target_month})")
-                    return
-        except Exception as e:
-            logging.error(f"❌ SCHEDULER: Error filtering month for yearly job {job_id}: {e}", exc_info=True)
+    
+    # Initialize request/job-scoped outgoing responses container
+    globals.outgoing_responses.set([])
         
     logging.info(f"📅 SCHEDULER: Running custom job '{description}' ({job_id})")
     from emery.engine import emery_engine
@@ -178,11 +124,11 @@ async def run_custom_job(context):
         if target_user_id == -1:
             from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME
             if SECONDARY_USER_ID != 0:
-                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a> & <a href=\"tg://user?id={SECONDARY_USER_ID}\">{USER_2_NAME}</a>: "
+                mention_prefix = f"{USER_NAME} & {USER_2_NAME}: "
             else:
-                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a>: "
+                mention_prefix = f"{USER_NAME}: "
         elif target_user_id and target_user_id != 0:
-            mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{target_user_name}</a>: "
+            mention_prefix = f"{target_user_name}: "
             
         exec_prompt = prompt
         if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
@@ -203,13 +149,32 @@ async def run_custom_job(context):
             
         # Run the engine with the job prompt
         res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
-        # Send formatted reply
-        await send_safe_job_message(
-            context.bot,
-            chat_id=chat_id,
-            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{mention_prefix}{emery_format(res_text)}",
-            message_thread_id=message_thread_id
-        )
+        
+        # Split reasoning/thinking tag out
+        start_tag = "<" + "think" + ">"
+        end_tag = "</" + "think" + ">"
+        pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+        think_match = re.search(pattern, res_text, re.DOTALL | re.IGNORECASE)
+
+        clean_response = res_text
+        thinking_content = ""
+
+        if think_match:
+            thinking_content = think_match.group(1).strip()
+            clean_response = re.sub(pattern, '', res_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            
+        handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
+        if handshake_check != "DONE" and clean_response:
+            formatted_text = f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{mention_prefix}{emery_format(clean_response)}"
+            globals.outgoing_responses.get().insert(0, {
+                "type": "text",
+                "content": formatted_text
+            })
+            
+        # Dispatch outputs to webhook
+        from emery.api_helpers import send_responses_to_webhook
+        await send_responses_to_webhook(str(chat_id), globals.outgoing_responses.get(), thinking=thinking_content)
+        
     except Exception as e:
         logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
         
@@ -218,18 +183,18 @@ async def run_custom_job(context):
         remove_job_from_store(job_id)
 
 def remove_job_from_queue(job_id: str):
-    """Removes a job from the active Telegram JobQueue."""
-    if globals.application and globals.application.job_queue:
-        current_jobs = globals.application.job_queue.get_jobs_by_name(job_id)
-        if current_jobs:
-            for j in current_jobs:
-                j.schedule_removal()
+    """Removes a job from the active APScheduler queue."""
+    if globals.scheduler:
+        try:
+            globals.scheduler.remove_job(job_id)
             logging.info(f"📅 SCHEDULER: Cancelled job '{job_id}' in queue")
+        except Exception:
+            pass
 
 def schedule_in_tg_queue(job_data: dict) -> bool:
-    """Registers the job in the active Telegram JobQueue based on its configuration."""
-    if not globals.application or not globals.application.job_queue:
-        logging.warning("⚠️ SCHEDULER: Telegram JobQueue is not initialized yet.")
+    """Registers the job in the active APScheduler queue based on its configuration."""
+    if not globals.scheduler:
+        logging.warning("⚠️ SCHEDULER: APScheduler is not initialized yet.")
         return False
         
     job_id = job_data["id"]
@@ -243,24 +208,27 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
         if stype == "daily":
             # HH:MM format
             hour, minute = map(int, sval.split(":"))
-            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
-            globals.application.job_queue.run_daily(
+            globals.scheduler.add_job(
                 run_custom_job,
-                time=time_obj,
-                data=job_data,
-                name=job_id
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled daily '{job_id}' at {sval}")
             return True
             
         elif stype == "interval":
             seconds = parse_duration_to_seconds(sval)
-            globals.application.job_queue.run_repeating(
+            globals.scheduler.add_job(
                 run_custom_job,
-                interval=seconds,
-                first=seconds,
-                data=job_data,
-                name=job_id
+                trigger='interval',
+                seconds=seconds,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled repeating '{job_id}' every {seconds}s")
             return True
@@ -281,11 +249,13 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 remove_job_from_store(job_id)
                 return False
                 
-            globals.application.job_queue.run_once(
+            globals.scheduler.add_job(
                 run_custom_job,
-                when=dt_localized,
-                data=job_data,
-                name=job_id
+                trigger='date',
+                run_date=dt_localized,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled one-off '{job_id}' at {dt_localized.strftime('%Y-%m-%d %H:%M:%S')}")
             return True
@@ -296,13 +266,15 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
             day_name, time_str = parts
             weekday_index = WEEKDAYS[day_name.lower()]
             hour, minute = map(int, time_str.split(":"))
-            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
-            globals.application.job_queue.run_daily(
+            globals.scheduler.add_job(
                 run_custom_job,
-                time=time_obj,
-                days=(weekday_index,),
-                data=job_data,
-                name=job_id
+                trigger='cron',
+                day_of_week=weekday_index,
+                hour=hour,
+                minute=minute,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled weekly '{job_id}' on {day_name}s at {time_str}")
             return True
@@ -313,13 +285,15 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
             dom_str, time_str = parts
             day_of_month = int(dom_str)
             hour, minute = map(int, time_str.split(":"))
-            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
-            globals.application.job_queue.run_monthly(
+            globals.scheduler.add_job(
                 run_custom_job,
-                time=time_obj,
+                trigger='cron',
                 day=day_of_month,
-                data=job_data,
-                name=job_id
+                hour=hour,
+                minute=minute,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled monthly '{job_id}' on day {day_of_month} at {time_str}")
             return True
@@ -330,19 +304,22 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
             date_str, time_str = parts
             month, day = map(int, date_str.split("-"))
             hour, minute = map(int, time_str.split(":"))
-            time_obj = time(hour, minute, tzinfo=USER_TIMEZONE)
-            globals.application.job_queue.run_monthly(
+            globals.scheduler.add_job(
                 run_custom_job,
-                time=time_obj,
+                trigger='cron',
+                month=month,
                 day=day,
-                data=job_data,
-                name=job_id
+                hour=hour,
+                minute=minute,
+                args=[job_data],
+                id=job_id,
+                replace_existing=True
             )
             logging.info(f"📅 SCHEDULER: Scheduled yearly '{job_id}' on {month}-{day} at {time_str}")
             return True
             
     except Exception as e:
-        logging.error(f"❌ SCHEDULER: Failed to schedule job {job_id} in Telegram queue: {e}", exc_info=True)
+        logging.error(f"❌ SCHEDULER: Failed to schedule job {job_id} in scheduler: {e}", exc_info=True)
         return False
         
     return False
@@ -350,17 +327,6 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
 # --- LLM TOOL CALLABLE FUNCTIONS ---
 
 async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str, description: str = None, target_user: str = None, route_to_routines: bool = None) -> str:
-    """
-    Schedule a new automated job/task.
-    
-    Parameters:
-    - schedule_type: 'daily' (e.g. at 08:30), 'interval' (repeating, e.g. every '1h'), or 'once' (one-time date or offset).
-    - schedule_value: The scheduling specification. E.g. '08:30' for daily, '30m' or '3600' for interval, or '2026-05-26 15:30:00' / '15m' for once.
-    - prompt: The text prompt the bot executes when the job runs.
-    - description: A short, user-friendly label/description of the job.
-    - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both').
-    - route_to_routines: Optional boolean. If True, the routine is routed to the global routines topic. If False, it goes to the origin chat.
-    """
     chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session to associate with this job. Run this command from within a chat."
@@ -369,9 +335,8 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         description = f"Reminder: {prompt[:30]}..." if len(prompt) > 30 else f"Reminder: {prompt}"
 
     if route_to_routines is None:
-        # Default to False for DMs (chat_id > 0), True for Groups (chat_id < 0)
-        route_to_routines = False if chat_id > 0 else True
-
+        # Default to False for DMs, True for Groups
+        route_to_routines = False if isinstance(chat_id, int) and chat_id > 0 else True
         
     stype = schedule_type.lower().strip()
     if stype not in ("daily", "interval", "once", "weekly", "monthly", "yearly"):
@@ -379,7 +344,6 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     
-    # Basic input validations before writing to store
     try:
         if stype == "daily":
             if ":" not in schedule_value:
@@ -443,7 +407,6 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         
     creator_user_id = globals.current_user_id.get()
     
-    # Resolve target user
     from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME, get_user_profile
     target_user_id = creator_user_id
     target_name = get_user_profile(creator_user_id)["name"]
@@ -475,22 +438,18 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "created_at": datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    # Save definition to persistent store
     jobs = load_jobs_from_file()
     jobs.append(job_data)
     save_jobs_to_file(jobs)
     
-    # Schedule inside Telegram's job queue
     success = schedule_in_tg_queue(job_data)
     if success:
         return f"Successfully scheduled job '{description}' (ID: {job_id}) to run with trigger '{stype}' and schedule '{schedule_value}'."
     else:
-        # Rollback from store if scheduling failed
         remove_job_from_store(job_id)
-        return "Error: Failed to register job in Telegram's active job queue."
+        return "Error: Failed to register job in scheduler queue."
 
 async def list_scheduled_jobs() -> str:
-    """Lists all active custom scheduled jobs."""
     jobs = load_jobs_from_file()
     if not jobs:
         return "No custom scheduled jobs are currently configured."
@@ -506,7 +465,6 @@ async def list_scheduled_jobs() -> str:
     return "\n\n".join(lines)
 
 async def remove_scheduled_job(job_id: str) -> str:
-    """Cancels and removes a custom job by its unique ID."""
     job_id = job_id.strip()
     jobs = load_jobs_from_file()
     job_to_remove = next((j for j in jobs if j["id"] == job_id), None)
@@ -514,18 +472,153 @@ async def remove_scheduled_job(job_id: str) -> str:
     if not job_to_remove:
         return f"Error: No scheduled job found with ID '{job_id}'."
         
-    # Cancel in telegram queue
     remove_job_from_queue(job_id)
-    
-    # Remove from persistent JSON store
     remove_job_from_store(job_id)
     
     return f"Successfully cancelled and removed job '{job_to_remove['description']}' (ID: `{job_id}`)."
 
-# --- STARTUP FUNCTION ---
+# --- HEARTBEAT & SLEEP CHECKINS ---
+
+async def heartbeat_check():
+    """Callback for APScheduler that runs periodically to check if the bot should spontaneously send a message."""
+    if not ENABLE_HEARTBEAT:
+        return
+        
+    logging.info("💓 HEARTBEAT: Checking activity...")
+    
+    group_chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("TELEGRAM_GROUP_CHAT_ID")
+    if not group_chat_id:
+        logging.info("💓 HEARTBEAT: No target chat ID set, skipping heartbeat activity check.")
+        return
+        
+    history = globals.chat_histories.get(group_chat_id)
+    if not history:
+        return
+        
+    now = datetime.now(USER_TIMEZONE)
+    
+    try:
+        from datetime import time
+        start_h, start_m = map(int, HEARTBEAT_SLEEP_START.split(':'))
+        end_h, end_m = map(int, HEARTBEAT_SLEEP_END.split(':'))
+        start_time = time(start_h, start_m)
+        end_time = time(end_h, end_m)
+        curr_time = now.time()
+        
+        is_asleep = False
+        if start_time <= end_time:
+            if start_time <= curr_time <= end_time:
+                is_asleep = True
+        else:
+            if curr_time >= start_time or curr_time <= end_time:
+                is_asleep = True
+                
+        if is_asleep:
+            logging.info(f"💓 HEARTBEAT: Suppressed check-in (inside sleep window: {HEARTBEAT_SLEEP_START}-{HEARTBEAT_SLEEP_END})")
+            return
+    except Exception as e:
+        logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
+        
+    last_msg = history[-1]
+    last_time = last_msg.get("timestamp")
+    
+    if not last_time:
+        last_msg["timestamp"] = now
+        return
+        
+    elapsed = (now - last_time).total_seconds()
+    if elapsed > HEARTBEAT_SILENCE_THRESHOLD_SECONDS:
+        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} silent for {elapsed:.1f}s, evaluating check-in...")
+        await handle_heartbeat_trigger(group_chat_id)
+
+async def handle_heartbeat_trigger(chat_id: str):
+    """Triggers the model to check in on a silent chat."""
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(None)
+    globals.outgoing_responses.set([])
+    
+    trigger_content = (
+        f"[System Trigger (Heartbeat)]: It has been several hours since the last message in this chat. "
+        f"Review the conversation history. You should be extremely conservative about initiating contact. "
+        f"Only send a message if there is an important outstanding question, a topic you promised to follow up on, "
+        f"or a highly natural reason to check in. If the conversation has reached a natural pause, or if a human "
+        f"would typically let it rest, you MUST reply with exactly 'DONE' to remain completely silent. Do not send conversational filler."
+    )
+    
+    trigger_msg = {
+        "role": "user",
+        "content": trigger_content,
+        "is_heartbeat_trigger": True,
+        "timestamp": datetime.now(USER_TIMEZONE)
+    }
+    
+    globals.chat_histories[chat_id].append(trigger_msg)
+    
+    try:
+        from emery.engine import emery_engine
+        response_text, _ = await emery_engine(globals.chat_histories[chat_id])
+    except Exception as e:
+        logging.error(f"Error executing heartbeat engine: {e}")
+        response_text = "DONE"
+        
+    if trigger_msg in globals.chat_histories[chat_id]:
+        globals.chat_histories[chat_id].remove(trigger_msg)
+        
+    start_tag = "<" + "think" + ">"
+    end_tag = "</" + "think" + ">"
+    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
+    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+    
+    clean_response = response_text
+    thinking_content = ""
+    
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+    handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
+    if handshake_check == "DONE":
+        logging.info(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
+        if globals.chat_histories[chat_id]:
+            globals.chat_histories[chat_id][-1]["timestamp"] = datetime.now(USER_TIMEZONE)
+        return
+        
+    globals.chat_histories[chat_id].append({
+        "role": "assistant",
+        "content": response_text,
+        "timestamp": datetime.now(USER_TIMEZONE)
+    })
+    
+    from emery.helpers import emery_format
+    globals.outgoing_responses.get().insert(0, {
+        "type": "text",
+        "content": emery_format(clean_response)
+    })
+    
+    from emery.api_helpers import send_responses_to_webhook
+    await send_responses_to_webhook(str(chat_id), globals.outgoing_responses.get(), thinking=thinking_content)
+
+# --- STARTUP FUNCTIONS ---
+
+def start_scheduler():
+    """Initializes and starts the AsyncIOScheduler instance."""
+    if globals.scheduler is None:
+        globals.scheduler = AsyncIOScheduler(timezone=USER_TIMEZONE)
+        globals.scheduler.start()
+        logging.info("📅 SCHEDULER: APScheduler AsyncIOScheduler started.")
+        
+        # Register Heartbeat spontaneous check-in task
+        if ENABLE_HEARTBEAT:
+            globals.scheduler.add_job(
+                heartbeat_check,
+                trigger='interval',
+                seconds=HEARTBEAT_INTERVAL_SECONDS,
+                id="heartbeat_checker",
+                replace_existing=True
+            )
+            logging.info(f"💓 HEARTBEAT: Spontaneous heartbeat active (checking every {HEARTBEAT_INTERVAL_SECONDS}s)")
 
 def load_and_register_all_jobs():
-    """Loads all saved custom jobs from file and schedules them in the queue on boot."""
     jobs = load_jobs_from_file()
     count = 0
     for job_data in jobs:
@@ -533,22 +626,15 @@ def load_and_register_all_jobs():
             count += 1
     logging.info(f"📅 SCHEDULER: Loaded {count}/{len(jobs)} persistent jobs")
 
-def update_jobs_with_chat_id(chat_id: int):
-    """
-    Checks if any persistent scheduled jobs have a null/missing chat_id,
-    updates them with the provided chat_id, saves the file, and reschedules them.
-    This dynamically registers placeholder default jobs once the first user message is received.
-    """
+def update_jobs_with_chat_id(chat_id: str):
     jobs = load_jobs_from_file()
     updated = False
     for job_data in jobs:
         if job_data.get("chat_id") is None:
             job_data["chat_id"] = chat_id
             logging.info(f"📅 SCHEDULER: Associated job '{job_data['id']}' with chat {chat_id}")
-            # Reschedule it so it uses the updated chat_id in memory
             schedule_in_tg_queue(job_data)
             updated = True
             
     if updated:
         save_jobs_to_file(jobs)
-

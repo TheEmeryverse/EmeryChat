@@ -11,19 +11,23 @@ COPY emery/ ./emery/
 
 # Install all dependencies including python-dotenv
 RUN pip install --no-cache-dir \
-    "python-telegram-bot[job-queue]" \
+    fastapi \
+    uvicorn \
+    apscheduler \
     httpx \
     requests \
     Pillow \
     feedparser \
     psutil \
     pytz \
-    tghtml \
     markdown \
     python-dotenv \
     google-api-python-client \
     google-auth-httplib2 \
     google-auth-oauthlib
+
+# Expose HTTP port
+EXPOSE 8000
 
 # Command to run the bot
 CMD ["python", "main.py"]

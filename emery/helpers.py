@@ -5,7 +5,6 @@ import io
 import markdown
 from datetime import datetime, timedelta
 import pytz
-from tghtml import TgHTML
 from PIL import Image
 
 from emery.config import (
@@ -20,18 +19,10 @@ import emery.globals as globals
 def emery_format(text): 
     try:
         # Convert Markdown to HTML
-        html_content = markdown.markdown(text, extensions=['extra', 'sane_lists'])
-        
-        # Replace list tags with simple text equivalents that Telegram likes
-        html_content = html_content.replace("<ul>", "").replace("</ul>", "")
-        html_content = html_content.replace("<ol>", "").replace("</ol>", "")
-        html_content = html_content.replace("<li>", "• ").replace("</li>", "<br/>")
-        
-        # Now let TgHTML clean up the rest
-        return TgHTML(html_content).parsed
+        return markdown.markdown(text, extensions=['extra', 'sane_lists'])
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
-        return text.replace("**", "<b>").replace("**", "</b>")
+        return text
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription
     logging.info("👂 VOICE: Transcribing...")
@@ -413,23 +404,6 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
         "(exceeds 1,500 characters) or highly repetitive."
     )
 
-    reaction_instruction = (
-        "\n- You can react to any message in the chat with an emoji using the `react_to_message` tool. "
-        "Use this for normal texting interaction when a full text response is not needed, or in addition to text. "
-        "Use reactions sparingly and only when highly natural (e.g. laughing at a joke, showing appreciation, or a simple status check-in). Do not react to every message. "
-        "If you only want to react to a message and send no text response, call the `react_to_message` tool and then respond with exactly 'DONE'."
-        "\n- You can send a Telegram sticker using the `send_sticker` tool, and you can send a GIF (animation) using the `send_gif` tool. "
-        "Use stickers and GIFs contextually and naturally (just like a human participant in the chat would). "
-        "If the user sends you a sticker or a GIF, you can choose to respond with a text message, react with an emoji, or send a sticker/GIF back. "
-        "If you only want to send a sticker or a GIF without any text response, call `send_sticker` or `send_gif` and then respond with exactly 'DONE'."
-    )
-
-    reply_instruction = (
-        "\n- You can quote/thread your response to a specific message using the `reply_to_message` tool. "
-        "Use this ONLY when you want to explicitly quote an older message from earlier in the conversation, or if the user asks a question about a specific past message. "
-        "DO NOT use this tool for normal back-and-forth messaging. For normal replies, just write your response text directly without calling this tool."
-    )
-
     camera_log_hint = ""
     if re.sub(r'[^a-zA-Z]', '', os.getenv("ENABLE_REOLINK", "false")).lower() == "true":
         try:
@@ -463,7 +437,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{group_privacy_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{group_privacy_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.
