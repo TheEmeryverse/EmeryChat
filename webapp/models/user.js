@@ -4,7 +4,7 @@ const _ = require('lodash')
 
 const findUserByName = (name) => new Promise ((resolve, reject) => {
     try {
-        const name_query = name.toLowerCase()
+        const name_query = name
         database.main.view('user', 'forName', {
             keys: [name_query],
             include_docs: true,
@@ -22,6 +22,7 @@ module.exports.findById = async id => {
     if (doc && doc.type === 'user') return doc
     return false
 }
+
 const findByIds = (ids = []) => new Promise ((resolve, reject) => {
     try {
         database.main.view('user', 'all', {

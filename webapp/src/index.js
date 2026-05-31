@@ -8,8 +8,8 @@ import {
     createRoute
   } from '@tanstack/react-router'
 import { Home } from './home'
-// import { Login } from './login'
-// import { SignUp } from './signup'
+import { Login } from './login'
+import { SignUp } from './signup'
 import './styles.css';
 
 const rootRoute = createRootRoute()
@@ -20,21 +20,21 @@ const indexRoute = createRoute({
     component: Home,
 })
 
-// const loginRoute = createRoute({
-//   getParentRoute: () => rootRoute,
-//   path: 'login',
-//   component: Login,
-// })
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'login',
+  component: Login,
+})
 
-// const signupRoute = createRoute({
-//   getParentRoute: () => rootRoute,
-//   path: 'signup',
-//   component: SignUp,
-// })
+const signupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'signup',
+  component: SignUp,
+})
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  // loginRoute, signupRoute
+  loginRoute, signupRoute
 ])
 
 // Create a new router instance

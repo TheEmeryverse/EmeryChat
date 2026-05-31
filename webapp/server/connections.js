@@ -29,13 +29,13 @@ function connectDatabase() {
 }
 
 const setHeaders = (res) => {
-    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:4000')
+    res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 }
 
 const corsOptions = {
-    origin: 'http://localhost:4000',
+    origin: process.env.FRONTEND_URL,
     credentials: true,
     methods: "GET, POST, PUT, DELETE",
     optionsSuccessStatus: 200 // some legacy browsers (IE11, various SmartTVs) choke on 204
