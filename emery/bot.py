@@ -18,7 +18,7 @@ from emery.config import (
 import emery.globals as globals
 from emery.helpers import (
     emery_format, transcribe_audio, compress_image_bytes,
-    get_image_description
+    get_image_description, clean_thinking_tags
 )
 from emery.memory import wipe_memory
 from emery.engine import emery_engine
@@ -143,7 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for msg in globals.chat_histories[chat_id]:
             if msg.get("message_id") == reply_to_id or (isinstance(msg.get("message_ids"), list) and reply_to_id in msg["message_ids"]):
                 replied_text = msg.get("content", "")
-                replied_text = re.sub(r'<think>.*?</think>', '', replied_text, flags=re.DOTALL | re.IGNORECASE).strip()
+                replied_text = clean_thinking_tags(replied_text)
                 break
         if not replied_text:
             replied_text = reply_to.text or "[Non-text message]"
@@ -503,7 +503,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     for msg in globals.chat_histories.get(chat_id, []):
         if msg.get("message_id") == message_id or (isinstance(msg.get("message_ids"), list) and message_id in msg["message_ids"]):
             msg_text = msg.get("content", "")
-            msg_text = re.sub(r'<think>.*?</think>', '', msg_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            msg_text = clean_thinking_tags(msg_text)
             break
             
     if not msg_text:

@@ -11,7 +11,7 @@ from emery.config import (
 # Re-import ENABLE_SYSTEM_STATS & ENABLE_NEST which are checked in main.py but also here
 # ENABLE_SYSTEM_STATS might not have been defined as a direct flag, but is checked: is_enabled("ENABLE_SYSTEM_STATS")
 import emery.globals as globals
-from emery.helpers import get_current_system_prompt
+from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
 from emery.memory import save_user_memory, get_camera_security_log
 
 # Import all tools from tools.py
@@ -670,7 +670,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     content_str = "[Image base64 data removed]"
                 else:
                     if msg.get("role") == "assistant":
-                        content_str = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                        content_str = clean_thinking_tags(content)
                     else:
                         content_str = content
             else:
@@ -768,6 +768,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             # Strip hallucinated [ID: ...] prefixes that the model imitated from history formatting
             content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
             content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
+            
+            # Normalize Gemma 4 reasoning tags into standard <think> tags
+            content = normalize_gemma_thinking(content)
 
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             if reasoning:

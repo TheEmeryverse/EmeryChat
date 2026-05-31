@@ -17,8 +17,57 @@ from emery.config import (
 )
 import emery.globals as globals
 
+def normalize_gemma_thinking(text: str) -> str:
+    if not text:
+        return ""
+    # Convert complete Gemma 4 channel thought to standard <think> tags
+    pattern_complete = re.compile(
+        r'(?:se\s*\n|response\s*\n)?<\|channel>thought\s*(.*?)\s*<channel\|>(?:\s*response)?',
+        re.DOTALL | re.IGNORECASE
+    )
+    text = pattern_complete.sub(r'<think>\1</think>', text)
+    
+    # Strip standalone/unclosed tags and template artifacts
+    pattern_unclosed = re.compile(
+        r'(?:se\s*\n|response\s*\n)?<\|channel>thought\s*',
+        re.IGNORECASE
+    )
+    text = pattern_unclosed.sub('', text)
+    text = re.sub(r'<channel\|>(?:\s*response)?', '', text, flags=re.IGNORECASE)
+    
+    # Clean up any loose escaped versions
+    text = text.replace(r'\<|channel>thought', '')
+    text = text.replace(r'\<|channel&gt;thought', '')
+    
+    return text.strip()
+
+def clean_thinking_tags(text: str) -> str:
+    if not text:
+        return ""
+    # Strip complete standard think tags
+    text = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', text, flags=re.DOTALL)
+    # Strip unclosed standard think tags
+    text = re.sub(r'<[tT]hink>.*', '', text, flags=re.DOTALL)
+    text = re.sub(r'</?[tT]hink>', '', text)
+    
+    # Strip complete Gemma 4 channel thought blocks
+    text = re.sub(r'(?:se\s*\n|response\s*\n)?<\|channel>thought\s*.*?\s*<channel\|>(?:\s*response)?', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Strip unclosed Gemma 4 channel thought blocks
+    text = re.sub(r'(?:se\s*\n|response\s*\n)?<\|channel>thought\s*', '', text, flags=re.IGNORECASE)
+    # Strip any loose end tags
+    text = re.sub(r'<channel\|>(?:\s*response)?', '', text, flags=re.IGNORECASE)
+    
+    # Clean up any loose escaped versions
+    text = text.replace(r'\<|channel>thought', '')
+    text = text.replace(r'\<|channel&gt;thought', '')
+    
+    return text.strip()
+
 def emery_format(text): 
     try:
+        # Strip thinking blocks from the text to prevent them from leaking into formatted outputs (like custom jobs)
+        text = clean_thinking_tags(text)
+        
         # Convert Markdown to HTML
         html_content = markdown.markdown(text, extensions=['extra', 'sane_lists'])
         
@@ -28,10 +77,16 @@ def emery_format(text):
         html_content = html_content.replace("<li>", "• ").replace("</li>", "<br/>")
         
         # Now let TgHTML clean up the rest
-        return TgHTML(html_content).parsed
+        parsed_html = TgHTML(html_content).parsed
+        
+        # Fix bugs in TgHTML escaping of HTML entities (e.g. \&amp;, \&lt;, \&gt;)
+        parsed_html = parsed_html.replace(r"\&amp;", "&amp;").replace(r"\&lt;", "&lt;").replace(r"\&gt;", "&gt;")
+        
+        return parsed_html
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
         return text.replace("**", "<b>").replace("**", "</b>")
+
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription
     logging.info("👂 VOICE: Transcribing...")
