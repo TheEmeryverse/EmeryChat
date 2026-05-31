@@ -7,7 +7,7 @@ import {
 
 const fetchUserData = async (setUserData) => {
     try {
-        const response = await fetch('http://localhost:3000/user/me', { credentials: 'include' })
+        const response = await fetch('http://localhost:3002/user/me', { credentials: 'include' })
         const data = await response.json()
         // console.log(data)
         if (data.channels) {

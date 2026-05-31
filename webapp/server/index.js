@@ -54,5 +54,5 @@ require('./middleware/session.js').then(session => {
     app.use('/api', require('./routes/api.js'))
     
     
-    http.listen(3000, () => console.log('Server running on port 3000'))
+    http.listen(3002, () => console.log('Server running on port 3002'))
 })

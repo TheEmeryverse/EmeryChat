@@ -1,7 +1,7 @@
 import io from 'socket.io-client';
 
 // Create socket connection
-const socket = io('http://localhost:3000', {
+const socket = io('http://localhost:3002', {
     withCredentials: true,
     transports: ['websocket', 'polling'],
     reconnection: true,

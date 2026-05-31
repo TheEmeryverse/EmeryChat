@@ -68,7 +68,7 @@ export const SignUp = () => {
         try {
             const headers = new Headers();
             headers.append("Content-Type", "application/json")
-            const response = await fetch('http://localhost:3000/user/signup', {
+            const response = await fetch('http://localhost:3002/user/signup', {
                 method: 'POST',
                 body: JSON.stringify({
                     password,
