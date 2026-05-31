@@ -9,7 +9,6 @@ const fetchUserData = async (setUserData) => {
     try {
         const response = await fetch('http://localhost:3002/user/me', { credentials: 'include' })
         const data = await response.json()
-        // console.log(data)
         if (data.channels) {
             setUserData({...data})
         }
@@ -19,12 +18,12 @@ const fetchUserData = async (setUserData) => {
     }
 }
 
-const ping = (userData) => {
-    const {session, _id} = userData
-    if (session) {
-        socket.emit('register_online', {session, _id});
-    }
-}
+// const ping = (userData) => {
+//     const {session, _id} = userData
+//     if (session) {
+//         socket.emit('register_online', {session, _id});
+//     }
+// }
 
 export const Home = () => {
 
@@ -34,17 +33,15 @@ export const Home = () => {
         fetchUserData(setUserData)
     }, [setUserData])
 
-    React.useEffect(() => {
-        if (userData.channels?.length && !currentChannel._id) {
-            setInterval(() => {ping(userData)}, 5000)
-        }
-    }, [userData.channels])
-
     return <>
         <div className='backdrop'/>
         <div className="header">Emery Chat</div>
         <div className="content_wrapper">
-            <TextChat />
+            {userData._id ? 
+            <TextChat
+                userData={userData}
+                socket={socket}
+            /> : <></>}
         </div>
     </>
 }

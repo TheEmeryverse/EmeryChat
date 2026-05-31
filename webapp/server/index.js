@@ -1,8 +1,18 @@
 require('../env.js')
 const cors = require('cors')
+const {rateLimit} = require('express-rate-limit')
 const passport = require('./middleware/passport.js')
 const {connectDatabase, corsOptions, database} = require('./connections.js')
 const authentication = require('./middleware/authentication.js')
+
+const limiter = rateLimit({
+	windowMs: 1000 * 10,
+	limit: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes).
+	standardHeaders: 'draft-8', // draft-6: `RateLimit-*` headers; draft-7 & draft-8: combined `RateLimit` header
+	legacyHeaders: false, // Disable the `X-RateLimit-*` headers.
+	ipv6Subnet: 56, // Set to 60 or 64 to be less aggressive, or 52 or 48 to be more aggressive
+	// store: ... , // Redis, Memcached, etc. See below.
+})
 
 connectDatabase()
 while(!database.main) {}
@@ -21,6 +31,7 @@ const io = require('socket.io')(http, {
 app.disable("X-Powered-By")
 app.set("trust proxy", 1)
 app.use(cors(corsOptions))
+app.use(limiter)
 
 app.use(function(req, res, next) {
     res.header("Access-Control-Allow-Credentials", true);
@@ -51,7 +62,8 @@ require('./middleware/session.js').then(session => {
         require('./socket/index.js')(io, socket);
     })
 
-    app.use('/api', require('./routes/api.js'))
+    // app.use('/api', require('./routes/api.js'))
+    app.use('/chat', require('./routes/chat.js'))
     
     
     http.listen(3002, () => console.log('Server running on port 3002'))

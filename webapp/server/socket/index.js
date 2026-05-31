@@ -20,20 +20,20 @@ const socket = (io, socket) => {
     //   console.log(`User ${socket.id} joined channel ${channelId}`);
     // });
     
-    socket.on('join-channel', (channelId) => {
-      socket.join(channelId);
-      console.log(`User ${socket.id} joined channel ${channelId}`);
+    socket.on('join-channel', (chatID) => {
+      socket.join(chatID);
+      console.log(`User ${socket.id} joined channel ${chatID}`);
     });
     
-    socket.on('leave-channel', (channelId) => {
-      socket.leave(channelId);
-      console.log(`User ${socket.id} left channel ${channelId}`);
+    socket.on('leave-channel', (chatID) => {
+      socket.leave(chatID);
+      console.log(`User ${socket.id} left channel ${chatID}`);
     });
     
-    socket.on('send-message', (data) => {
-      const {channelId, chatID} = data
+    socket.on('send-message', (chatID) => {
+        console.log('bc to: ', chatID)
       // Broadcast to all users in the channel
-      io.to(channelId).emit('receive-message', chatID)
+      io.to(chatID).emit('receive-message', chatID)
     })
     
     socket.on('disconnect', () => {

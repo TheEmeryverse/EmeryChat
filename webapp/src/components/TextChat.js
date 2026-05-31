@@ -6,13 +6,80 @@ const hideSendButton = true
 const colors = {
     owner: '#daa520',
     admin: '#ca20d9',
-    member: '#208fd9'
+    member: '#208fd9',
+    bot: '#D3D3FF'
+}
+
+const sendChat = async (content) => {
+
+    if (!content.text) {
+        // later, we can check for attachments as well
+        return false
+    }
+
+    try {
+        const headers = new Headers();
+        headers.append("Content-Type", "application/json");
+        const response = await fetch('http://localhost:3002/chat/message', {
+            method: 'POST',
+            body: JSON.stringify({
+                content: content.text,
+                attactments: content.attactments,
+                chat_id: content.id
+            }),
+            credentials: 'include',
+            headers,
+        })
+        const res = await response
+        if (res.status === 401) {
+            return false
+        } else {
+            try {
+                const body = await res.json()
+                socket.emit('send-message', content.id)
+                document.getElementById('Chat_Input').value = ''
+                inputText('')
+                return body
+            } catch (error) {
+                return false
+            }
+        }
+    } catch (error) {
+        console.log('failed to login: ', error)
+    }
+}
+
+const fetchorCreateChat = async (updateCurrentChat) => {
+    try {
+        const response = await fetch(`http://localhost:3002/chat/forUser`, { credentials: 'include' })
+        const data = await response.json()
+        if (data.success) {
+            updateCurrentChat(data.chat_data)
+        }
+    } catch {
+        console.log('failed to connect to server')
+    }
+}
+
+const fetchNewMessages = async (id, updateCurrentChat) => {
+    try {
+        console.log(id)
+        const response = await fetch(`http://localhost:3002/chat/${id}`, { credentials: 'include' })
+        const data = await response.json()
+        if (data.success) {
+            updateCurrentChat(data.chat_data)
+        }
+    } catch {
+        console.log('failed to connect to server')
+    }
 }
 
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 export const TextChat = (props) => {
-    const [messages, updateMessages] = React.useState([])
+    const {userData, socket} = props
+    const [currentChat, updateCurrentChat] = React.useState(false)
+    const [inputtedText, inputText] = React.useState('')
 
     const seenDates = {}
     const seenTimes = {}
@@ -85,8 +152,19 @@ export const TextChat = (props) => {
         </>
     }
 
-    socket.on("receive-message", (chatID) => {
+    React.useEffect(() => {
+        if (!currentChat) {
+            // fetchNewMessages(userData._id, updateMessages)
+            fetchorCreateChat(updateCurrentChat)
+        } else if (currentChat._id) {
+            console.log('joined')
+            socket.emit('join-channel', currentChat._id)
+        }
+    }, [currentChat])
+
+    socket.once("receive-message", (chatID) => {
         // currentChat._id check ? idk yet.
+        fetchNewMessages(chatID, updateCurrentChat)
     })
 
     const handleKeyDown = (event) => {
@@ -94,8 +172,7 @@ export const TextChat = (props) => {
             sendChat({
                 text: inputtedText,
                 id: currentChat._id,
-                attactments: [],
-                channelID: channelData._id,
+                attactments: []
             }, inputText)
         }
       }
@@ -103,9 +180,9 @@ export const TextChat = (props) => {
     return <div className="content_block chat_block">
 
         <div className='Chat_Messages_Container'>
-            {messages ?
-                messages.map((message, i) =>
-                    <MessageContent key={message.timestamp} message={message} memberDetails={memberDetails} i={i} total={messages.length}/>
+            {currentChat?.messages ?
+                currentChat.messages.map((message, i) =>
+                    <MessageContent key={message.timestamp} message={message} memberDetails={currentChat.memberDetails} i={i} total={currentChat.messages.length}/>
                 ) : <></>
             }
         </div>
@@ -129,8 +206,7 @@ export const TextChat = (props) => {
                     sendChat({
                         text: inputtedText,
                         id: currentChat._id,
-                        attactments: [],
-                        channelID: channelData._id,
+                        attactments: []
                     }, inputText)
                 }}
             /> : <></>}

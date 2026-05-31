@@ -20,6 +20,18 @@ async function recreateDesignDocs() {
           }
         },
         language: "javascript"
+      },
+      {
+        _id: '_design/chat',
+        views: {
+          forOwner: {
+            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc.owner, {\n      _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages    })\n  }\n}"
+          },
+          all: {
+            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc._id, {\n      _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages    });\n  }\n}"
+          }
+        },
+        language: "javascript"
       }
     ];
 
