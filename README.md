@@ -52,8 +52,7 @@ The project is built around a simple operating model:
 ├── memory.md                   # Primary user memory file
 ├── camera_log.md               # Camera/security log storage
 ├── Dockerfile
-├── docker-compose.yml
-└── tests/
+└── docker-compose.yml
 ```
 
 ## Architecture
@@ -401,7 +400,3 @@ You likely started Docker before creating the bind-mounted files. Stop the conta
 - Re-run `python generate_google_token.py`.
 - Confirm the expected token files exist in the repo root.
 - Make sure your OAuth app is configured correctly in Google Cloud.
-
-## Tests
-
-The repo includes verification scripts in [tests](/Users/hudson/Documents/GitHub/EmeryChat/tests) for targeted behaviors such as formatting, finance, weather, camera log handling, and coprocessor delegation.
