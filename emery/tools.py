@@ -1996,7 +1996,18 @@ async def reolink_polling_loop(application):
     host = REOLINK_HOST
     user = REOLINK_USER
     password = REOLINK_PASSWORD
-    camera_map = {name: str(channel).strip() for name, channel in REOLINK_CAMERAS.items()}
+    camera_map = {}
+    for name, channel in REOLINK_CAMERAS.items():
+        clean_name = str(name).strip()
+        clean_channel = str(channel).strip()
+        if not clean_name or not clean_channel:
+            continue
+        try:
+            camera_map[clean_name] = str(int(clean_channel))
+        except (TypeError, ValueError):
+            logging.warning(
+                f"⚠️ REOLINK POLLING: Skipping camera '{clean_name}' because channel is invalid: {channel!r}"
+            )
             
     if not camera_map:
         logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Check config/integrations.json.")

@@ -41,6 +41,29 @@ def _normalize_optional_int(value):
         return None
 
 
+def _normalize_reolink_channel_map(raw_cameras):
+    cameras = {}
+    if not isinstance(raw_cameras, dict):
+        return cameras
+
+    for name, channel in raw_cameras.items():
+        clean_name = str(name).strip()
+        clean_channel = str(channel).strip()
+        if not clean_name or not clean_channel:
+            continue
+
+        try:
+            cameras[clean_name] = str(int(clean_channel))
+        except (TypeError, ValueError):
+            logging.warning(
+                "Skipping Reolink camera '%s' because channel value is not an integer: %r",
+                clean_name,
+                channel,
+            )
+
+    return cameras
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
 USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
@@ -166,12 +189,7 @@ def _normalize_integrations_config(raw):
     reolink = raw.get("reolink", {}) if isinstance(raw, dict) else {}
     nest = raw.get("nest", {}) if isinstance(raw, dict) else {}
 
-    cameras = {}
-    for name, channel in reolink.get("cameras", {}).items():
-        clean_name = str(name).strip()
-        clean_channel = str(channel).strip()
-        if clean_name and clean_channel:
-            cameras[clean_name] = clean_channel
+    cameras = _normalize_reolink_channel_map(reolink.get("cameras", {}))
 
     camera_descriptions = {}
     for name, description in reolink.get("camera_descriptions", {}).items():
