@@ -154,9 +154,9 @@ You can run EmeryChat directly using Python or inside a Docker container.
    ```bash
    touch memory.md token.json nest_token.json credentials.json nest_credentials.json
    ```
-   > **Secondary User Memory:** If you have configured a secondary user (`SECONDARY_USER_ID` + `USER_2_NAME`), you must also pre-create their memory file. The filename is derived automatically from `MEMORY_FILE_PATH` and `USER_2_NAME` (lowercased, spaces replaced with underscores). For example, if `MEMORY_FILE_PATH=memory.md` and `USER_2_NAME=Anyssa`, create:
+   > **Secondary User Memory:** If you have configured a secondary user (`SECONDARY_USER_ID` + `USER_2_NAME`), you must also pre-create their memory file. The filename is derived automatically from `MEMORY_FILE_PATH` and `USER_2_NAME` (lowercased, spaces replaced with underscores). For example, if `MEMORY_FILE_PATH=memory.md` and `USER_2_NAME=Secondary User`, create:
    > ```bash
-   > touch memory_anyssa.md
+   > touch memory_secondary_user.md
    > ```
    > Without this step, Docker will create a **directory** at that path instead of a file, breaking memory storage for the secondary user.
 2. **Build and start the container** in detached mode:
@@ -181,7 +181,7 @@ Unlike typical single-user personal assistants, EmeryChat is designed to act as 
 ### 1. Dynamic Profiles & Memory Segregation
 * **Context Sharing:** Family members share the exact same group chat history buffer (`globals.chat_histories[chat_id]`), letting the bot understand the collective discussion context.
 * **Identified Senders:** The bot prefixes incoming messages in its context history with the sender's name (e.g. `Alice: Hello!` or `Bob: Hey!`), allowing the LLM to know exactly who said what.
-* **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse). The secondary user's filename is derived from `MEMORY_FILE_PATH` and `USER_2_NAME` — for example, `memory.md` + `USER_2_NAME=Anyssa` → `memory_anyssa.md`.
+* **Segmented Long-Term Memory:** When the bot saves a fact (via `save_user_memory`), it automatically resolves the speaker's Telegram ID to write to their specific memory file (e.g., `memory.md` for the primary user, or `memory_<wife_name>.md` for the spouse). The secondary user's filename is derived from `MEMORY_FILE_PATH` and `USER_2_NAME` — for example, `memory.md` + `USER_2_NAME=Secondary User` → `memory_secondary_user.md`.
   > **⚠️ Docker Users:** The secondary user's memory file is **not** included in `docker-compose.yml` by default because the filename depends on your `USER_2_NAME`. You must add it manually as a volume mount and pre-create the file on the host before starting the container. See [Step 5 (Docker Setup)](#option-b-running-with-docker-compose-recommended) for details.
 * **Cross-User Memory Access:** During prompt generation, the bot retrieves matching facts from *both* family members' memory files (labeling them clearly as active partner memories vs. spouse memories). This allows the LLM to hold background knowledge about the spouse's preferences and logs during a conversation with the primary user (and vice versa), behaving like an organic, connected family assistant.
 
