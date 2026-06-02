@@ -23,10 +23,200 @@ from emery.config import (
     IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, raw_cal_string,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,
     OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME,
-    ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY
+    ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY,
+    FRED_API_KEY, ALPHA_VANTAGE_API_KEY
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
+
+
+def _format_large_number(value):
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+
+    abs_num = abs(num)
+    suffixes = [
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ]
+    for threshold, suffix in suffixes:
+        if abs_num >= threshold:
+            return f"{num / threshold:.2f}{suffix}"
+    if num.is_integer():
+        return str(int(num))
+    return f"{num:.2f}"
+
+
+def _format_decimal(value, digits=2):
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{num:.{digits}f}"
+
+
+def _fred_error_prefix():
+    if not FRED_API_KEY:
+        return "FRED error: FRED_API_KEY is not configured in your .env file."
+    return None
+
+
+def _alpha_vantage_error_prefix():
+    if not ALPHA_VANTAGE_API_KEY:
+        return "Stock data error: ALPHA_VANTAGE_API_KEY is not configured in your .env file."
+    return None
+
+
+def _build_imf_periods(start_year=None, end_year=None):
+    if start_year is None and end_year is None:
+        return None
+
+    try:
+        start = int(start_year) if start_year is not None else int(end_year)
+        end = int(end_year) if end_year is not None else int(start_year)
+    except (TypeError, ValueError):
+        return None
+
+    if start > end:
+        start, end = end, start
+
+    return ",".join(str(year) for year in range(start, end + 1))
+
+
+async def _get_fred_series_metadata(series_id: str):
+    response = await globals.http_client.get(
+        "https://api.stlouisfed.org/fred/series",
+        params={
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "series_id": series_id,
+        },
+        timeout=20,
+    )
+    if response.status_code != 200:
+        return None, f"FRED error: API returned HTTP {response.status_code} for series '{series_id}'."
+
+    series_list = response.json().get("seriess", [])
+    if not series_list:
+        return None, f"FRED error: Series '{series_id}' was not found."
+    return series_list[0], None
+
+
+async def _get_fred_series_points(series_id: str, limit: int = 6, frequency: str = None, units: str = "lin"):
+    params = {
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+        "series_id": series_id,
+        "sort_order": "desc",
+        "limit": max(2, min(limit, 24)),
+        "units": units,
+    }
+    if frequency:
+        params["frequency"] = frequency
+
+    response = await globals.http_client.get(
+        "https://api.stlouisfed.org/fred/series/observations",
+        params=params,
+        timeout=20,
+    )
+    if response.status_code != 200:
+        return None, f"FRED error: API returned HTTP {response.status_code} for observations of '{series_id}'."
+
+    observations = response.json().get("observations", [])
+    clean = [obs for obs in observations if obs.get("value") not in (None, "", ".")]
+    if not clean:
+        return None, f"FRED series '{series_id}' returned no usable observations."
+    return clean, None
+
+
+def _compute_series_change(points):
+    if not points or len(points) < 2:
+        return None
+    try:
+        latest = float(points[0]["value"])
+        prior = float(points[1]["value"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    return latest - prior
+
+
+def _format_series_change(change, digits=2):
+    if change is None:
+        return "N/A"
+    sign = "+" if change >= 0 else ""
+    return f"{sign}{change:.{digits}f}"
+
+
+async def _build_fred_dashboard_entry(
+    label: str,
+    series_id: str,
+    summary_hint: str = "",
+    limit: int = 6,
+    frequency: str = None,
+    units: str = "lin",
+):
+    metadata, meta_error = await _get_fred_series_metadata(series_id)
+    if meta_error:
+        return {"label": label, "series_id": series_id, "error": meta_error}
+
+    points, points_error = await _get_fred_series_points(series_id, limit=limit, frequency=frequency, units=units)
+    if points_error:
+        return {"label": label, "series_id": series_id, "error": points_error}
+
+    latest = points[0]
+    change = _compute_series_change(points)
+    return {
+        "label": label,
+        "series_id": series_id,
+        "title": metadata.get("title", label),
+        "units": metadata.get("units_short", metadata.get("units", "N/A")),
+        "frequency": metadata.get("frequency_short", metadata.get("frequency", "N/A")),
+        "latest_date": latest.get("date"),
+        "latest_value": latest.get("value"),
+        "change": change,
+        "summary_hint": summary_hint,
+        "recent_points": points[:limit],
+    }
+
+
+def _format_dashboard_entry(entry, include_recent_count=3):
+    if entry.get("error"):
+        return f"- {entry['label']} ({entry['series_id']}): {entry['error']}"
+
+    change_text = _format_series_change(entry.get("change"))
+    header = (
+        f"- {entry['label']} [{entry['series_id']}] ({entry.get('frequency', 'N/A')}, {entry.get('units', 'N/A')}): "
+        f"{entry.get('latest_value', 'N/A')} on {entry.get('latest_date', 'N/A')} | Change vs prior: {change_text}"
+    )
+    if entry.get("summary_hint"):
+        header += f" | Why it matters: {entry['summary_hint']}"
+
+    recent_points = entry.get("recent_points", [])[: max(1, include_recent_count)]
+    if not recent_points:
+        return header
+
+    compact_points = ", ".join(f"{point.get('date')}: {point.get('value')}" for point in recent_points)
+    return f"{header}\n  Recent: {compact_points}"
+
+
+def _build_imf_dashboard_rows(indicator_code, payload, max_countries=6, max_years=4):
+    values = payload.get("values", {}).get(indicator_code, {})
+    countries_meta = payload.get("countries", {})
+    rows = []
+    for code, yearly_values in values.items():
+        valid_points = [(year, value) for year, value in yearly_values.items() if value not in (None, "", ".")]
+        if not valid_points:
+            continue
+        valid_points.sort(key=lambda item: item[0], reverse=True)
+        latest_year, latest_value = valid_points[0]
+        recent = ", ".join(f"{year}: {value}" for year, value in valid_points[:max_years])
+        label = countries_meta.get(code, {}).get("label", code)
+        rows.append(f"- {label} ({code}) latest: {latest_year} = {latest_value} | Recent: {recent}")
+    return rows[:max_countries]
 
 # --- VOICE / TTS TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
@@ -196,6 +386,553 @@ async def delegate_to_coprocessor(task_prompt: str, content_to_process: str) -> 
     except Exception as e:
         logging.error(f"❌ COPROCESSOR DELEGATION: Tool execution failed: {e}", exc_info=True)
         return f"Delegation failed: {e}"
+
+# --- FINANCE & ECONOMIC DATA ---
+async def search_fred_series(query: str, limit: int = 8) -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    try:
+        response = await globals.http_client.get(
+            "https://api.stlouisfed.org/fred/series/search",
+            params={
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+                "search_text": query,
+                "limit": max(1, min(limit, 12)),
+                "order_by": "search_rank",
+                "sort_order": "desc",
+            },
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return f"FRED error: API returned HTTP {response.status_code}."
+
+        series = response.json().get("seriess", [])
+        if not series:
+            return f"No FRED series found for '{query}'."
+
+        lines = [f"Top FRED series for '{query}':"]
+        for item in series:
+            lines.append(
+                f"- {item.get('id', 'N/A')}: {item.get('title', 'Untitled')} | "
+                f"Freq: {item.get('frequency_short', item.get('frequency', 'N/A'))} | "
+                f"Units: {item.get('units_short', item.get('units', 'N/A'))}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ FRED Search Error: {e}", exc_info=True)
+        return "FRED search failed."
+
+
+async def get_fred_series_observations(
+    series_id: str,
+    observation_start: str = None,
+    observation_end: str = None,
+    units: str = "lin",
+    frequency: str = None,
+    limit: int = 12,
+) -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    try:
+        meta_response = await globals.http_client.get(
+            "https://api.stlouisfed.org/fred/series",
+            params={
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+                "series_id": series_id,
+            },
+            timeout=20,
+        )
+        obs_params = {
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "series_id": series_id,
+            "units": units,
+            "sort_order": "desc",
+            "limit": max(1, min(limit, 24)),
+        }
+        if observation_start:
+            obs_params["observation_start"] = observation_start
+        if observation_end:
+            obs_params["observation_end"] = observation_end
+        if frequency:
+            obs_params["frequency"] = frequency
+
+        obs_response = await globals.http_client.get(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params=obs_params,
+            timeout=20,
+        )
+
+        if meta_response.status_code != 200 or obs_response.status_code != 200:
+            status = meta_response.status_code if meta_response.status_code != 200 else obs_response.status_code
+            return f"FRED error: API returned HTTP {status}."
+
+        meta_series = meta_response.json().get("seriess", [])
+        observations = obs_response.json().get("observations", [])
+        if not meta_series:
+            return f"FRED error: Series '{series_id}' was not found."
+
+        clean_observations = [obs for obs in observations if obs.get("value") not in (None, ".", "")]
+        if not clean_observations:
+            return f"FRED series '{series_id}' returned no observations for the requested range."
+
+        meta = meta_series[0]
+        latest = clean_observations[0]
+        oldest = clean_observations[-1]
+
+        lines = [
+            f"FRED Series {series_id}: {meta.get('title', 'Untitled')}",
+            f"Frequency: {meta.get('frequency', 'N/A')} | Units: {meta.get('units', 'N/A')} | Seasonal Adjustment: {meta.get('seasonal_adjustment_short', meta.get('seasonal_adjustment', 'N/A'))}",
+            f"Latest observation: {latest.get('date')} = {latest.get('value')}",
+        ]
+
+        if len(clean_observations) > 1:
+            lines.append(f"Oldest returned observation: {oldest.get('date')} = {oldest.get('value')}")
+
+        lines.append("Recent observations:")
+        for obs in clean_observations:
+            lines.append(f"- {obs.get('date')}: {obs.get('value')}")
+
+        notes = meta.get("notes", "")
+        if notes:
+            lines.append(f"Notes: {notes[:500]}" + ("..." if len(notes) > 500 else ""))
+
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ FRED Observations Error: {e}", exc_info=True)
+        return "FRED series lookup failed."
+
+
+async def search_imf_indicators(query: str, limit: int = 8) -> str:
+    try:
+        response = await globals.http_client.get(
+            "https://www.imf.org/external/datamapper/api/v1/indicators",
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return f"IMF error: API returned HTTP {response.status_code}."
+
+        raw = response.json()
+        indicators = raw.get("indicators", raw)
+        query_lower = query.lower()
+        matches = []
+        for code, details in indicators.items():
+            label = (details or {}).get("label", "")
+            description = (details or {}).get("description", "")
+            haystack = f"{code} {label} {description}".lower()
+            if query_lower in haystack:
+                matches.append((code, label, description))
+
+        if not matches:
+            return f"No IMF indicators found for '{query}'."
+
+        lines = [f"Top IMF indicators for '{query}':"]
+        for code, label, description in matches[: max(1, min(limit, 12))]:
+            snippet = description[:180] + ("..." if len(description) > 180 else "")
+            lines.append(f"- {code}: {label}" + (f" | {snippet}" if snippet else ""))
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ IMF Indicator Search Error: {e}", exc_info=True)
+        return "IMF indicator search failed."
+
+
+async def get_imf_datamapper_series(
+    indicator: str,
+    countries: str = "USA",
+    start_year: int = None,
+    end_year: int = None,
+) -> str:
+    try:
+        country_codes = [part.strip().upper() for part in countries.split(",") if part.strip()]
+        path_parts = [indicator.strip().upper()] + country_codes
+        endpoint = "/".join(path_parts)
+        params = {}
+        periods = _build_imf_periods(start_year, end_year)
+        if periods:
+            params["periods"] = periods
+
+        response = await globals.http_client.get(
+            f"https://www.imf.org/external/datamapper/api/v1/{endpoint}",
+            params=params,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return f"IMF error: API returned HTTP {response.status_code}."
+
+        payload = response.json()
+        values = payload.get("values", {})
+        indicator_values = values.get(indicator.strip().upper(), {})
+        if not indicator_values:
+            return f"IMF error: No data found for indicator '{indicator}'."
+
+        countries_meta = payload.get("countries", {})
+        indicators_meta = payload.get("indicators", {})
+        indicator_meta = indicators_meta.get(indicator.strip().upper(), {})
+        indicator_label = indicator_meta.get("label", indicator.strip().upper())
+
+        lines = [f"IMF DataMapper {indicator.strip().upper()}: {indicator_label}"]
+        for code, yearly_values in indicator_values.items():
+            if not yearly_values:
+                continue
+            label = countries_meta.get(code, {}).get("label", code)
+            valid_points = [(year, value) for year, value in yearly_values.items() if value not in (None, "", ".")]
+            if not valid_points:
+                continue
+
+            valid_points.sort(key=lambda item: item[0], reverse=True)
+            latest_year, latest_value = valid_points[0]
+            lines.append(f"{label} ({code}) latest: {latest_year} = {latest_value}")
+            lines.append("Recent years:")
+            for year, value in valid_points[:8]:
+                lines.append(f"- {year}: {value}")
+
+        if len(lines) == 1:
+            return f"IMF error: No usable observations found for indicator '{indicator}'."
+
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ IMF Data Error: {e}", exc_info=True)
+        return "IMF data lookup failed."
+
+
+async def get_stock_snapshot(symbol: str) -> str:
+    config_error = _alpha_vantage_error_prefix()
+    if config_error:
+        return config_error
+
+    symbol = symbol.strip().upper()
+    try:
+        params_list = [
+            {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
+            {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
+            {"function": "EARNINGS", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
+        ]
+        responses = await asyncio.gather(*[
+            globals.http_client.get("https://www.alphavantage.co/query", params=params, timeout=25)
+            for params in params_list
+        ])
+
+        if any(response.status_code != 200 for response in responses):
+            failed = next(response for response in responses if response.status_code != 200)
+            return f"Stock data error: API returned HTTP {failed.status_code}."
+
+        quote_data = responses[0].json().get("Global Quote", {})
+        overview_data = responses[1].json()
+        earnings_data = responses[2].json()
+
+        if not quote_data and not overview_data:
+            return f"Stock data error: No results returned for '{symbol}'."
+
+        quarterly_earnings = earnings_data.get("quarterlyEarnings", [])
+        latest_earnings = quarterly_earnings[0] if quarterly_earnings else {}
+
+        lines = [
+            f"Stock snapshot for {symbol}: {overview_data.get('Name', symbol)}",
+            f"Price: {quote_data.get('05. price', 'N/A')} | Day range: {quote_data.get('04. low', 'N/A')} - {quote_data.get('03. high', 'N/A')} | Previous close: {quote_data.get('08. previous close', 'N/A')}",
+            f"Market cap: {_format_large_number(overview_data.get('MarketCapitalization'))} | EBITDA: {_format_large_number(overview_data.get('EBITDA'))} | P/E: {overview_data.get('PERatio', 'N/A')}",
+            f"52-week range: {overview_data.get('52WeekLow', 'N/A')} - {overview_data.get('52WeekHigh', 'N/A')} | EPS: {overview_data.get('EPS', 'N/A')} | Beta: {overview_data.get('Beta', 'N/A')}",
+        ]
+
+        if latest_earnings:
+            lines.append(
+                f"Latest quarterly earnings: fiscal date {latest_earnings.get('fiscalDateEnding', 'N/A')} | "
+                f"reported date {latest_earnings.get('reportedDate', 'N/A')} | "
+                f"reported EPS {latest_earnings.get('reportedEPS', 'N/A')} | "
+                f"estimated EPS {latest_earnings.get('estimatedEPS', 'N/A')} | "
+                f"surprise {latest_earnings.get('surprise', 'N/A')}"
+            )
+
+        description = overview_data.get("Description", "")
+        if description:
+            lines.append(f"Business summary: {description[:500]}" + ("..." if len(description) > 500 else ""))
+
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ Stock Snapshot Error: {e}", exc_info=True)
+        return "Stock snapshot lookup failed."
+
+
+async def get_stock_price_history(
+    symbol: str,
+    outputsize: str = "compact",
+    limit: int = 10,
+) -> str:
+    config_error = _alpha_vantage_error_prefix()
+    if config_error:
+        return config_error
+
+    symbol = symbol.strip().upper()
+    try:
+        response = await globals.http_client.get(
+            "https://www.alphavantage.co/query",
+            params={
+                "function": "TIME_SERIES_DAILY",
+                "symbol": symbol,
+                "outputsize": "full" if str(outputsize).lower() == "full" else "compact",
+                "apikey": ALPHA_VANTAGE_API_KEY,
+            },
+            timeout=25,
+        )
+        if response.status_code != 200:
+            return f"Stock history error: API returned HTTP {response.status_code}."
+
+        payload = response.json()
+        series = payload.get("Time Series (Daily)", {})
+        if not series:
+            note = payload.get("Note") or payload.get("Information") or payload.get("Error Message")
+            if note:
+                return f"Stock history error: {note}"
+            return f"Stock history error: No historical data returned for '{symbol}'."
+
+        entries = sorted(series.items(), key=lambda item: item[0], reverse=True)[: max(1, min(limit, 30))]
+        lines = [f"Daily price history for {symbol}:"]
+        for date_str, values in entries:
+            lines.append(
+                f"- {date_str}: open {values.get('1. open')} | high {values.get('2. high')} | "
+                f"low {values.get('3. low')} | close {values.get('4. close')} | volume {values.get('5. volume')}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ Stock History Error: {e}", exc_info=True)
+        return "Stock price history lookup failed."
+
+
+async def get_bond_market_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("Fed Funds Rate", "FEDFUNDS", "Policy rate anchor for overall financial conditions.", 4, "m", "lin"),
+        ("2-Year Treasury Yield", "DGS2", "Short-end Treasury yield that tracks policy expectations.", 5, "d", "lin"),
+        ("10-Year Treasury Yield", "DGS10", "Benchmark long-end yield for growth and inflation expectations.", 5, "d", "lin"),
+        ("30-Year Treasury Yield", "DGS30", "Long-duration rate used for term-premium and long-horizon rate context.", 5, "d", "lin"),
+        ("10Y-2Y Treasury Spread", "T10Y2Y", "Curve slope signal that helps frame recession risk and market expectations.", 5, "d", "lin"),
+        ("30-Year Mortgage Rate", "MORTGAGE30US", "Housing and consumer-finance transmission channel for long rates.", 5, "w", "lin"),
+        ("5-Year Breakeven Inflation", "T5YIE", "Market-based inflation expectation that helps explain nominal yields.", 5, "d", "lin"),
+        ("5-Year Forward Inflation Expectation Rate", "T5YIFR", "Longer-run inflation expectation gauge for term-structure context.", 5, "d", "lin"),
+        ("BBB Corporate Bond Spread", "BAA10Y", "Credit spread proxy for corporate borrowing stress relative to Treasuries.", 5, "d", "lin"),
+        ("High Yield Bond Spread", "BAMLH0A0HYM2", "Riskier credit-spread gauge that helps frame stress appetite beyond Treasuries.", 5, "d", "lin"),
+        ("S&P 500 Index", "SP500", "Risk-asset cross-check to compare bond moves with equities.", 5, "d", "lin"),
+        ("Unemployment Rate", "UNRATE", "Labor-market context for whether rates look restrictive or supportive.", 4, "m", "lin"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "Bond Market Dashboard:",
+        "Use this bundle for broad bond-market questions. It includes policy, Treasury curve, mortgage, inflation-expectation, credit-spread, equity, and labor context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_inflation_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("Headline CPI", "CPIAUCSL", "Broad consumer inflation level.", 4, "m", "pc1"),
+        ("Core CPI", "CPILFESL", "Underlying CPI excluding food and energy.", 4, "m", "pc1"),
+        ("Headline PCE Price Index", "PCEPI", "Fed-preferred broad inflation gauge.", 4, "m", "pc1"),
+        ("Core PCE Price Index", "PCEPILFE", "Fed-preferred core inflation gauge.", 4, "m", "pc1"),
+        ("5-Year Breakeven Inflation", "T5YIE", "Market-based inflation expectations proxy.", 5, "d", "lin"),
+        ("5-Year Forward Inflation Expectation Rate", "T5YIFR", "Longer-term inflation expectation gauge.", 5, "d", "lin"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "Inflation Dashboard:",
+        "Use this bundle for inflation questions. It includes headline/core CPI and PCE plus market-based inflation expectations.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_us_macro_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("Real GDP", "GDPC1", "Top-line real output measure for U.S. growth.", 4, "q", "pch"),
+        ("Unemployment Rate", "UNRATE", "Headline labor-market slack measure.", 4, "m", "lin"),
+        ("Nonfarm Payrolls", "PAYEMS", "Employment growth and labor demand trend.", 4, "m", "chg"),
+        ("Retail Sales", "RSAFS", "Consumer demand proxy.", 4, "m", "pch"),
+        ("Industrial Production", "INDPRO", "Production-side activity gauge.", 4, "m", "pch"),
+        ("Fed Funds Rate", "FEDFUNDS", "Policy stance anchor.", 4, "m", "lin"),
+        ("10-Year Treasury Yield", "DGS10", "Long-term rate context.", 5, "d", "lin"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "U.S. Macro Dashboard:",
+        "Use this bundle for broad U.S. economy questions. It includes growth, labor, demand, production, and policy context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_equity_market_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("S&P 500 Index", "SP500", "Core U.S. large-cap equity benchmark.", 5, "d", "lin"),
+        ("Nasdaq Composite", "NASDAQCOM", "Growth and tech-heavy equity benchmark.", 5, "d", "lin"),
+        ("CBOE VIX", "VIXCLS", "Equity implied-volatility and risk-sentiment gauge.", 5, "d", "lin"),
+        ("10-Year Treasury Yield", "DGS10", "Rates backdrop for equity valuation pressure.", 5, "d", "lin"),
+        ("High Yield Bond Spread", "BAMLH0A0HYM2", "Credit-risk backdrop for equities.", 5, "d", "lin"),
+        ("Dollar Index Broad", "DTWEXBGS", "Dollar backdrop for earnings and global risk appetite.", 5, "d", "lin"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "Equity Market Dashboard:",
+        "Use this bundle for broad equity-market questions. It includes index performance, volatility, rates, credit, and dollar context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_global_macro_dashboard(
+    countries: str = "USA,CHN,EAQ,JPN,GBR,IND",
+    start_year: int = 2022,
+    end_year: int = None,
+) -> str:
+    if end_year is None:
+        end_year = datetime.now().year
+
+    country_codes = [part.strip().upper() for part in countries.split(",") if part.strip()]
+    if not country_codes:
+        country_codes = ["USA", "CHN", "EAQ", "JPN", "GBR", "IND"]
+
+    indicator_specs = [
+        ("NGDP_RPCH", "Real GDP Growth", "Top-line growth comparison across major economies."),
+        ("PCPIPCH", "Inflation", "Headline inflation comparison across major economies."),
+        ("LUR", "Unemployment Rate", "Labor-market slack comparison where available."),
+        ("GGXWDG_NGDP", "General Government Gross Debt (% GDP)", "Public debt burden comparison."),
+        ("BCA_NGDPD", "Current Account Balance (% GDP)", "External-balance comparison."),
+    ]
+
+    periods = _build_imf_periods(start_year, end_year)
+    try:
+        responses = await asyncio.gather(*[
+            globals.http_client.get(
+                f"https://www.imf.org/external/datamapper/api/v1/{indicator_code}/{'/'.join(country_codes)}",
+                params={"periods": periods} if periods else {},
+                timeout=20,
+            )
+            for indicator_code, _, _ in indicator_specs
+        ])
+
+        if any(response.status_code != 200 for response in responses):
+            failed = next(response for response in responses if response.status_code != 200)
+            return f"IMF error: API returned HTTP {failed.status_code} while building the global macro dashboard."
+
+        lines = [
+            "Global Macro Dashboard:",
+            f"Use this bundle for broad cross-country macro questions. Countries included: {', '.join(country_codes)}.",
+        ]
+
+        for (indicator_code, label, summary_hint), response in zip(indicator_specs, responses):
+            payload = response.json()
+            indicators_meta = payload.get("indicators", {})
+            resolved_label = indicators_meta.get(indicator_code, {}).get("label", label)
+            lines.append(f"{resolved_label} [{indicator_code}]")
+            lines.append(f"Why it matters: {summary_hint}")
+            rows = _build_imf_dashboard_rows(indicator_code, payload)
+            if rows:
+                lines.extend(rows)
+            else:
+                lines.append("- No usable observations returned.")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"❌ Global Macro Dashboard Error: {e}", exc_info=True)
+        return "Global macro dashboard lookup failed."
+
+
+async def get_housing_consumer_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("30-Year Mortgage Rate", "MORTGAGE30US", "Primary housing-finance rate for affordability and demand.", 5, "w", "lin"),
+        ("Home Price Index", "CSUSHPINSA", "National home-price trend and shelter-wealth backdrop.", 4, "m", "pch"),
+        ("Housing Starts", "HOUST", "New residential construction and housing-cycle activity.", 4, "m", "pch"),
+        ("Building Permits", "PERMIT", "Forward-looking housing construction pipeline.", 4, "m", "pch"),
+        ("Retail Sales", "RSAFS", "Top-line consumer spending proxy.", 4, "m", "pch"),
+        ("Real Personal Consumption Expenditures", "DPCERC1Q027SBEA", "Inflation-adjusted household consumption trend.", 4, "q", "pch"),
+        ("Consumer Credit", "TOTALSL", "Household credit growth and borrowing backdrop.", 4, "m", "chg"),
+        ("Delinquency Rate on Consumer Loans", "DRCLACBS", "Household credit stress and repayment quality signal.", 4, "q", "lin"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "Housing & Consumer Dashboard:",
+        "Use this bundle for broad housing, consumer, and household-balance-sheet questions. It includes affordability, construction, spending, and consumer-credit stress context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_labor_market_dashboard() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("Unemployment Rate", "UNRATE", "Headline labor-market slack measure.", 4, "m", "lin"),
+        ("Nonfarm Payrolls", "PAYEMS", "Employment growth and labor demand trend.", 4, "m", "chg"),
+        ("Initial Jobless Claims", "ICSA", "High-frequency layoff and labor-softness signal.", 5, "w", "lin"),
+        ("Continuing Jobless Claims", "CCSA", "Persistence of unemployment and rehiring difficulty signal.", 5, "w", "lin"),
+        ("Job Openings", "JTSJOL", "Labor demand and hiring appetite proxy.", 4, "m", "chg"),
+        ("Quits Rate", "JTSQUR", "Worker confidence and labor-market tightness signal.", 4, "m", "lin"),
+        ("Labor Force Participation Rate", "CIVPART", "Labor supply participation backdrop.", 4, "m", "lin"),
+        ("Employment-Population Ratio", "EMRATIO", "Broad employment utilization measure.", 4, "m", "lin"),
+        ("Average Hourly Earnings", "CES0500000003", "Nominal wage-growth and labor-income signal.", 4, "m", "pch"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "Labor Market Dashboard:",
+        "Use this bundle for broad labor-market questions. It includes employment, unemployment, claims, openings, quits, participation, and wage-growth context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
 
 # --- UTILITIES ---
 async def get_news_headlines(): # Fetches news headlines from RSS feeds
@@ -1478,4 +2215,3 @@ async def update_portainer_container(environment_name: str, container_name: str)
             
     except Exception as e:
         return f"Error updating container: {str(e)}"
-

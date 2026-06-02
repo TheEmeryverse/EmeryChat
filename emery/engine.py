@@ -6,7 +6,7 @@ from emery.config import (
     OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, ENABLE_MEMORY,
     ENABLE_CALENDAR, ENABLE_SEERR, ENABLE_WEATHER, ENABLE_NEWS, ENABLE_NASA,
     ENABLE_HISTORY, ENABLE_SEARCH, ENABLE_IMAGEGEN, ENABLE_VOICE,
-    ENABLE_WEB_SCRAPING
+    ENABLE_WEB_SCRAPING, ENABLE_FINANCE
 )
 # Re-import ENABLE_SYSTEM_STATS & ENABLE_NEST which are checked in main.py but also here
 # ENABLE_SYSTEM_STATS might not have been defined as a direct flag, but is checked: is_enabled("ENABLE_SYSTEM_STATS")
@@ -28,6 +28,12 @@ from emery.tools import (
     speak_message,
     get_system_stats,
     fetch_web_content,
+    search_fred_series, get_fred_series_observations,
+    search_imf_indicators, get_imf_datamapper_series,
+    get_stock_snapshot, get_stock_price_history,
+    get_bond_market_dashboard, get_inflation_dashboard,
+    get_us_macro_dashboard, get_equity_market_dashboard, get_global_macro_dashboard,
+    get_housing_consumer_dashboard, get_labor_market_dashboard,
     get_reolink_snapshot, get_available_cameras,
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
@@ -261,6 +267,184 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
             "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
         }
     })
+
+if is_enabled("ENABLE_FINANCE"):
+    AVAILABLE_TOOLS.update({
+        "search_fred_series": search_fred_series,
+        "get_fred_series_observations": get_fred_series_observations,
+        "search_imf_indicators": search_imf_indicators,
+        "get_imf_datamapper_series": get_imf_datamapper_series,
+        "get_stock_snapshot": get_stock_snapshot,
+        "get_stock_price_history": get_stock_price_history,
+        "get_bond_market_dashboard": get_bond_market_dashboard,
+        "get_inflation_dashboard": get_inflation_dashboard,
+        "get_us_macro_dashboard": get_us_macro_dashboard,
+        "get_equity_market_dashboard": get_equity_market_dashboard,
+        "get_global_macro_dashboard": get_global_macro_dashboard,
+        "get_housing_consumer_dashboard": get_housing_consumer_dashboard,
+        "get_labor_market_dashboard": get_labor_market_dashboard,
+    })
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "search_fred_series",
+                "description": "Discovery tool for FRED. Use this FIRST when the user wants macroeconomic data but you do not know the exact FRED series ID yet. Search by topic or keyword, then inspect the returned candidate IDs and choose the best one. After this, call `get_fred_series_observations` with the chosen series ID. Do NOT use this tool when the user already gave you a specific FRED series ID.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Keywords such as 'core CPI', 'unemployment rate', 'real GDP', or '2 year treasury yield'."},
+                        "limit": {"type": "integer", "description": "Optional. Number of results to return, up to 12."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_fred_series_observations",
+                "description": "Data retrieval tool for FRED. Use this when you already know the exact FRED series ID, either because the user gave it to you directly or because you just discovered it with `search_fred_series`. Use it to pull recent or historical observations, metadata, units, and frequency. If you do not know the correct FRED ID yet, call `search_fred_series` first instead of guessing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "series_id": {"type": "string", "description": "A FRED series ID such as CPIAUCSL, UNRATE, FEDFUNDS, GDPC1, or DGS10."},
+                        "observation_start": {"type": "string", "description": "Optional start date in YYYY-MM-DD format."},
+                        "observation_end": {"type": "string", "description": "Optional end date in YYYY-MM-DD format."},
+                        "units": {"type": "string", "description": "Optional FRED units transform such as lin, chg, pch, or pc1."},
+                        "frequency": {"type": "string", "description": "Optional FRED frequency aggregation like d, w, bw, m, q, or a."},
+                        "limit": {"type": "integer", "description": "Optional. Number of returned observations, up to 24."}
+                    },
+                    "required": ["series_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_imf_indicators",
+                "description": "Discovery tool for IMF DataMapper. Use this FIRST when the user wants IMF or cross-country macro data but you do not know the exact IMF indicator code yet. Search by concept, then choose the best returned code. After this, call `get_imf_datamapper_series` with the chosen code. Do NOT use this tool when the user already provided a specific IMF indicator code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Keywords such as 'real gdp growth', 'inflation', 'government debt', or 'current account'."},
+                        "limit": {"type": "integer", "description": "Optional. Number of results to return, up to 12."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_imf_datamapper_series",
+                "description": "Data retrieval tool for IMF DataMapper. Use this when you already know the exact IMF indicator code, either because the user supplied it or because you discovered it with `search_imf_indicators`. Use it to compare one or more countries across time. If you do not know the correct IMF indicator code yet, call `search_imf_indicators` first instead of guessing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "indicator": {"type": "string", "description": "An IMF indicator code such as NGDP_RPCH, PCPIPCH, or GGXWDG_NGDP."},
+                        "countries": {"type": "string", "description": "Comma-separated ISO-3 country codes such as USA,CAN,MEX. Defaults to USA."},
+                        "start_year": {"type": "integer", "description": "Optional start year such as 2015."},
+                        "end_year": {"type": "integer", "description": "Optional end year such as 2026."}
+                    },
+                    "required": ["indicator"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_stock_snapshot",
+                "description": "Use this for current market snapshots and basic fundamentals for a stock or ETF ticker. It is the correct tool when the user asks for current price, intraday high or low, 52-week range, market cap, EBITDA, valuation context, or recent earnings details. If the user instead wants a sequence of recent historical daily prices or OHLCV rows, use `get_stock_price_history`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "Ticker symbol such as AAPL, MSFT, BRK.B, or SPY."}
+                    },
+                    "required": ["symbol"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_stock_price_history",
+                "description": "Use this for recent historical daily price data for a stock or ETF ticker. It returns daily open, high, low, close, and volume rows. Use this when the user wants recent price action, a trading range over time, OHLCV history, or multiple daily closes. If the user instead wants a current quote or fundamentals like EBITDA or market cap, use `get_stock_snapshot`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "Ticker symbol such as AAPL, MSFT, BRK.B, or SPY."},
+                        "outputsize": {"type": "string", "description": "Optional. Use 'compact' for recent history or 'full' for full daily history."},
+                        "limit": {"type": "integer", "description": "Optional. Number of daily rows to return, up to 30."}
+                    },
+                    "required": ["symbol"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_bond_market_dashboard",
+                "description": "High-level bond-market bundle. Use this FIRST for broad questions about the bond market, yields, the yield curve, credit spreads, or how bonds relate to the economy. This tool returns a curated pack of relevant series so you do not have to discover each FRED ID one by one. After reading it, explain the current bond-market regime and how it relates to policy, growth, labor, and equities.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_inflation_dashboard",
+                "description": "High-level inflation bundle. Use this FIRST for broad inflation questions when you need headline and core inflation context plus market-based inflation expectations. This tool is preferred over manually searching multiple inflation series one by one unless the user explicitly requests a particular FRED series ID.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_us_macro_dashboard",
+                "description": "High-level U.S. macro bundle. Use this FIRST for broad questions about the overall U.S. economy, growth, labor, activity, and policy context. This tool returns a curated macro dashboard so you can ground your answer in multiple datasets before explaining what they imply.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_equity_market_dashboard",
+                "description": "High-level equity-market bundle. Use this FIRST for broad questions about the stock market, market performance, risk sentiment, and cross-asset context. This tool returns a curated pack of equity, volatility, rates, credit, and dollar indicators. If the user asks about a specific stock ticker instead of the broad market, use `get_stock_snapshot` or `get_stock_price_history` instead.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_global_macro_dashboard",
+                "description": "High-level global macro bundle. Use this FIRST for broad questions about the global economy, cross-country growth, inflation, labor conditions, public debt, or external balances. This tool returns a curated IMF-based cross-country dashboard so you can ground global-macro answers in structured international data before explaining what it implies.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "countries": {"type": "string", "description": "Optional comma-separated ISO-3 country codes. Defaults to USA,CHN,EAQ,JPN,GBR,IND."},
+                        "start_year": {"type": "integer", "description": "Optional start year for the comparison window. Defaults to 2022."},
+                        "end_year": {"type": "integer", "description": "Optional end year for the comparison window. Defaults to the current year."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_housing_consumer_dashboard",
+                "description": "High-level housing-and-consumer bundle. Use this FIRST for broad questions about housing, affordability, construction, household spending, consumer credit, or the health of the consumer. This tool returns a curated dashboard covering mortgage rates, home prices, housing activity, consumer spending, and credit stress so you can explain the household side of the economy with data.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_labor_market_dashboard",
+                "description": "High-level labor-market bundle. Use this FIRST for broad questions about jobs, unemployment, layoffs, hiring, participation, quits, or wage growth. This tool returns a curated labor dashboard so you can ground labor-market answers in multiple datasets before explaining what they imply.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }
+    ])
 
 if is_enabled("ENABLE_REOLINK"):
     AVAILABLE_TOOLS["get_reolink_snapshot"] = get_reolink_snapshot
@@ -598,6 +782,19 @@ TOOL_STATUS_MESSAGES = {
     "overseer_search_tv": f"{MODEL_NAME} is searching for a TV show...",
     "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
     "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
+    "search_fred_series": f"{MODEL_NAME} is searching the FRED database...",
+    "get_fred_series_observations": f"{MODEL_NAME} is pulling FRED economic data...",
+    "search_imf_indicators": f"{MODEL_NAME} is searching IMF indicators...",
+    "get_imf_datamapper_series": f"{MODEL_NAME} is pulling IMF economic data...",
+    "get_stock_snapshot": f"{MODEL_NAME} is checking the market...",
+    "get_stock_price_history": f"{MODEL_NAME} is pulling stock price history...",
+    "get_bond_market_dashboard": f"{MODEL_NAME} is assembling a bond market dashboard...",
+    "get_inflation_dashboard": f"{MODEL_NAME} is assembling an inflation dashboard...",
+    "get_us_macro_dashboard": f"{MODEL_NAME} is assembling a U.S. macro dashboard...",
+    "get_equity_market_dashboard": f"{MODEL_NAME} is assembling an equity market dashboard...",
+    "get_global_macro_dashboard": f"{MODEL_NAME} is assembling a global macro dashboard...",
+    "get_housing_consumer_dashboard": f"{MODEL_NAME} is assembling a housing and consumer dashboard...",
+    "get_labor_market_dashboard": f"{MODEL_NAME} is assembling a labor market dashboard...",
     "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night...",
     "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration...",
     "get_camera_security_log": f"{MODEL_NAME} is reviewing the security log...",

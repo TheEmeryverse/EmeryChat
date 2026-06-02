@@ -100,6 +100,8 @@ STT_URL = os.getenv("STT_URL", "http://localhost:3000/api/v1/audio/transcription
 TTS_URL = os.getenv("TTS_URL", "http://localhost:8880/v1/audio/speech")
 TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
 NEWS_FEEDS = os.getenv("NEWS_FEEDS", "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, FOX|http://feeds.foxnews.com/foxnews/latest, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en, LOCAL|https://news.google.com/rss/search?q=when:24h+Milwaukee+Wisconsin&hl=en-US&gl=US&ceid=US:en")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 
 # --- ENABLE TOOLS ---
 ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
@@ -113,6 +115,7 @@ ENABLE_IMAGEGEN = os.getenv("ENABLE_IMAGEGEN", "false")
 ENABLE_WEATHER = os.getenv("ENABLE_WEATHER", "false")
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
 ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
+ENABLE_FINANCE = os.getenv("ENABLE_FINANCE", "false")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true")
 ENABLE_PORTAINER = os.getenv("ENABLE_PORTAINER", "false")
 PORTAINER_URL = os.getenv("PORTAINER_URL", "").rstrip("/")
@@ -177,4 +180,3 @@ def get_memory_file_path(user_id: int) -> str:
         name = USER_2_NAME.lower().replace(" ", "_")
         return f"{base}_{name}{ext}"
     return MEMORY_FILE_PATH
-

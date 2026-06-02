@@ -12,7 +12,7 @@ from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP,
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE,
     get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
@@ -485,6 +485,17 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
         "DO NOT use this tool for normal back-and-forth messaging. For normal replies, just write your response text directly without calling this tool."
     )
 
+    finance_instruction = ""
+    if str(ENABLE_FINANCE).lower() == "true":
+        finance_instruction = (
+            "\n- You have access to structured finance and macroeconomic tools. For macroeconomic, inflation, labor, GDP, rates, cross-country, earnings, valuation, or market-data questions, prefer the finance tools over generic web search whenever the user is asking for actual data, time series, comparisons, or current market snapshots."
+            "\n- For broad finance topics, prefer the high-level dashboard bundles first instead of manually discovering every series one by one. Use `get_bond_market_dashboard` for broad bond/yield-curve/rates questions, `get_inflation_dashboard` for broad inflation questions, `get_us_macro_dashboard` for broad U.S. economy questions, `get_equity_market_dashboard` for broad stock-market and risk-sentiment questions, `get_global_macro_dashboard` for broad cross-country or global macro questions, `get_housing_consumer_dashboard` for broad housing or consumer-health questions, and `get_labor_market_dashboard` for broad jobs or labor-market questions."
+            "\n- Use the discovery/search finance tools FIRST when you do not know the exact identifier. For FRED, use `search_fred_series` to discover the correct series ID before calling `get_fred_series_observations`. For IMF data, use `search_imf_indicators` to discover the correct IMF indicator code before calling `get_imf_datamapper_series`."
+            "\n- Use the direct retrieval finance tools when the identifier is already known or explicitly given by the user. If the user mentions a FRED series like `CPIAUCSL` or `UNRATE`, call `get_fred_series_observations` directly. If the user mentions an IMF indicator code like `NGDP_RPCH`, call `get_imf_datamapper_series` directly."
+            "\n- For stocks and ETFs, use `get_stock_snapshot` for current quote, day range, valuation, EBITDA, and recent earnings context. Use `get_stock_price_history` when the user asks for recent historical prices, trading ranges, OHLCV data, or a sequence of daily closes."
+            "\n- If the finance tools return incomplete coverage, ambiguous identifiers, or stale-looking data for the user's question, then use `web_search` and `fetch_web_content` as a secondary path for additional context, commentary, or news."
+        )
+
     camera_log_hint = ""
     if re.sub(r'[^a-zA-Z]', '', os.getenv("ENABLE_REOLINK", "false")).lower() == "true":
         try:
@@ -518,7 +529,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{group_privacy_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{finance_instruction}{group_privacy_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.

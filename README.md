@@ -350,6 +350,30 @@ Below is a listing of the tools available in EmeryChat. You can toggle each tool
   ```env
   NASA_API_KEY=YOUR_NASA_API_KEY
   ```
+
+### Finance & Economic Data
+* **Status Toggle:** `ENABLE_FINANCE=true`
+* **Description:** Adds a compact finance toolset for macroeconomic and market analysis using free/public APIs.
+* **Available Functions:**
+  * `search_fred_series(query, limit)`: Search FRED for economic series IDs such as CPI, unemployment, GDP, or Treasury yields.
+  * `get_fred_series_observations(series_id, observation_start, observation_end, units, frequency, limit)`: Pull recent or historical observations from a specific FRED series.
+  * `search_imf_indicators(query, limit)`: Search IMF DataMapper indicator codes for cross-country macro series.
+  * `get_imf_datamapper_series(indicator, countries, start_year, end_year)`: Pull IMF DataMapper values for one or more countries using IMF indicator codes and ISO-3 country codes.
+  * `get_stock_snapshot(symbol)`: Pull current price, day high/low, 52-week range, market cap, EBITDA, and recent earnings details for a stock ticker.
+  * `get_stock_price_history(symbol, outputsize, limit)`: Pull recent daily OHLCV history for a stock ticker.
+  * `get_bond_market_dashboard()`: Pull a curated bond-market bundle including Fed funds, Treasury yields, curve slope, mortgage rates, inflation expectations, credit spreads, S&P 500 context, and unemployment.
+  * `get_inflation_dashboard()`: Pull a curated inflation bundle including headline/core CPI, headline/core PCE, and market-based inflation expectations.
+  * `get_us_macro_dashboard()`: Pull a curated U.S. macro bundle including GDP, unemployment, payrolls, retail sales, industrial production, Fed funds, and the 10-year yield.
+  * `get_equity_market_dashboard()`: Pull a curated equity-market bundle including the S&P 500, Nasdaq, VIX, Treasury yields, credit spreads, and the broad dollar index.
+  * `get_global_macro_dashboard(countries, start_year, end_year)`: Pull a curated IMF-based global macro bundle for cross-country growth, inflation, unemployment, public debt, and current-account comparisons.
+  * `get_housing_consumer_dashboard()`: Pull a curated housing-and-consumer bundle including mortgage rates, home prices, housing activity, spending, consumer credit, and delinquency stress.
+  * `get_labor_market_dashboard()`: Pull a curated labor-market bundle including unemployment, payrolls, claims, job openings, quits, participation, employment ratio, and wage growth.
+* **Env Config:**
+  ```env
+  ENABLE_FINANCE=true
+  FRED_API_KEY=YOUR_FRED_API_KEY
+  ALPHA_VANTAGE_API_KEY=YOUR_ALPHA_VANTAGE_API_KEY
+  ```
 </details>
 
 <details>
@@ -516,6 +540,9 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `ENABLE_SEARCH` | `false` | Enable web search query tool. |
 | `SEARXNG_URL` | `http://localhost:8080/search` | SearXNG instance endpoint. |
 | `ENABLE_WEB_SCRAPING`| `false` | Enable website URL content reading tool. |
+| `ENABLE_FINANCE` | `false` | Enable FRED, IMF DataMapper, and Alpha Vantage finance tools. |
+| `FRED_API_KEY` | *Required if finance active* | Free API key for FRED macroeconomic data. |
+| `ALPHA_VANTAGE_API_KEY` | *Required if finance active* | Free API key for Alpha Vantage stock and fundamentals data. |
 | `ENABLE_SYSTEM_STATS` | `false` | Enable CPU and Virtual memory reading tool. |
 | `ENABLE_REOLINK` | `false` | Enable Reolink CCTV snapshots and queries. |
 | `ENABLE_REOLINK_POLLING`| `false` | Enables active background loop checking NVR for AI alerts. |
@@ -536,4 +563,3 @@ Below is a detailed list of the configurations available in your `.env` file:
 | `PORTAINER_URL` | *Required if Portainer active* | Base URL of your Portainer instance. |
 | `PORTAINER_API_KEY` | *Required if Portainer active* | Personal access key from Portainer Account Settings. |
 | `PORTAINER_SSL_VERIFY` | `true` | Set to false to disable SSL validation for self-signed certificates. |
-
