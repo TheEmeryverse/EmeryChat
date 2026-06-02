@@ -4,20 +4,8 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 
-def load_env_custom():
-    if os.path.exists('.env'):
-        with open('.env', 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    parts = line.split('=', 1)
-                    key = parts[0].strip()
-                    val = parts[1].split('#')[0].strip()
-                    if val.startswith('"') and val.endswith('"'):
-                        val = val[1:-1]
-                    elif val.startswith("'") and val.endswith("'"):
-                        val = val[1:-1]
-                    os.environ[key] = val
+from emery.config import GOOGLE_TOKEN_PATH, NEST_PROJECT_ID, NEST_TOKEN_PATH
+
 
 def generate_calendar_token(creds_file):
     print("\n========================================================")
@@ -39,10 +27,10 @@ def generate_calendar_token(creds_file):
         flow = InstalledAppFlow.from_client_secrets_file(creds_file, scopes)
         creds = flow.run_local_server(port=0)
         
-        with open('token.json', 'w') as token_file:
+        with open(GOOGLE_TOKEN_PATH, 'w') as token_file:
             token_file.write(creds.to_json())
             
-        print("\n✅ Successfully generated token.json!")
+        print(f"\n✅ Successfully generated {GOOGLE_TOKEN_PATH}!")
         print("Your Google Calendar integration is now ready to use.")
         print("\nNote: If your Google Cloud app's Publishing Status is set to 'Testing',")
         print("this token will expire in 7 days and you will need to run this script again.")
@@ -68,10 +56,10 @@ def generate_nest_token(creds_file):
         print("❌ Error: Unsupported credentials format.")
         return
         
-    nest_project_id = os.getenv("NEST_PROJECT_ID")
+    nest_project_id = NEST_PROJECT_ID
     if not nest_project_id or nest_project_id.strip() == "" or "YOUR_" in nest_project_id:
-        print("❌ Error: NEST_PROJECT_ID is not configured in your .env file.")
-        print("Please add your Nest Device Access Project ID (UUID) to your .env file as NEST_PROJECT_ID=...")
+        print("❌ Error: nest.project_id is not configured in config/integrations.json.")
+        print("Please add your Nest Device Access Project ID (UUID) under nest.project_id.")
         return
         
     print("Step 1: In your Nest Device Access Console, ensure your project's Redirect URI is set to:")
@@ -157,10 +145,10 @@ def generate_nest_token(creds_file):
                 "expiry": expiry_time
             }
             
-            with open('nest_token.json', 'w') as token_file:
+            with open(NEST_TOKEN_PATH, 'w') as token_file:
                 json.dump(token_json, token_file)
                 
-            print("\n✅ Successfully generated nest_token.json!")
+            print(f"\n✅ Successfully generated {NEST_TOKEN_PATH}!")
             print("Your Google Nest Thermostat integration is now ready to use.")
             
     except Exception as e:
@@ -169,8 +157,6 @@ def generate_nest_token(creds_file):
             print("Response details:", e.read().decode('utf-8'))
 
 def main():
-    load_env_custom()
-    
     print("========================================================")
     print("              EmeryChat Google Token Setup              ")
     print("========================================================")

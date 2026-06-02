@@ -1,4 +1,3 @@
-import os
 import logging
 import re
 
@@ -6,10 +5,9 @@ from emery.config import (
     OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, ENABLE_MEMORY,
     ENABLE_CALENDAR, ENABLE_SEERR, ENABLE_WEATHER, ENABLE_NEWS, ENABLE_NASA,
     ENABLE_HISTORY, ENABLE_SEARCH, ENABLE_IMAGEGEN, ENABLE_VOICE,
-    ENABLE_WEB_SCRAPING, ENABLE_FINANCE
+    ENABLE_WEB_SCRAPING, ENABLE_FINANCE, ENABLE_NEST, ENABLE_SYSTEM_STATS,
+    ENABLE_REOLINK, ENABLE_SCHEDULER, REOLINK_CAMERAS, OLLAMA_NUM_CTX
 )
-# Re-import ENABLE_SYSTEM_STATS & ENABLE_NEST which are checked in main.py but also here
-# ENABLE_SYSTEM_STATS might not have been defined as a direct flag, but is checked: is_enabled("ENABLE_SYSTEM_STATS")
 import emery.globals as globals
 from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
 from emery.memory import save_user_memory, get_camera_security_log
@@ -19,7 +17,7 @@ from emery.tools import (
     get_calendar_events,
     get_nest_thermostats, set_nest_thermostat_mode, set_nest_thermostat_temperature,
     overseer_search_movie, overseer_request_movie, overseer_search_tv, overseer_request_tv_season,
-    get_noaa_weather,
+    get_noaa_weather, set_weather_location_alias, remove_weather_location_alias, list_weather_location_aliases,
     get_news_headlines,
     get_nasa_apod,
     get_today_in_history,
@@ -46,10 +44,10 @@ def is_enabled(var_name):
         import emery.config as config
         val = getattr(config, var_name, None)
         if val is not None:
-            return str(val).lower() == "true"
+            return bool(val) if isinstance(val, bool) else str(val).lower() == "true"
     except Exception:
         pass
-    return os.getenv(var_name, "false").lower() == "true"
+    return False
 
 
 AVAILABLE_TOOLS = {}
@@ -171,14 +169,85 @@ if is_enabled("ENABLE_SEERR"):
 
 if is_enabled("ENABLE_WEATHER"):
     AVAILABLE_TOOLS["get_noaa_weather"] = get_noaa_weather
-    tools_schema.append({
-        "type": "function", 
-        "function": {
-            "name": "get_noaa_weather", 
-            "description": "Get weather.", 
-            "parameters": {}
+    AVAILABLE_TOOLS["set_weather_location_alias"] = set_weather_location_alias
+    AVAILABLE_TOOLS["remove_weather_location_alias"] = remove_weather_location_alias
+    AVAILABLE_TOOLS["list_weather_location_aliases"] = list_weather_location_aliases
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_noaa_weather",
+                "description": "Get weather for a user-specified U.S. place like 'Houston', 'Houston, TX', a ZIP code, street address, or a saved alias like 'home', 'work', or 'school'. If no location is provided, use the saved 'home' alias first, then the optional env fallback if configured.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "Optional place name, ZIP, address, or saved alias such as home/work/school."
+                        },
+                        "timeframe": {
+                            "type": "string",
+                            "enum": ["forecast", "hourly"],
+                            "description": "Use 'forecast' for the standard period forecast or 'hourly' for the next several hourly slices."
+                        },
+                        "include_alerts": {
+                            "type": "boolean",
+                            "description": "Whether to include active NOAA/NWS weather alerts for that area."
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_weather_location_alias",
+                "description": "Save or update a persistent weather alias like 'home', 'work', or 'school' from a natural-language location. Use this when the user explicitly asks to set, save, update, or change one of their named places.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "alias": {
+                            "type": "string",
+                            "description": "Short alias to save, such as home, work, school, office, or cabin."
+                        },
+                        "location": {
+                            "type": "string",
+                            "description": "The place to resolve and save, such as 'Houston, TX' or '123 Main St, Dallas, TX'."
+                        }
+                    },
+                    "required": ["alias", "location"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_weather_location_alias",
+                "description": "Delete a saved weather alias like 'home', 'work', or 'school'. Use this when the user explicitly asks to clear, remove, or delete a saved location alias.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "alias": {
+                            "type": "string",
+                            "description": "The saved alias to remove."
+                        }
+                    },
+                    "required": ["alias"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_weather_location_aliases",
+                "description": "List the saved persistent weather aliases like home, work, school, or office.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
         }
-    })
+    ])
 
 if is_enabled("ENABLE_NEWS"):
     AVAILABLE_TOOLS["get_news_headlines"] = get_news_headlines
@@ -452,13 +521,7 @@ if is_enabled("ENABLE_REOLINK"):
     AVAILABLE_TOOLS["get_camera_security_log"] = get_camera_security_log
     
     # Extract camera names from configuration
-    raw_cams = os.getenv("REOLINK_CAMERAS", "")
-    camera_names = []
-    for item in raw_cams.split(","):
-        colon_idx = item.find(":")
-        if colon_idx != -1:
-            camera_name_only = item[:colon_idx]
-            camera_names.append(camera_name_only.strip())
+    camera_names = list(REOLINK_CAMERAS.keys())
             
     camera_list_str = ", ".join([f"'{c}'" for c in camera_names]) if camera_names else "'front', 'frontdoor'"
     
@@ -772,6 +835,9 @@ TOOL_STATUS_MESSAGES = {
     "set_nest_thermostat_mode": f"{MODEL_NAME} is changing the Nest thermostat mode...",
     "set_nest_thermostat_temperature": f"{MODEL_NAME} is adjusting the Nest thermostat temperature...",
     "get_noaa_weather": f"{MODEL_NAME} is looking outside...",
+    "set_weather_location_alias": f"{MODEL_NAME} is saving a weather location...",
+    "remove_weather_location_alias": f"{MODEL_NAME} is clearing a weather location...",
+    "list_weather_location_aliases": f"{MODEL_NAME} is checking saved weather locations...",
     "generate_image": f"{MODEL_NAME} is painting a picture...",
     "get_news_headlines": f"{MODEL_NAME} is reading the morning news...",
     "get_nasa_apod": f"{MODEL_NAME} is studying the stars...",
@@ -825,7 +891,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     prune_past_tool_responses(history_buffer)
 
     url = OLLAMA_URL
-    ctx_size = int(os.getenv("OLLAMA_NUM_CTX", "65536"))
+    ctx_size = OLLAMA_NUM_CTX
 
     
     # Find the latest user query and sender info from the history buffer

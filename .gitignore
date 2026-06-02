@@ -18,7 +18,7 @@ test_memory_temp.md
 camera_log.md
 camera_log.md.bak
 test_camera_log.md
-custom_jobs.json
+config/
 
 # Local Tests Folder
 tests/
@@ -26,3 +26,6 @@ tests/
 
 # Backups
 *.bak
+
+# Local idea sketches
+project_ideas/

@@ -3,6 +3,7 @@ import re
 import logging
 import asyncio
 import base64
+import json
 import subprocess
 import requests
 from bs4 import BeautifulSoup
@@ -20,11 +21,15 @@ from googleapiclient.discovery import build
 from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, SEARXNG_URL, NASA_API_KEY, GEMINI_API_KEY,
-    IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, raw_cal_string,
+    IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,
     OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME,
     ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY,
-    FRED_API_KEY, ALPHA_VANTAGE_API_KEY
+    FRED_API_KEY, ALPHA_VANTAGE_API_KEY, GOOGLE_TOKEN_PATH, NEST_TOKEN_PATH,
+    NEST_PROJECT_ID, REOLINK_SILENT_ALERTS, SECURITY_TOPIC_ID, REOLINK_HOST,
+    REOLINK_USER, REOLINK_PASSWORD, REOLINK_CAMERAS, REOLINK_CAMERA_DESCRIPTIONS,
+    TELEGRAM_GROUP_CHAT_ID, ENABLE_REOLINK_THREADING, REOLINK_THREAD_WINDOW_MINUTES,
+    ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
@@ -275,18 +280,292 @@ async def generate_image(prompt): # Generates an image based on the prompt using
         return f"Error: {e}"
 
 # --- NOAA WEATHER ---
-async def get_noaa_weather(): # Fetches the forecast
-    headers = {'User-Agent': f'({MODEL_NAME}-bot, {NOAA_EMAIL})'}
+WEATHER_GEOCODER_URL = "https://nominatim.openstreetmap.org/search"
+WEATHER_SUPPORTED_COUNTRY_CODES = "us,pr,vi,gu,mp,as"
+
+
+def _weather_headers():
+    contact = NOAA_EMAIL or "no-contact-provided"
+    return {
+        "User-Agent": f"{MODEL_NAME}-weather/1.0 ({contact})",
+        "Accept": "application/geo+json, application/json",
+    }
+
+
+def _normalize_weather_alias(alias: str) -> str:
+    alias = (alias or "").strip().lower()
+    alias = re.sub(r"[^a-z0-9_-]+", "_", alias)
+    alias = re.sub(r"_+", "_", alias).strip("_")
+    return alias
+
+
+def _load_weather_locations() -> dict:
+    if not WEATHER_LOCATIONS_FILE_PATH or not os.path.exists(WEATHER_LOCATIONS_FILE_PATH):
+        return {}
     try:
-        r1 = await globals.http_client.get(f"https://api.weather.gov/points/{NOAA_LAT},{NOAA_LONG}", headers=headers)
-        r2 = await globals.http_client.get(r1.json()['properties']['forecast'], headers=headers)
-        periods = r2.json()['properties']['periods']
-        
-        forecast_lines = [f"{p['name']}: {p['detailedForecast']}" for p in periods[:3]]
-        return "Weather Forecast:\n" + "\n".join(forecast_lines)
-    except Exception as e: 
-        logging.error(f"Weather error: {e}")
+        with open(WEATHER_LOCATIONS_FILE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logging.error(f"❌ WEATHER: Failed to load locations file: {e}", exc_info=True)
+        return {}
+
+
+def _save_weather_locations(locations: dict) -> bool:
+    try:
+        with open(WEATHER_LOCATIONS_FILE_PATH, "w", encoding="utf-8") as f:
+            json.dump(locations, f, indent=2, sort_keys=True)
+        return True
+    except Exception as e:
+        logging.error(f"❌ WEATHER: Failed to save locations file: {e}", exc_info=True)
+        return False
+
+
+def _get_saved_weather_alias(alias: str):
+    normalized = _normalize_weather_alias(alias)
+    if not normalized:
+        return None
+    return _load_weather_locations().get(normalized)
+
+
+def _default_weather_location():
+    saved_home = _get_saved_weather_alias("home")
+    if saved_home:
+        return {
+            "label": saved_home.get("label", "home"),
+            "lat": saved_home.get("lat"),
+            "lon": saved_home.get("lon"),
+            "source": "alias:home",
+        }
+
+    try:
+        if NOAA_LAT and NOAA_LONG:
+            return {
+                "label": "default configured location",
+                "lat": float(NOAA_LAT),
+                "lon": float(NOAA_LONG),
+                "source": "env",
+            }
+    except ValueError:
+        logging.warning("⚠️ WEATHER: NOAA_LAT/NOAA_LONG are set but invalid.")
+    return None
+
+
+async def _geocode_weather_location(location: str):
+    params = {
+        "q": location,
+        "format": "jsonv2",
+        "limit": 5,
+        "addressdetails": 1,
+        "countrycodes": WEATHER_SUPPORTED_COUNTRY_CODES,
+    }
+    response = await globals.http_client.get(
+        WEATHER_GEOCODER_URL,
+        params=params,
+        headers=_weather_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload:
+        return None, f"I couldn't resolve '{location}' to a U.S. weather location."
+
+    best = payload[0]
+    try:
+        lat = float(best["lat"])
+        lon = float(best["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None, f"I found a match for '{location}', but the coordinates were invalid."
+
+    display_name = best.get("display_name", location)
+    return {
+        "label": display_name,
+        "lat": lat,
+        "lon": lon,
+        "source": "geocoder",
+    }, None
+
+
+async def _resolve_weather_location(location: str = None):
+    if not location:
+        default_location = _default_weather_location()
+        if default_location:
+            return default_location, None
+        return None, (
+            "No default weather location is set yet. "
+            "Ask for a place directly like 'What is the weather in Houston?' "
+            "or save one with 'Set my home to Houston, TX.'"
+        )
+
+    alias_record = _get_saved_weather_alias(location)
+    if alias_record:
+        return {
+            "label": alias_record.get("label", location),
+            "lat": alias_record.get("lat"),
+            "lon": alias_record.get("lon"),
+            "source": f"alias:{_normalize_weather_alias(location)}",
+        }, None
+
+    return await _geocode_weather_location(location)
+
+
+async def _get_noaa_point_metadata(lat: float, lon: float):
+    response = await globals.http_client.get(
+        f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}",
+        headers=_weather_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json().get("properties", {})
+    forecast_url = data.get("forecast")
+    hourly_url = data.get("forecastHourly")
+    forecast_zone = data.get("forecastZone", "")
+    if not forecast_url or not hourly_url:
+        raise ValueError("NOAA point lookup did not return forecast URLs.")
+    return {
+        "forecast_url": forecast_url,
+        "hourly_url": hourly_url,
+        "forecast_zone": forecast_zone.rsplit("/", 1)[-1] if forecast_zone else "",
+    }
+
+
+async def _get_noaa_alert_summary(forecast_zone: str):
+    if not forecast_zone:
+        return []
+    response = await globals.http_client.get(
+        "https://api.weather.gov/alerts/active",
+        params={"zone": forecast_zone},
+        headers=_weather_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    features = response.json().get("features", [])
+    alert_lines = []
+    for feature in features[:3]:
+        properties = feature.get("properties", {})
+        event = properties.get("event", "Weather Alert")
+        headline = properties.get("headline") or properties.get("description", "")
+        headline = re.sub(r"\s+", " ", headline).strip()
+        if headline:
+            alert_lines.append(f"- {event}: {headline[:180]}")
+        else:
+            alert_lines.append(f"- {event}")
+    return alert_lines
+
+
+def _format_noaa_forecast(location_label: str, periods: list, timeframe: str, alerts: list):
+    title = f"Weather Forecast for {location_label}:"
+    if timeframe == "hourly":
+        lines = []
+        for period in periods[:6]:
+            temp = period.get("temperature")
+            temp_unit = period.get("temperatureUnit", "F")
+            wind = f"{period.get('windSpeed', 'N/A')} {period.get('windDirection', '')}".strip()
+            short_forecast = period.get("shortForecast", "No forecast text")
+            lines.append(
+                f"{period.get('startTime', '')[:16]}: {temp}°{temp_unit}, {short_forecast}, Wind {wind}"
+            )
+    else:
+        lines = []
+        for period in periods[:3]:
+            lines.append(f"{period.get('name', 'Period')}: {period.get('detailedForecast', 'No forecast available.')}")
+
+    if alerts:
+        lines.append("")
+        lines.append("Active alerts:")
+        lines.extend(alerts)
+
+    return title + "\n" + "\n".join(lines)
+
+
+async def get_noaa_weather(location: str = None, timeframe: str = "forecast", include_alerts: bool = True):
+    timeframe = (timeframe or "forecast").strip().lower()
+    if timeframe not in {"forecast", "hourly"}:
+        return "Weather error: timeframe must be either 'forecast' or 'hourly'."
+
+    try:
+        resolved_location, error = await _resolve_weather_location(location)
+        if error:
+            return error
+
+        lat = float(resolved_location["lat"])
+        lon = float(resolved_location["lon"])
+        point_meta = await _get_noaa_point_metadata(lat, lon)
+        forecast_url = point_meta["hourly_url"] if timeframe == "hourly" else point_meta["forecast_url"]
+
+        forecast_response = await globals.http_client.get(
+            forecast_url,
+            headers=_weather_headers(),
+            timeout=20,
+        )
+        forecast_response.raise_for_status()
+        periods = forecast_response.json().get("properties", {}).get("periods", [])
+        if not periods:
+            return f"Weather unavailable for {resolved_location['label']}."
+
+        alerts = []
+        if include_alerts:
+            alerts = await _get_noaa_alert_summary(point_meta.get("forecast_zone", ""))
+
+        return _format_noaa_forecast(resolved_location["label"], periods, timeframe, alerts)
+    except Exception as e:
+        logging.error(f"Weather error: {e}", exc_info=True)
         return "Weather unavailable."
+
+
+async def set_weather_location_alias(alias: str, location: str):
+    normalized_alias = _normalize_weather_alias(alias)
+    if not normalized_alias:
+        return "Weather alias error: alias must contain letters or numbers."
+
+    try:
+        resolved_location, error = await _geocode_weather_location(location)
+        if error:
+            return error
+
+        locations = _load_weather_locations()
+        locations[normalized_alias] = {
+            "label": resolved_location["label"],
+            "lat": round(float(resolved_location["lat"]), 6),
+            "lon": round(float(resolved_location["lon"]), 6),
+        }
+        if not _save_weather_locations(locations):
+            return "Weather alias error: failed to save the location."
+
+        return (
+            f"Saved weather alias '{normalized_alias}' as {resolved_location['label']} "
+            f"({locations[normalized_alias]['lat']}, {locations[normalized_alias]['lon']})."
+        )
+    except Exception as e:
+        logging.error(f"Weather alias save error: {e}", exc_info=True)
+        return "Weather alias error: unable to save that location right now."
+
+
+async def remove_weather_location_alias(alias: str):
+    normalized_alias = _normalize_weather_alias(alias)
+    if not normalized_alias:
+        return "Weather alias error: alias must contain letters or numbers."
+
+    locations = _load_weather_locations()
+    if normalized_alias not in locations:
+        return f"No saved weather alias named '{normalized_alias}' exists."
+
+    del locations[normalized_alias]
+    if not _save_weather_locations(locations):
+        return "Weather alias error: failed to update the saved locations."
+    return f"Removed weather alias '{normalized_alias}'."
+
+
+async def list_weather_location_aliases():
+    locations = _load_weather_locations()
+    if not locations:
+        return "No saved weather aliases yet."
+
+    lines = ["Saved weather aliases:"]
+    for alias in sorted(locations):
+        location = locations[alias]
+        lines.append(f"- {alias}: {location.get('label', 'Unknown location')}")
+    return "\n".join(lines)
 
 # --- WEB SEARCH & SCRAPING ---
 async def web_search(query): # Searches the internet
@@ -938,10 +1217,11 @@ async def get_labor_market_dashboard() -> str:
 async def get_news_headlines(): # Fetches news headlines from RSS feeds
     FEEDS = {}
     if NEWS_FEEDS:
-        for item in NEWS_FEEDS.split(","):
-            if "|" in item:
-                name, url = item.split("|")
-                FEEDS[name.strip().lower()] = url.strip()
+        for item in NEWS_FEEDS:
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            if name and url:
+                FEEDS[name.lower()] = url
     
     if not FEEDS:
         FEEDS = {"news": "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en"}
@@ -996,9 +1276,7 @@ async def get_today_in_history(): # Fetches historical events for the current da
         return "Failed to fetch history data."
 
 async def get_calendar_events(): # Fetches User's Google Calendars
-    token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
-    raw_cal_ids = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
-    calendar_ids = [c.strip() for c in raw_cal_ids.split(",")]
+    token_path = GOOGLE_TOKEN_PATH
 
     try:
         if not os.path.exists(token_path):
@@ -1091,7 +1369,7 @@ async def get_calendar_events(): # Fetches User's Google Calendars
 
 # --- GOOGLE NEST ---
 def get_nest_credentials():
-    token_path = os.getenv("NEST_TOKEN_PATH", "nest_token.json")
+    token_path = NEST_TOKEN_PATH
     if not os.path.exists(token_path):
         raise FileNotFoundError("Google Nest token file not found.")
         
@@ -1105,9 +1383,9 @@ def get_nest_credentials():
     return creds
 
 async def get_nest_thermostats() -> str:
-    project_id = os.getenv("NEST_PROJECT_ID")
+    project_id = NEST_PROJECT_ID
     if not project_id or project_id.strip() == "":
-        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        return "Nest error: Nest project ID is not configured in config/integrations.json."
         
     try:
         creds = get_nest_credentials()
@@ -1216,9 +1494,9 @@ async def get_nest_thermostats() -> str:
         return f"Nest error: Failed to fetch thermostats: {e}"
 
 async def set_nest_thermostat_mode(device_id: str, mode: str) -> str:
-    project_id = os.getenv("NEST_PROJECT_ID")
+    project_id = NEST_PROJECT_ID
     if not project_id or project_id.strip() == "":
-        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        return "Nest error: Nest project ID is not configured in config/integrations.json."
         
     mode = mode.upper()
     if mode not in ["HEAT", "COOL", "HEATCOOL", "OFF"]:
@@ -1252,9 +1530,9 @@ async def set_nest_thermostat_mode(device_id: str, mode: str) -> str:
         return f"Nest error: Failed to set mode: {e}"
 
 async def set_nest_thermostat_temperature(device_id: str, temp_celsius: float = None, heat_temp_celsius: float = None, cool_temp_celsius: float = None) -> str:
-    project_id = os.getenv("NEST_PROJECT_ID")
+    project_id = NEST_PROJECT_ID
     if not project_id or project_id.strip() == "":
-        return "Nest error: NEST_PROJECT_ID is not configured in your .env file."
+        return "Nest error: Nest project ID is not configured in config/integrations.json."
         
     try:
         creds = get_nest_credentials()
@@ -1454,25 +1732,14 @@ async def get_reolink_snapshot(
     # Resolve topics and silent settings
     silent_alerts = False
     if use_alert_configs:
-        silent_alerts = os.getenv("REOLINK_SILENT_ALERTS", "true").lower() != "false"
-        if actual_thread_id is None:
-            topic_id_env = os.getenv("SECURITY_TOPIC_ID")
-            if topic_id_env:
-                try:
-                    actual_thread_id = int(topic_id_env)
-                except ValueError:
-                    pass
+        silent_alerts = REOLINK_SILENT_ALERTS
+        if actual_thread_id is None and SECURITY_TOPIC_ID is not None:
+            actual_thread_id = SECURITY_TOPIC_ID
 
-    host = os.getenv("REOLINK_HOST")
-    user = os.getenv("REOLINK_USER")
-    password = os.getenv("REOLINK_PASSWORD")
-    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
-    
-    camera_map = {}
-    for item in cameras_raw.split(","):
-        if ":" in item:
-            name, channel = item.split(":")
-            camera_map[name.strip().lower()] = channel.strip()
+    host = REOLINK_HOST
+    user = REOLINK_USER
+    password = REOLINK_PASSWORD
+    camera_map = {name.strip().lower(): str(channel).strip() for name, channel in REOLINK_CAMERAS.items()}
             
     target_name = camera_name.lower().strip()
     for word in ["camera", "feed", "view", "stream"]:
@@ -1542,12 +1809,10 @@ async def get_reolink_snapshot(
         compressed_bytes = compress_image_bytes(response_content)
         b64_image = base64.b64encode(compressed_bytes).decode('utf-8')
         
-        descriptions_raw = os.getenv("REOLINK_CAMERA_DESCRIPTIONS", "")
-        camera_descriptions = {}
-        for item in descriptions_raw.split(","):
-            if ":" in item:
-                name, desc = item.split(":", 1)
-                camera_descriptions[name.strip().lower()] = desc.strip()
+        camera_descriptions = {
+            name.strip().lower(): str(desc).strip()
+            for name, desc in REOLINK_CAMERA_DESCRIPTIONS.items()
+        }
                 
         default_descriptions = {
             "frontdoor": "A doorbell camera located on the front door, looking at the front patio and sidewalk",
@@ -1634,16 +1899,9 @@ async def get_reolink_snapshot(
         return f"Successfully grabbed the image, but failed to analyze/send it: {e}"
 
 async def get_available_cameras() -> str:
-    raw_cams = os.getenv("REOLINK_CAMERAS", "")
-    if not raw_cams:
+    if not REOLINK_CAMERAS:
         return "No security cameras are currently configured in the system."
-        
-    camera_names = []
-    for item in raw_cams.split(","):
-        colon_idx = item.find(":")
-        if colon_idx != -1:
-            camera_name_only = item[:colon_idx]
-            camera_names.append(camera_name_only.strip())
+    camera_names = list(REOLINK_CAMERAS.keys())
             
     if not camera_names:
         return "The camera configuration is empty or formatted incorrectly."
@@ -1655,13 +1913,7 @@ async def trigger_webhook_alert(camera_name: str):
     logging.info(f"🚨 SECURITY: Person trigger received for '{camera_name}' — dispatching alert...")
     
     # Resolve the target chat ID for alerts (check TELEGRAM_GROUP_CHAT_ID first, fall back to TARGET_CHAT_ID)
-    group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
-    alert_chat_id = None
-    if group_chat_id_env:
-        try:
-            alert_chat_id = int(group_chat_id_env)
-        except ValueError:
-            logging.error(f"❌ Invalid TELEGRAM_GROUP_CHAT_ID: {group_chat_id_env}")
+    alert_chat_id = TELEGRAM_GROUP_CHAT_ID
 
     if not alert_chat_id:
         if not globals.TARGET_CHAT_ID.get() and globals.chat_histories:
@@ -1669,16 +1921,12 @@ async def trigger_webhook_alert(camera_name: str):
         alert_chat_id = globals.TARGET_CHAT_ID.get()
         
     if not alert_chat_id:
-        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set TELEGRAM_GROUP_CHAT_ID in .env or message the bot first.")
+        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set telegram.group_chat_id in config/integrations.json or message the bot first.")
         return
         
     # Check if threading is enabled and configure parameters
-    enable_threading = os.getenv("ENABLE_REOLINK_THREADING", "true").lower() == "true"
-    
-    try:
-        thread_window_minutes = float(os.getenv("REOLINK_THREAD_WINDOW_MINUTES", "10"))
-    except ValueError:
-        thread_window_minutes = 10.0
+    enable_threading = ENABLE_REOLINK_THREADING
+    thread_window_minutes = REOLINK_THREAD_WINDOW_MINUTES
         
     reply_to_message_id = None
     cam_key = camera_name.lower().strip()
@@ -1699,13 +1947,7 @@ async def trigger_webhook_alert(camera_name: str):
             logging.info(f"🧵 REOLINK THREAD: No active thread for camera '{camera_name}'. Starting a new thread.")
             
     # Resolve the SECURITY_TOPIC_ID
-    security_topic_id = None
-    security_topic_env = os.getenv("SECURITY_TOPIC_ID")
-    if security_topic_env:
-        try:
-            security_topic_id = int(security_topic_env)
-        except ValueError:
-            pass
+    security_topic_id = SECURITY_TOPIC_ID
 
     # Call get_reolink_snapshot directly (skipping the status message)
     # We pass update_thread_tracker=True so the photo message ID gets tracked if it starts a new thread.
@@ -1747,25 +1989,17 @@ async def trigger_webhook_alert(camera_name: str):
     })
 
 async def reolink_polling_loop(application):
-    if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() != "true":
+    if not ENABLE_REOLINK_POLLING:
         return
         
     logging.info("📹 CAMERA POLL: Initializing background person-detection polling loop...")
-    host = os.getenv("REOLINK_HOST")
-    user = os.getenv("REOLINK_USER")
-    password = os.getenv("REOLINK_PASSWORD")
-    cameras_raw = os.getenv("REOLINK_CAMERAS", "")
-    
-    camera_map = {}
-    for item in cameras_raw.split(","):
-        colon_idx = item.find(":")
-        if colon_idx != -1:
-            name = item[:colon_idx].strip()
-            chan = item[colon_idx+1:].strip()
-            camera_map[name] = chan
+    host = REOLINK_HOST
+    user = REOLINK_USER
+    password = REOLINK_PASSWORD
+    camera_map = {name: str(channel).strip() for name, channel in REOLINK_CAMERAS.items()}
             
     if not camera_map:
-        logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Check your REOLINK_CAMERAS environment variable.")
+        logging.warning("⚠️ REOLINK POLLING: No cameras mapped. Check config/integrations.json.")
         return
         
     logging.info(f"📹 CAMERA POLL: Mapped {len(camera_map)} cameras — {list(camera_map.keys())}")
@@ -1858,7 +2092,7 @@ async def reolink_polling_loop(application):
             logging.error(f"❌ REOLINK POLLING: Global polling loop exception: {outer_e}")
 
 async def start_reolink_polling(application):
-    if os.getenv("ENABLE_REOLINK_POLLING", "false").lower() == "true":
+    if ENABLE_REOLINK_POLLING:
         asyncio.create_task(reolink_polling_loop(application))
 
 # --- EMOJI REACTIONS AND THREADING TOOLS ---
@@ -1944,7 +2178,7 @@ async def search_gif(query: str) -> str:
     """Helper function to search Giphy and Tenor APIs for a GIF matching the query."""
     # 1. Try Giphy search first (using custom key if provided, fallback to Giphy public beta key)
     try:
-        giphy_key = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")
+        giphy_key = GIPHY_API_KEY
         url = "https://api.giphy.com/v1/gifs/search"
         params = {"api_key": giphy_key, "q": query, "limit": 1}
         r = await globals.http_client.get(url, params=params, timeout=10)
@@ -1957,7 +2191,7 @@ async def search_gif(query: str) -> str:
 
     # 2. Try Tenor search (using custom key if provided, fallback to Tenor default key)
     try:
-        tenor_key = os.getenv("TENOR_API_KEY", "LIVDTRZ9VRJH")
+        tenor_key = TENOR_API_KEY
         url = "https://tenor.googleapis.com/v2/posts"
         params = {"key": tenor_key, "q": query, "limit": 1, "client_key": "emerychat"}
         r = await globals.http_client.get(url, params=params, timeout=10)

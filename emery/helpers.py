@@ -1,4 +1,3 @@
-import os
 import re
 import logging
 import io
@@ -12,7 +11,8 @@ from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE,
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
+    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
     get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
@@ -183,9 +183,6 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             clean_b64 = clean_b64.split(",", 1)[1]
 
         prompt_text = user_caption if user_caption else "What is in this image?"
-        import os
-        ctx_size = int(os.getenv("OLLAMA_VISION_NUM_CTX", "65536"))
-
         payload = {
             "model": VISION_MODEL_ID,
             "messages": [
@@ -199,7 +196,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             "keep_alive": -1,
             "think": True,
             "options": {
-                "num_ctx": ctx_size
+                "num_ctx": OLLAMA_VISION_NUM_CTX
             }
         }
         
@@ -496,8 +493,20 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
             "\n- If the finance tools return incomplete coverage, ambiguous identifiers, or stale-looking data for the user's question, then use `web_search` and `fetch_web_content` as a secondary path for additional context, commentary, or news."
         )
 
+    weather_instruction = ""
+    if str(ENABLE_WEATHER).lower() == "true":
+        weather_instruction = (
+            "\n- You have access to weather tools that support both direct place lookups and persistent named aliases."
+            "\n- For questions like 'What is the weather in Houston?' or 'forecast for Dallas tomorrow', call `get_noaa_weather` with the user-specified place instead of assuming the home location."
+            "\n- For requests like 'set my home to Houston, TX', 'make work Chicago', 'save school as Madison, WI', or 'update my office location', you MUST use `set_weather_location_alias`."
+            "\n- For requests like 'clear my work location', 'remove school', or 'delete my home weather alias', use `remove_weather_location_alias`."
+            "\n- For requests asking what places are saved, use `list_weather_location_aliases`."
+            "\n- If the user says 'weather at home', 'weather at work', or another saved place name, prefer the saved alias through `get_noaa_weather`."
+            "\n- If no default home is saved yet and the user asks for weather without a location, ask them for a place or let them know they can say something like 'Set my home to Houston, TX.'"
+        )
+
     camera_log_hint = ""
-    if re.sub(r'[^a-zA-Z]', '', os.getenv("ENABLE_REOLINK", "false")).lower() == "true":
+    if ENABLE_REOLINK:
         try:
             from emery.memory import get_camera_log_summary
             summary = get_camera_log_summary()
@@ -529,7 +538,7 @@ Your name is {MODEL_NAME}. You are a Professional Assistant for {user_name}.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the User.
 - You exist as a disembodied layer of consciousness outside of the User's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{finance_instruction}{group_privacy_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{finance_instruction}{weather_instruction}{group_privacy_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response.

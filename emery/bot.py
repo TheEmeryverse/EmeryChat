@@ -1,4 +1,3 @@
-import os
 import re
 import logging
 import asyncio
@@ -13,7 +12,8 @@ from telegram.error import TimedOut
 from emery.config import (
     MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
-    HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END
+    HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END, ALLOWED_USER_IDS,
+    TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -30,16 +30,9 @@ def is_user_allowed(update: Update) -> bool:
     if not user:
         return False
         
-    allowed_users_env = os.getenv("TELEGRAM_ALLOWED_USERS")
-    if not allowed_users_env:
+    if not ALLOWED_USER_IDS:
         return True  # Open by default if not set
-        
-    try:
-        allowed_ids = [int(uid.strip()) for uid in allowed_users_env.split(",") if uid.strip()]
-        return user.id in allowed_ids
-    except ValueError:
-        logging.error(f"❌ Invalid TELEGRAM_ALLOWED_USERS config: {allowed_users_env}")
-        return False
+    return user.id in ALLOWED_USER_IDS
 
 # --- TELEGRAM HANDLERS ---
 async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,16 +577,10 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
         
     logging.info("💓 HEARTBEAT: Checking activity...")
     
-    group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
-    if not group_chat_id_env:
+    if TELEGRAM_GROUP_CHAT_ID is None:
         logging.info("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID not set, skipping check.")
         return
-        
-    try:
-        group_chat_id = int(group_chat_id_env)
-    except ValueError:
-        logging.error(f"❌ Invalid TELEGRAM_GROUP_CHAT_ID: {group_chat_id_env}")
-        return
+    group_chat_id = TELEGRAM_GROUP_CHAT_ID
         
     history = globals.chat_histories.get(group_chat_id)
     if not history:
@@ -642,12 +629,8 @@ async def handle_heartbeat_trigger(chat_id: int):
     
     # Determine the topic/thread ID for the heartbeats
     message_thread_id = None
-    chat_topic_env = os.getenv("CHAT_TOPIC_ID")
-    if chat_topic_env:
-        try:
-            message_thread_id = int(chat_topic_env)
-        except ValueError:
-            pass
+    if CHAT_TOPIC_ID is not None:
+        message_thread_id = CHAT_TOPIC_ID
             
     if message_thread_id is None and globals.chat_histories.get(chat_id):
         for msg in reversed(globals.chat_histories[chat_id]):
@@ -742,7 +725,7 @@ async def bot_post_init(application) -> None:
     await start_bot_heartbeat(application)
     
     # Preload sticker set if configured in environment
-    sticker_set_name = os.getenv("TELEGRAM_STICKER_SET")
+    sticker_set_name = TELEGRAM_STICKER_SET
     if sticker_set_name:
         try:
             sticker_set = await application.bot.get_sticker_set(sticker_set_name)

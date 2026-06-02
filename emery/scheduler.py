@@ -1,4 +1,3 @@
-import os
 import json
 import uuid
 import logging
@@ -6,7 +5,10 @@ import re
 from datetime import datetime, time, timedelta
 from collections import deque
 
-from emery.config import USER_TIMEZONE, JOBS_FILE_PATH
+from emery.config import (
+    USER_TIMEZONE, JOBS_FILE_PATH, TELEGRAM_GROUP_CHAT_ID,
+    ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
+)
 import emery.globals as globals
 
 WEEKDAYS = {
@@ -117,28 +119,14 @@ async def run_custom_job(context):
     
     if is_routine and route_to_routines:
         # Automated routine jobs must go to the designated group and topic
-        group_chat_id_env = os.getenv("TELEGRAM_GROUP_CHAT_ID")
-        if group_chat_id_env:
-            try:
-                chat_id = int(group_chat_id_env)
-            except ValueError:
-                pass
-                
-        routines_topic_env = os.getenv("ROUTINES_TOPIC_ID")
-        if routines_topic_env:
-            try:
-                message_thread_id = int(routines_topic_env)
-            except ValueError:
-                pass
+        if TELEGRAM_GROUP_CHAT_ID is not None:
+            chat_id = TELEGRAM_GROUP_CHAT_ID
+        if ROUTINES_TOPIC_ID is not None:
+            message_thread_id = ROUTINES_TOPIC_ID
     else:
         # One-off reminders: fallback to CHAT_TOPIC_ID if they have no thread ID
-        if message_thread_id is None:
-            chat_topic_env = os.getenv("CHAT_TOPIC_ID")
-            if chat_topic_env:
-                try:
-                    message_thread_id = int(chat_topic_env)
-                except ValueError:
-                    pass
+        if message_thread_id is None and CHAT_TOPIC_ID is not None:
+            message_thread_id = CHAT_TOPIC_ID
 
     if not chat_id:
         chat_id = globals.TARGET_CHAT_ID.get()
@@ -551,4 +539,3 @@ def update_jobs_with_chat_id(chat_id: int):
             
     if updated:
         save_jobs_to_file(jobs)
-

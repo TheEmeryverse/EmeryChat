@@ -13,12 +13,12 @@ services:
     env_file:
       - .env
     volumes:
+      # Persist app-managed JSON config and runtime state on the host
+      - ./config:/app/config
       # Persist local agentic memory log on the host
       - ./memory.md:/app/memory.md
       # Persist secondary user (Anyssa) memory log on the host
       - ./memory_anyssa.md:/app/memory_anyssa.md
-      # Persist custom scheduled jobs on the host
-      - ./custom_jobs.json:/app/custom_jobs.json
       # Pass authentication tokens and OAuth secrets into the container
       - ./token.json:/app/token.json
       - ./nest_token.json:/app/nest_token.json

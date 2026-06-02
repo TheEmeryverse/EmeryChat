@@ -1,12 +1,248 @@
+import json
+import logging
 import os
 import sys
-import logging
+from pathlib import Path
+
 import pytz
 from dotenv import load_dotenv
 
-load_dotenv() # Load docker env variables
+load_dotenv()
 
-# --- LOGGING SETUP ---
+
+def _to_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_optional_int(value):
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_DIR = BASE_DIR / "config"
+USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
+INTEGRATIONS_CONFIG_PATH = CONFIG_DIR / "integrations.json"
+NEWS_FEEDS_CONFIG_PATH = CONFIG_DIR / "news_feeds.json"
+WEATHER_LOCATIONS_FILE_PATH = str(CONFIG_DIR / "weather_locations.json")
+JOBS_FILE_PATH = str(CONFIG_DIR / "custom_jobs.json")
+
+
+DEFAULT_NEWS_FEEDS = [
+    {
+        "name": "Reuters",
+        "url": "https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en",
+    },
+    {"name": "Fox", "url": "http://feeds.foxnews.com/foxnews/latest"},
+    {
+        "name": "Tech",
+        "url": "https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en",
+    },
+    {
+        "name": "Local",
+        "url": "https://news.google.com/rss/search?q=when:24h+Milwaukee+Wisconsin&hl=en-US&gl=US&ceid=US:en",
+    },
+]
+
+
+def _default_users_config():
+    return {
+        "allowed_user_ids": [],
+        "primary_user": {
+            "id": 0,
+            "name": "User",
+            "location": "Earth",
+            "timezone": "America/New_York",
+            "birthday": "UNKNOWN",
+            "family": "",
+            "profession": "Unemployed",
+        },
+        "secondary_user": {
+            "id": 0,
+            "name": "Wife",
+            "birthday": "UNKNOWN",
+            "family": "",
+            "profession": "Unemployed",
+        },
+        "relationship": "",
+    }
+
+
+def _default_integrations_config():
+    return {
+        "google_calendar_ids": ["primary"],
+        "telegram": {
+            "group_chat_id": None,
+            "security_topic_id": None,
+            "routines_topic_id": None,
+            "chat_topic_id": None,
+            "sticker_set_name": None,
+        },
+        "reolink": {
+            "cameras": {},
+            "camera_descriptions": {},
+            "silent_alerts": True,
+            "threading_enabled": True,
+            "thread_window_minutes": 10.0,
+            "polling_enabled": False,
+        },
+        "nest": {
+            "project_id": "",
+        },
+    }
+
+
+def _ensure_json_file(path: Path, default_data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(json.dumps(default_data, indent=2) + "\n", encoding="utf-8")
+        return default_data
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        repaired = default_data
+        path.write_text(json.dumps(repaired, indent=2) + "\n", encoding="utf-8")
+        return repaired
+
+
+def _normalize_users_config(raw):
+    default = _default_users_config()
+    primary = raw.get("primary_user", {}) if isinstance(raw, dict) else {}
+    secondary = raw.get("secondary_user", {}) if isinstance(raw, dict) else {}
+
+    return {
+        "allowed_user_ids": [
+            user_id
+            for user_id in (_to_int(value, 0) for value in raw.get("allowed_user_ids", []))
+            if user_id != 0
+        ] if isinstance(raw, dict) else [],
+        "primary_user": {
+            "id": _to_int(primary.get("id"), default["primary_user"]["id"]),
+            "name": str(primary.get("name", default["primary_user"]["name"])).strip() or default["primary_user"]["name"],
+            "location": str(primary.get("location", default["primary_user"]["location"])).strip() or default["primary_user"]["location"],
+            "timezone": str(primary.get("timezone", default["primary_user"]["timezone"])).strip() or default["primary_user"]["timezone"],
+            "birthday": str(primary.get("birthday", default["primary_user"]["birthday"])).strip() or default["primary_user"]["birthday"],
+            "family": str(primary.get("family", default["primary_user"]["family"])).strip(),
+            "profession": str(primary.get("profession", default["primary_user"]["profession"])).strip() or default["primary_user"]["profession"],
+        },
+        "secondary_user": {
+            "id": _to_int(secondary.get("id"), default["secondary_user"]["id"]),
+            "name": str(secondary.get("name", default["secondary_user"]["name"])).strip() or default["secondary_user"]["name"],
+            "birthday": str(secondary.get("birthday", default["secondary_user"]["birthday"])).strip() or default["secondary_user"]["birthday"],
+            "family": str(secondary.get("family", default["secondary_user"]["family"])).strip(),
+            "profession": str(secondary.get("profession", default["secondary_user"]["profession"])).strip() or default["secondary_user"]["profession"],
+        },
+        "relationship": str(raw.get("relationship", default["relationship"])).strip() if isinstance(raw, dict) else "",
+    }
+
+
+def _normalize_integrations_config(raw):
+    default = _default_integrations_config()
+    telegram = raw.get("telegram", {}) if isinstance(raw, dict) else {}
+    reolink = raw.get("reolink", {}) if isinstance(raw, dict) else {}
+    nest = raw.get("nest", {}) if isinstance(raw, dict) else {}
+
+    cameras = {}
+    for name, channel in reolink.get("cameras", {}).items():
+        clean_name = str(name).strip()
+        clean_channel = str(channel).strip()
+        if clean_name and clean_channel:
+            cameras[clean_name] = clean_channel
+
+    camera_descriptions = {}
+    for name, description in reolink.get("camera_descriptions", {}).items():
+        clean_name = str(name).strip()
+        clean_description = str(description).strip()
+        if clean_name and clean_description:
+            camera_descriptions[clean_name] = clean_description
+
+    calendar_ids = []
+    for calendar_id in raw.get("google_calendar_ids", default["google_calendar_ids"]):
+        clean_calendar_id = str(calendar_id).strip()
+        if clean_calendar_id:
+            calendar_ids.append(clean_calendar_id)
+    if not calendar_ids:
+        calendar_ids = default["google_calendar_ids"]
+
+    return {
+        "google_calendar_ids": calendar_ids,
+        "telegram": {
+            "group_chat_id": _normalize_optional_int(telegram.get("group_chat_id")),
+            "security_topic_id": _normalize_optional_int(telegram.get("security_topic_id")),
+            "routines_topic_id": _normalize_optional_int(telegram.get("routines_topic_id")),
+            "chat_topic_id": _normalize_optional_int(telegram.get("chat_topic_id")),
+            "sticker_set_name": str(telegram.get("sticker_set_name") or "").strip() or None,
+        },
+        "reolink": {
+            "cameras": cameras,
+            "camera_descriptions": camera_descriptions,
+            "silent_alerts": _to_bool(reolink.get("silent_alerts"), default["reolink"]["silent_alerts"]),
+            "threading_enabled": _to_bool(reolink.get("threading_enabled"), default["reolink"]["threading_enabled"]),
+            "thread_window_minutes": _to_float(reolink.get("thread_window_minutes"), default["reolink"]["thread_window_minutes"]),
+            "polling_enabled": _to_bool(reolink.get("polling_enabled"), default["reolink"]["polling_enabled"]),
+        },
+        "nest": {
+            "project_id": str(nest.get("project_id", default["nest"]["project_id"])).strip(),
+        },
+    }
+
+
+def _normalize_news_feeds(raw):
+    feeds = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            if name and url:
+                feeds.append({"name": name, "url": url})
+    return feeds or DEFAULT_NEWS_FEEDS
+
+
+def _write_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+_raw_users = _ensure_json_file(USERS_CONFIG_PATH, _default_users_config())
+_raw_integrations = _ensure_json_file(INTEGRATIONS_CONFIG_PATH, _default_integrations_config())
+_raw_news_feeds = _ensure_json_file(NEWS_FEEDS_CONFIG_PATH, DEFAULT_NEWS_FEEDS)
+_ensure_json_file(Path(WEATHER_LOCATIONS_FILE_PATH), {})
+_ensure_json_file(Path(JOBS_FILE_PATH), [])
+
+USERS_CONFIG = _normalize_users_config(_raw_users)
+INTEGRATIONS_CONFIG = _normalize_integrations_config(_raw_integrations)
+NEWS_FEEDS = _normalize_news_feeds(_raw_news_feeds)
+
+_write_json(USERS_CONFIG_PATH, USERS_CONFIG)
+_write_json(INTEGRATIONS_CONFIG_PATH, INTEGRATIONS_CONFIG)
+_write_json(NEWS_FEEDS_CONFIG_PATH, NEWS_FEEDS)
+
+
 class ColoredFormatter(logging.Formatter):
     GREY = "\x1b[90m"
     CYAN = "\x1b[36m"
@@ -21,7 +257,7 @@ class ColoredFormatter(logging.Formatter):
         logging.INFO: GREEN,
         logging.WARNING: YELLOW,
         logging.ERROR: RED,
-        logging.CRITICAL: BOLD_RED
+        logging.CRITICAL: BOLD_RED,
     }
 
     def __init__(self, use_color: bool = True):
@@ -37,61 +273,55 @@ class ColoredFormatter(logging.Formatter):
             color = self.LEVEL_COLORS.get(record.levelno, self.RESET)
             formatted_time = f"{self.GREY}{asctime}{self.RESET}"
             formatted_level = f"{color}{levelname}{self.RESET}"
-            
-            if record.exc_info:
-                if not record.exc_text:
-                    record.exc_text = self.formatException(record.exc_info)
+
+            if record.exc_info and not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
             if record.exc_text:
                 message = f"{message}\n{self.RED}{record.exc_text}{self.RESET}"
-                
+
             return f"{formatted_time} | {formatted_level} | {message}"
-        else:
-            if record.exc_info:
-                if not record.exc_text:
-                    record.exc_text = self.formatException(record.exc_info)
-            if record.exc_text:
-                message = f"{message}\n{record.exc_text}"
-            return f"{asctime} | {levelname} | {message}"
 
-# Detect if stdout supports colors
-use_color = sys.stdout.isatty() if hasattr(sys, 'stdout') else False
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            message = f"{message}\n{record.exc_text}"
+        return f"{asctime} | {levelname} | {message}"
 
-# Custom StreamHandler
+
+use_color = sys.stdout.isatty() if hasattr(sys, "stdout") else False
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(ColoredFormatter(use_color=use_color))
 
-# Root logger setup
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.handlers = []
 root_logger.addHandler(handler)
 
-# Mute noisy logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
-# --- GLOBAL CONFIGURATION ---
-MODEL_NAME = os.getenv("MODEL_NAME", "Emery") # The name of the model to use for responses
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat") # Ollama URL
-OPEN_WEBUI_KEY = os.getenv("OPEN_WEBUI_KEY", "blank") # Open WebUI API Key
-THINK = os.getenv("ENABLE_THINKING", "true").lower() == "true" # Toggles the thinking engine
-MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")  # Main model ID
-VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b") # Coprocessor model ID
-VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat") # Coprocessor Ollama URL
-ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "true").lower() == "true" # Toggles memory engine
-MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md") # Path to memory.md
-CAMERA_LOG_FILE_PATH = os.getenv("CAMERA_LOG_FILE_PATH", "camera_log.md") # Path to camera_log.md
-MEMORY_THRESHOLD = int(os.getenv("MEMORY_THRESHOLD", "4000")) # Memory context threshold
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search") # SearXNG URL
-NASA_API_KEY = os.getenv("NASA_API_KEY", "blank") # NASA API Key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "blank") # Gemini image API key
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-3.1-flash-image-preview") # Image model ID
-NOAA_LAT = os.getenv("NOAA_LAT", "40.7128") # NOAA Lat
-NOAA_LONG = os.getenv("NOAA_LONG", "74.0060") # NOAA Long
-NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com") # NOAA Email
-raw_cal_string = os.getenv("GOOGLE_CALENDAR_IDS", "primary")
-calendar_ids = [c.strip() for c in raw_cal_string.split(",")]
-TOOL_LOOP = int(os.getenv("TOOL_LOOP", "15")) # Max LLM tool invocation turns
+
+MODEL_NAME = os.getenv("MODEL_NAME", "Emery")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+OPEN_WEBUI_KEY = os.getenv("OPEN_WEBUI_KEY", "blank")
+THINK = _to_bool(os.getenv("ENABLE_THINKING"), True)
+MODEL_ID = os.getenv("MODEL_ID", "qwen3.5:14b")
+VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b")
+VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat")
+OLLAMA_NUM_CTX = _to_int(os.getenv("OLLAMA_NUM_CTX"), 65536)
+OLLAMA_VISION_NUM_CTX = _to_int(os.getenv("OLLAMA_VISION_NUM_CTX"), 65536)
+ENABLE_MEMORY = _to_bool(os.getenv("ENABLE_MEMORY"), True)
+MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md")
+CAMERA_LOG_FILE_PATH = os.getenv("CAMERA_LOG_FILE_PATH", "camera_log.md")
+MEMORY_THRESHOLD = _to_int(os.getenv("MEMORY_THRESHOLD"), 4000)
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
+NASA_API_KEY = os.getenv("NASA_API_KEY", "blank")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "blank")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+NOAA_LAT = os.getenv("NOAA_LAT", "").strip()
+NOAA_LONG = os.getenv("NOAA_LONG", "").strip()
+NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com").strip()
+TOOL_LOOP = _to_int(os.getenv("TOOL_LOOP"), 15)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "blank")
 OVERSEER_URL = os.getenv("OVERSEER_URL", "http://localhost:5055/api/v1")
 OVERSEER_KEY = os.getenv("OVERSEER_KEY", "blank")
@@ -99,80 +329,102 @@ OVERSEER_USER_ID = os.getenv("OVERSEER_USER_ID", "1")
 STT_URL = os.getenv("STT_URL", "http://localhost:3000/api/v1/audio/transcriptions")
 TTS_URL = os.getenv("TTS_URL", "http://localhost:8880/v1/audio/speech")
 TTS_VOICE = os.getenv("TTS_VOICE", "af_heart")
-NEWS_FEEDS = os.getenv("NEWS_FEEDS", "REUTERS|https://news.google.com/rss/search?q=when:24h+source:reuters&hl=en-US&gl=US&ceid=US:en, FOX|http://feeds.foxnews.com/foxnews/latest, TECH|https://news.google.com/rss/search?q=when:24h+technology&hl=en-US&gl=US&ceid=US:en, LOCAL|https://news.google.com/rss/search?q=when:24h+Milwaukee+Wisconsin&hl=en-US&gl=US&ceid=US:en")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+GOOGLE_TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
+NEST_TOKEN_PATH = os.getenv("NEST_TOKEN_PATH", "nest_token.json")
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")
+TENOR_API_KEY = os.getenv("TENOR_API_KEY", "LIVDTRZ9VRJH")
 
-# --- ENABLE TOOLS ---
-ENABLE_CALENDAR = os.getenv("ENABLE_CALENDAR", "false")
-ENABLE_OVERSEER = os.getenv("ENABLE_OVERSEER", "false")
-ENABLE_NEWS = os.getenv("ENABLE_NEWS", "false")
-ENABLE_NASA = os.getenv("ENABLE_NASA", "false")
-ENABLE_SEERR = os.getenv("ENABLE_SEERR", "false")
-ENABLE_HISTORY = os.getenv("ENABLE_HISTORY", "false")
-ENABLE_VOICE = os.getenv("ENABLE_VOICE", "false")
-ENABLE_IMAGEGEN = os.getenv("ENABLE_IMAGEGEN", "false")
-ENABLE_WEATHER = os.getenv("ENABLE_WEATHER", "false")
-ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "false")
-ENABLE_WEB_SCRAPING = os.getenv("ENABLE_WEB_SCRAPING", "false")
-ENABLE_FINANCE = os.getenv("ENABLE_FINANCE", "false")
-ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true")
-ENABLE_PORTAINER = os.getenv("ENABLE_PORTAINER", "false")
+ENABLE_CALENDAR = _to_bool(os.getenv("ENABLE_CALENDAR"))
+ENABLE_OVERSEER = _to_bool(os.getenv("ENABLE_OVERSEER"))
+ENABLE_NEWS = _to_bool(os.getenv("ENABLE_NEWS"))
+ENABLE_NASA = _to_bool(os.getenv("ENABLE_NASA"))
+ENABLE_SEERR = _to_bool(os.getenv("ENABLE_SEERR"))
+ENABLE_HISTORY = _to_bool(os.getenv("ENABLE_HISTORY"))
+ENABLE_VOICE = _to_bool(os.getenv("ENABLE_VOICE"))
+ENABLE_IMAGEGEN = _to_bool(os.getenv("ENABLE_IMAGEGEN"))
+ENABLE_WEATHER = _to_bool(os.getenv("ENABLE_WEATHER"))
+ENABLE_SEARCH = _to_bool(os.getenv("ENABLE_SEARCH"))
+ENABLE_WEB_SCRAPING = _to_bool(os.getenv("ENABLE_WEB_SCRAPING"))
+ENABLE_FINANCE = _to_bool(os.getenv("ENABLE_FINANCE"))
+ENABLE_SCHEDULER = _to_bool(os.getenv("ENABLE_SCHEDULER"), True)
+ENABLE_PORTAINER = _to_bool(os.getenv("ENABLE_PORTAINER"))
+ENABLE_HEARTBEAT = _to_bool(os.getenv("ENABLE_HEARTBEAT"), True)
+ENABLE_NEST = _to_bool(os.getenv("ENABLE_NEST"))
+ENABLE_REOLINK = _to_bool(os.getenv("ENABLE_REOLINK"))
+ENABLE_SYSTEM_STATS = _to_bool(os.getenv("ENABLE_SYSTEM_STATS"))
+
 PORTAINER_URL = os.getenv("PORTAINER_URL", "").rstrip("/")
 PORTAINER_API_KEY = os.getenv("PORTAINER_API_KEY", "")
-PORTAINER_SSL_VERIFY = os.getenv("PORTAINER_SSL_VERIFY", "true").lower() == "true"
-JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", "custom_jobs.json")
-CHAT_DEBOUNCE_DELAY = float(os.getenv("CHAT_DEBOUNCE_DELAY", "4.0"))
-MAX_HISTORY_LEN = int(os.getenv("MAX_HISTORY_LEN", "200")) # Max chat history message count
-ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "true").lower() == "true"
-HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "3600"))
-HEARTBEAT_SILENCE_THRESHOLD_SECONDS = int(os.getenv("HEARTBEAT_SILENCE_THRESHOLD_SECONDS", "14400"))
+PORTAINER_SSL_VERIFY = _to_bool(os.getenv("PORTAINER_SSL_VERIFY"), True)
+CHAT_DEBOUNCE_DELAY = _to_float(os.getenv("CHAT_DEBOUNCE_DELAY"), 4.0)
+MAX_HISTORY_LEN = _to_int(os.getenv("MAX_HISTORY_LEN"), 200)
+HEARTBEAT_INTERVAL_SECONDS = _to_int(os.getenv("HEARTBEAT_INTERVAL_SECONDS"), 3600)
+HEARTBEAT_SILENCE_THRESHOLD_SECONDS = _to_int(os.getenv("HEARTBEAT_SILENCE_THRESHOLD_SECONDS"), 14400)
 HEARTBEAT_SLEEP_START = os.getenv("HEARTBEAT_SLEEP_START", "21:30")
 HEARTBEAT_SLEEP_END = os.getenv("HEARTBEAT_SLEEP_END", "03:30")
 
+PRIMARY_USER_ID = USERS_CONFIG["primary_user"]["id"]
+SECONDARY_USER_ID = USERS_CONFIG["secondary_user"]["id"]
+ALLOWED_USER_IDS = USERS_CONFIG["allowed_user_ids"]
+USER_NAME = USERS_CONFIG["primary_user"]["name"]
+USER_LOCATION = USERS_CONFIG["primary_user"]["location"]
+USER_TIMEZONE = pytz.timezone(USERS_CONFIG["primary_user"]["timezone"])
+USER_BIRTHDAY = USERS_CONFIG["primary_user"]["birthday"]
+USER_FAMILY = USERS_CONFIG["primary_user"]["family"]
+USER_PROFESSION = USERS_CONFIG["primary_user"]["profession"]
+USER_2_NAME = USERS_CONFIG["secondary_user"]["name"]
+USER_2_BIRTHDAY = USERS_CONFIG["secondary_user"]["birthday"]
+USER_2_PROFESSION = USERS_CONFIG["secondary_user"]["profession"]
+USER_2_FAMILY = USERS_CONFIG["secondary_user"]["family"]
+USER_RELATIONSHIP = USERS_CONFIG["relationship"]
+USER_BIO = (
+    f"User's name: {USER_NAME}.\n"
+    f"{USER_NAME}'s location: {USER_LOCATION}.\n"
+    f"{USER_NAME}'s timezone: {USER_TIMEZONE}.\n"
+    f"{USER_NAME}'s family: {USER_FAMILY}.\n"
+    f"{USER_NAME}'s profession: {USER_PROFESSION}."
+)
 
+calendar_ids = INTEGRATIONS_CONFIG["google_calendar_ids"]
+raw_cal_string = ",".join(calendar_ids)
+TELEGRAM_GROUP_CHAT_ID = INTEGRATIONS_CONFIG["telegram"]["group_chat_id"]
+SECURITY_TOPIC_ID = INTEGRATIONS_CONFIG["telegram"]["security_topic_id"]
+ROUTINES_TOPIC_ID = INTEGRATIONS_CONFIG["telegram"]["routines_topic_id"]
+CHAT_TOPIC_ID = INTEGRATIONS_CONFIG["telegram"]["chat_topic_id"]
+TELEGRAM_STICKER_SET = INTEGRATIONS_CONFIG["telegram"]["sticker_set_name"]
 
-# USER PROFILE
-PRIMARY_USER_ID = int(os.getenv("PRIMARY_USER_ID", "0"))
-SECONDARY_USER_ID = int(os.getenv("SECONDARY_USER_ID", "0"))
+REOLINK_CAMERAS = INTEGRATIONS_CONFIG["reolink"]["cameras"]
+REOLINK_CAMERA_DESCRIPTIONS = INTEGRATIONS_CONFIG["reolink"]["camera_descriptions"]
+REOLINK_SILENT_ALERTS = INTEGRATIONS_CONFIG["reolink"]["silent_alerts"]
+ENABLE_REOLINK_THREADING = INTEGRATIONS_CONFIG["reolink"]["threading_enabled"]
+REOLINK_THREAD_WINDOW_MINUTES = INTEGRATIONS_CONFIG["reolink"]["thread_window_minutes"]
+ENABLE_REOLINK_POLLING = INTEGRATIONS_CONFIG["reolink"]["polling_enabled"]
+NEST_PROJECT_ID = INTEGRATIONS_CONFIG["nest"]["project_id"]
 
-USER_NAME = os.getenv("USER_NAME", "User")
-USER_LOCATION = os.getenv("USER_LOCATION", "Earth")
-USER_TIMEZONE = pytz.timezone(os.getenv("USER_TIMEZONE", "America/New_York"))
-USER_BIRTHDAY = os.getenv("USER_BIRTHDAY", "UNKNOWN")
-USER_FAMILY = os.getenv("USER_FAMILY", "")
-USER_PROFESSION = os.getenv("USER_PROFESSION", "Unemployed")
-USER_BIO = f"""User's name: {USER_NAME}.
-            {USER_NAME}'s location: {USER_LOCATION}.
-            {USER_NAME}'s timezone: {USER_TIMEZONE}.
-            {USER_NAME}'s family: {USER_FAMILY}.
-            {USER_NAME}'s profession: {USER_PROFESSION}."""
+REOLINK_HOST = os.getenv("REOLINK_HOST", "").strip()
+REOLINK_USER = os.getenv("REOLINK_USER", "").strip()
+REOLINK_PASSWORD = os.getenv("REOLINK_PASSWORD", "").strip()
 
-# SECONDARY USER PROFILE
-USER_2_NAME = os.getenv("USER_2_NAME", "Wife")
-USER_2_BIRTHDAY = os.getenv("USER_2_BIRTHDAY", "UNKNOWN")
-USER_2_PROFESSION = os.getenv("USER_2_PROFESSION", "Unemployed")
-USER_2_FAMILY = os.getenv("USER_2_FAMILY", "")
-USER_RELATIONSHIP = os.getenv("USER_RELATIONSHIP", "")  # e.g. "married", "siblings", "friends"
 
 def get_user_profile(user_id: int) -> dict:
-    """Returns profile details for the given user ID. Fallbacks to primary user profile."""
     if SECONDARY_USER_ID != 0 and user_id == SECONDARY_USER_ID:
         return {
             "name": USER_2_NAME,
             "birthday": USER_2_BIRTHDAY,
             "profession": USER_2_PROFESSION,
-            "family": USER_2_FAMILY
+            "family": USER_2_FAMILY,
         }
     return {
         "name": USER_NAME,
         "birthday": USER_BIRTHDAY,
         "profession": USER_PROFESSION,
-        "family": USER_FAMILY
+        "family": USER_FAMILY,
     }
 
+
 def get_memory_file_path(user_id: int) -> str:
-    """Returns the path to the user's specific long-term memory file."""
     if not ENABLE_MEMORY:
         return ""
     if SECONDARY_USER_ID != 0 and user_id == SECONDARY_USER_ID:
