@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir \
     "python-telegram-bot[job-queue]" \
     httpx \
     requests \
+    beautifulsoup4 \
     Pillow \
     feedparser \
     psutil \

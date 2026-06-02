@@ -17,8 +17,6 @@ services:
       - ./config:/app/config
       # Persist local agentic memory log on the host
       - ./memory.md:/app/memory.md
-      # Persist secondary user (Anyssa) memory log on the host
-      - ./memory_anyssa.md:/app/memory_anyssa.md
       # Pass authentication tokens and OAuth secrets into the container
       - ./token.json:/app/token.json
       - ./nest_token.json:/app/nest_token.json

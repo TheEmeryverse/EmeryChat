@@ -72,7 +72,7 @@ The project is built around a simple operating model:
 - New facts are staged into a raw intake section first.
 - The fast model can consolidate memory in the background to deduplicate and organize it.
 - If a secondary user is configured, their memory file name is derived from `MEMORY_FILE_PATH` and the secondary user name in `config/users.json`.
-  - Example: `memory.md` + secondary user `Anyssa` becomes `memory_anyssa.md`.
+  - Example: `memory.md` + secondary user `Alex Smith` becomes `memory_alex_smith.md`.
 
 ### Multi-user behavior
 
@@ -152,7 +152,6 @@ python main.py
 
 Notes:
 
-- The previous README incorrectly suggested `pip install -r Dockerfile`. That was wrong.
 - There is currently no `requirements.txt`; the command above mirrors the project dependencies used by the app and container.
 - `ffmpeg` is required for voice output conversion.
 
@@ -165,12 +164,6 @@ mkdir -p config
 touch memory.md token.json nest_token.json credentials.json nest_credentials.json
 ```
 
-If you use a secondary user, also create that derived memory file. Example:
-
-```bash
-touch memory_anyssa.md
-```
-
 Then start the stack:
 
 ```bash
@@ -180,9 +173,8 @@ docker compose logs -f
 
 Important Docker note:
 
-- [docker-compose.yml](/Users/hudson/Documents/GitHub/EmeryChat/docker-compose.yml) currently mounts `memory_anyssa.md` explicitly.
-- If your configured secondary user name produces a different derived filename, update the compose file to match it.
 - The entire `config/` directory is bind-mounted, so app-managed JSON survives restarts, rebuilds, and new image pulls.
+- If you use a secondary user and want their derived memory file persisted in Docker, add a bind mount for that specific derived filename.
 
 ## Google Authentication
 
@@ -386,14 +378,6 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_REOLINK`, `REOLINK_HOST`, `REOLINK_USER`, `REOLINK_PASSWORD` | Reolink camera tools |
 | `ENABLE_PORTAINER`, `PORTAINER_URL`, `PORTAINER_API_KEY` | Portainer tools |
 
-## Notes on Config Accuracy
-
-A few practical details are worth calling out:
-
-- `.env` is for secrets, endpoints, file paths, and feature flags.
-- Structured settings now live in `config/*.json` and are loaded centrally by [emery/config.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/config.py).
-- If you are changing integrations, check [emery/config.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/config.py), [emery/engine.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/engine.py), and [emery/tools.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/tools.py) together.
-
 ## Troubleshooting
 
 ### The bot starts but does not reply
@@ -421,12 +405,3 @@ You likely started Docker before creating the bind-mounted files. Stop the conta
 ## Tests
 
 The repo includes verification scripts in [tests](/Users/hudson/Documents/GitHub/EmeryChat/tests) for targeted behaviors such as formatting, finance, weather, camera log handling, and coprocessor delegation.
-
-They are not currently documented as a single one-command test suite, so treat them as focused verification scripts rather than a polished CI harness.
-
-## Recommended Next Cleanup
-
-The README is in much better shape after this rewrite, but two repo-level follow-ups would make onboarding even cleaner:
-
-1. Add a `requirements.txt` or `pyproject.toml` so local install does not depend on a long manual `pip install` line.
-2. Make `docker-compose.yml` derive the secondary memory filename more cleanly instead of hardcoding `memory_anyssa.md`.
