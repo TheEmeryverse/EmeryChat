@@ -209,11 +209,16 @@ def _format_dashboard_entry(entry, include_recent_count=3):
     return f"{header}\n  Recent: {compact_points}"
 
 
-def _build_imf_dashboard_rows(indicator_code, payload, max_countries=6, max_years=4):
+def _build_imf_dashboard_rows(indicator_code, payload, allowed_countries=None, max_countries=6, max_years=4):
     values = payload.get("values", {}).get(indicator_code, {})
     countries_meta = payload.get("countries", {})
+    allowed = {code.strip().upper() for code in allowed_countries or [] if code and str(code).strip()}
     rows = []
     for code, yearly_values in values.items():
+        if code is None:
+            continue
+        if allowed and str(code).upper() not in allowed:
+            continue
         valid_points = [(year, value) for year, value in yearly_values.items() if value not in (None, "", ".")]
         if not valid_points:
             continue
@@ -223,6 +228,30 @@ def _build_imf_dashboard_rows(indicator_code, payload, max_countries=6, max_year
         label = countries_meta.get(code, {}).get("label", code)
         rows.append(f"- {label} ({code}) latest: {latest_year} = {latest_value} | Recent: {recent}")
     return rows[:max_countries]
+
+
+async def _alpha_vantage_query(params: dict, retries: int = 2, delay: float = 1.25):
+    last_error = None
+    for attempt in range(max(1, retries)):
+        response = await globals.http_client.get("https://www.alphavantage.co/query", params=params, timeout=25)
+        if response.status_code != 200:
+            return None, f"Stock data error: API returned HTTP {response.status_code}."
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return None, "Stock data error: unexpected Alpha Vantage response format."
+
+        note = payload.get("Note") or payload.get("Information") or payload.get("Error Message")
+        if note:
+            last_error = note
+            if attempt < retries - 1:
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+            return None, note
+
+        return payload, None
+
+    return None, last_error or "Stock data error: Alpha Vantage request failed."
 
 # --- VOICE / TTS TOOLS ---
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
@@ -917,36 +946,54 @@ async def get_stock_snapshot(symbol: str) -> str:
 
     symbol = symbol.strip().upper()
     try:
-        params_list = [
-            {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
-            {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
-            {"function": "EARNINGS", "symbol": symbol, "apikey": ALPHA_VANTAGE_API_KEY},
-        ]
-        responses = await asyncio.gather(*[
-            globals.http_client.get("https://www.alphavantage.co/query", params=params, timeout=25)
-            for params in params_list
-        ])
+        quote_payload, quote_error = await _alpha_vantage_query({
+            "function": "GLOBAL_QUOTE",
+            "symbol": symbol,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }, retries=3)
+        overview_payload, overview_error = await _alpha_vantage_query({
+            "function": "OVERVIEW",
+            "symbol": symbol,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }, retries=2)
+        earnings_payload, earnings_error = await _alpha_vantage_query({
+            "function": "EARNINGS",
+            "symbol": symbol,
+            "apikey": ALPHA_VANTAGE_API_KEY,
+        }, retries=2)
 
-        if any(response.status_code != 200 for response in responses):
-            failed = next(response for response in responses if response.status_code != 200)
-            return f"Stock data error: API returned HTTP {failed.status_code}."
+        quote_data = (quote_payload or {}).get("Global Quote", {})
+        overview_data = overview_payload or {}
+        earnings_data = earnings_payload or {}
 
-        quote_data = responses[0].json().get("Global Quote", {})
-        overview_data = responses[1].json()
-        earnings_data = responses[2].json()
-
-        if not quote_data and not overview_data:
+        if not quote_data and not overview_data and not earnings_data:
             return f"Stock data error: No results returned for '{symbol}'."
 
-        quarterly_earnings = earnings_data.get("quarterlyEarnings", [])
+        quarterly_earnings = earnings_data.get("quarterlyEarnings", []) if isinstance(earnings_data, dict) else []
         latest_earnings = quarterly_earnings[0] if quarterly_earnings else {}
 
+        display_name = overview_data.get("Name") or quote_data.get("01. symbol") or symbol
         lines = [
-            f"Stock snapshot for {symbol}: {overview_data.get('Name', symbol)}",
-            f"Price: {quote_data.get('05. price', 'N/A')} | Day range: {quote_data.get('04. low', 'N/A')} - {quote_data.get('03. high', 'N/A')} | Previous close: {quote_data.get('08. previous close', 'N/A')}",
-            f"Market cap: {_format_large_number(overview_data.get('MarketCapitalization'))} | EBITDA: {_format_large_number(overview_data.get('EBITDA'))} | P/E: {overview_data.get('PERatio', 'N/A')}",
-            f"52-week range: {overview_data.get('52WeekLow', 'N/A')} - {overview_data.get('52WeekHigh', 'N/A')} | EPS: {overview_data.get('EPS', 'N/A')} | Beta: {overview_data.get('Beta', 'N/A')}",
+            f"Stock snapshot for {symbol}: {display_name}",
         ]
+
+        price = quote_data.get('05. price') or quote_data.get('04. close') or quote_data.get('08. previous close')
+        day_low = quote_data.get('04. low')
+        day_high = quote_data.get('03. high')
+        prev_close = quote_data.get('08. previous close')
+        lines.append(
+            f"Price: {price or 'N/A'} | Day range: {day_low or 'N/A'} - {day_high or 'N/A'} | Previous close: {prev_close or 'N/A'}"
+        )
+
+        market_cap = overview_data.get('MarketCapitalization')
+        ebitda = overview_data.get('EBITDA')
+        pe_ratio = overview_data.get('PERatio')
+        lines.append(
+            f"Market cap: {_format_large_number(market_cap)} | EBITDA: {_format_large_number(ebitda)} | P/E: {pe_ratio or 'N/A'}"
+        )
+        lines.append(
+            f"52-week range: {overview_data.get('52WeekLow', 'N/A')} - {overview_data.get('52WeekHigh', 'N/A')} | EPS: {overview_data.get('EPS', 'N/A')} | Beta: {overview_data.get('Beta', 'N/A')}"
+        )
 
         if latest_earnings:
             lines.append(
@@ -960,6 +1007,16 @@ async def get_stock_snapshot(symbol: str) -> str:
         description = overview_data.get("Description", "")
         if description:
             lines.append(f"Business summary: {description[:500]}" + ("..." if len(description) > 500 else ""))
+
+        unavailable_notes = []
+        if quote_error and not quote_data:
+            unavailable_notes.append("quote data unavailable")
+        if overview_error and not overview_data:
+            unavailable_notes.append("overview data unavailable")
+        if earnings_error and not quarterly_earnings:
+            unavailable_notes.append("earnings data unavailable")
+        if unavailable_notes:
+            lines.append(f"Note: {', '.join(unavailable_notes)}.")
 
         return "\n".join(lines)
     except Exception as e:
@@ -1173,7 +1230,13 @@ async def get_global_macro_dashboard(
             resolved_label = indicators_meta.get(indicator_code, {}).get("label", label)
             lines.append(f"{resolved_label} [{indicator_code}]")
             lines.append(f"Why it matters: {summary_hint}")
-            rows = _build_imf_dashboard_rows(indicator_code, payload)
+            rows = _build_imf_dashboard_rows(
+                indicator_code,
+                payload,
+                allowed_countries=country_codes,
+                max_countries=len(country_codes),
+                max_years=4,
+            )
             if rows:
                 lines.extend(rows)
             else:
