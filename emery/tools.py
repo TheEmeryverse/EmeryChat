@@ -328,16 +328,26 @@ def _get_saved_weather_alias(alias: str):
     return _load_weather_locations().get(normalized)
 
 
-def _default_weather_location():
-    saved_home = _get_saved_weather_alias("home")
-    if saved_home:
-        return {
-            "label": saved_home.get("label", "home"),
-            "lat": saved_home.get("lat"),
-            "lon": saved_home.get("lon"),
-            "source": "alias:home",
-        }
+def _saved_weather_record_label(record, fallback_label: str):
+    if isinstance(record, dict):
+        label = str(record.get("label", fallback_label)).strip()
+        return label or fallback_label
+    label = str(record or "").strip()
+    return label or fallback_label
 
+
+def _saved_weather_record_has_coordinates(record):
+    if not isinstance(record, dict):
+        return False
+    try:
+        float(record.get("lat"))
+        float(record.get("lon"))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _env_default_weather_location():
     try:
         if NOAA_LAT and NOAA_LONG:
             return {
@@ -349,6 +359,18 @@ def _default_weather_location():
     except ValueError:
         logging.warning("⚠️ WEATHER: NOAA_LAT/NOAA_LONG are set but invalid.")
     return None
+
+
+def _default_weather_location():
+    saved_home = _get_saved_weather_alias("home")
+    if _saved_weather_record_has_coordinates(saved_home):
+        return {
+            "label": _saved_weather_record_label(saved_home, "home"),
+            "lat": saved_home.get("lat"),
+            "lon": saved_home.get("lon"),
+            "source": "alias:home",
+        }
+    return _env_default_weather_location()
 
 
 async def _geocode_weather_location(location: str):
@@ -388,9 +410,14 @@ async def _geocode_weather_location(location: str):
 
 async def _resolve_weather_location(location: str = None):
     if not location:
-        default_location = _default_weather_location()
-        if default_location:
-            return default_location, None
+        saved_home = _get_saved_weather_alias("home")
+        if _saved_weather_record_has_coordinates(saved_home):
+            return _default_weather_location(), None
+        if saved_home:
+            return await _geocode_weather_location(_saved_weather_record_label(saved_home, "home"))
+        env_default = _env_default_weather_location()
+        if env_default:
+            return env_default, None
         return None, (
             "No default weather location is set yet. "
             "Ask for a place directly like 'What is the weather in Houston?' "
@@ -399,12 +426,14 @@ async def _resolve_weather_location(location: str = None):
 
     alias_record = _get_saved_weather_alias(location)
     if alias_record:
-        return {
-            "label": alias_record.get("label", location),
-            "lat": alias_record.get("lat"),
-            "lon": alias_record.get("lon"),
-            "source": f"alias:{_normalize_weather_alias(location)}",
-        }, None
+        if _saved_weather_record_has_coordinates(alias_record):
+            return {
+                "label": _saved_weather_record_label(alias_record, location),
+                "lat": alias_record.get("lat"),
+                "lon": alias_record.get("lon"),
+                "source": f"alias:{_normalize_weather_alias(location)}",
+            }, None
+        return await _geocode_weather_location(_saved_weather_record_label(alias_record, location))
 
     return await _geocode_weather_location(location)
 
@@ -564,7 +593,7 @@ async def list_weather_location_aliases():
     lines = ["Saved weather aliases:"]
     for alias in sorted(locations):
         location = locations[alias]
-        lines.append(f"- {alias}: {location.get('label', 'Unknown location')}")
+        lines.append(f"- {alias}: {_saved_weather_record_label(location, 'Unknown location')}")
     return "\n".join(lines)
 
 # --- WEB SEARCH & SCRAPING ---

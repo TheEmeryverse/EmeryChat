@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
@@ -145,6 +146,16 @@ DEFAULT_NEWS_FEEDS = [
 ]
 
 
+BANNER = r"""
+ ______ __  __ ______ _______   __   ______ _    _       _______ 
+|  ____|  \/  |  ____|  __ \ \ / /  / ____| |  | |   /\|__   __|
+| |__  | \  / | |__  | |__) \ V /  | |    | |__| |  /  \  | |   
+|  __| | |\/| |  __| |  _  / > <   | |    |  __  | / /\ \ | |   
+| |____| |  | | |____| | \ \/ . \  | |____| |  | |/ ____ \| |   
+|______|_|  |_|______|_|  \_/_/ \_\  \_____|_|  |_/_/    \_\_|   
+"""
+
+
 def load_dotenv_like(path: Path) -> dict:
     data = {}
     if not path.exists():
@@ -167,6 +178,10 @@ def load_json(path: Path, default):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return json.loads(json.dumps(default))
+
+
+def clone_default(value):
+    return json.loads(json.dumps(value))
 
 
 def parse_bool(value, default=False):
@@ -231,15 +246,172 @@ def parse_name_map(value):
     output = {}
     if not value:
         return output
-    for item in str(value).split(","):
-        if ":" not in item:
-            continue
-        name, mapped = item.split(":", 1)
-        name = name.strip()
-        mapped = mapped.strip()
+    pattern = re.compile(r"(?:^|,)\s*([^:,]+?)\s*:\s*(.*?)(?=(?:,\s*[^:,]+?\s*:)|$)")
+    for name, mapped in pattern.findall(str(value)):
+        name = str(name).strip()
+        mapped = str(mapped).strip()
         if name and mapped:
             output[name] = mapped
     return output
+
+
+def normalize_optional_int(value):
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_reolink_channels(raw_cameras):
+    cameras = {}
+    if not isinstance(raw_cameras, dict):
+        return cameras
+
+    for name, channel in raw_cameras.items():
+        clean_name = str(name).strip()
+        if not clean_name:
+            continue
+        try:
+            cameras[clean_name] = str(int(str(channel).strip()))
+        except (TypeError, ValueError):
+            continue
+    return cameras
+
+
+def normalize_descriptions(raw_descriptions):
+    descriptions = {}
+    if not isinstance(raw_descriptions, dict):
+        return descriptions
+
+    for name, description in raw_descriptions.items():
+        clean_name = str(name).strip()
+        clean_description = str(description).strip()
+        if clean_name and clean_description:
+            descriptions[clean_name] = clean_description
+    return descriptions
+
+
+def normalize_integrations_seed(raw):
+    integrations = clone_default(DEFAULT_INTEGRATIONS)
+    if not isinstance(raw, dict):
+        return integrations
+
+    telegram = raw.get("telegram", {})
+    reolink = raw.get("reolink", {})
+    nest = raw.get("nest", {})
+
+    calendar_ids = []
+    for calendar_id in raw.get("google_calendar_ids", integrations["google_calendar_ids"]):
+        clean_calendar_id = str(calendar_id).strip()
+        if clean_calendar_id:
+            calendar_ids.append(clean_calendar_id)
+    integrations["google_calendar_ids"] = calendar_ids or integrations["google_calendar_ids"]
+
+    if isinstance(telegram, dict):
+        integrations["telegram"]["group_chat_id"] = normalize_optional_int(telegram.get("group_chat_id"))
+        integrations["telegram"]["security_topic_id"] = normalize_optional_int(telegram.get("security_topic_id"))
+        integrations["telegram"]["routines_topic_id"] = normalize_optional_int(telegram.get("routines_topic_id"))
+        integrations["telegram"]["chat_topic_id"] = normalize_optional_int(telegram.get("chat_topic_id"))
+        sticker_set_name = str(telegram.get("sticker_set_name") or "").strip()
+        integrations["telegram"]["sticker_set_name"] = sticker_set_name or None
+
+    if isinstance(reolink, dict):
+        integrations["reolink"]["cameras"] = normalize_reolink_channels(reolink.get("cameras", {}))
+        integrations["reolink"]["camera_descriptions"] = normalize_descriptions(reolink.get("camera_descriptions", {}))
+        integrations["reolink"]["silent_alerts"] = parse_bool(
+            reolink.get("silent_alerts"),
+            integrations["reolink"]["silent_alerts"],
+        )
+        integrations["reolink"]["threading_enabled"] = parse_bool(
+            reolink.get("threading_enabled"),
+            integrations["reolink"]["threading_enabled"],
+        )
+        integrations["reolink"]["thread_window_minutes"] = parse_float(
+            reolink.get("thread_window_minutes"),
+            integrations["reolink"]["thread_window_minutes"],
+        )
+        integrations["reolink"]["polling_enabled"] = parse_bool(
+            reolink.get("polling_enabled"),
+            integrations["reolink"]["polling_enabled"],
+        )
+
+    if isinstance(nest, dict):
+        integrations["nest"]["project_id"] = str(nest.get("project_id", "")).strip()
+
+    return integrations
+
+
+def normalize_users_seed(raw):
+    users = clone_default(DEFAULT_USERS)
+    if not isinstance(raw, dict):
+        return users
+
+    primary = raw.get("primary_user", {})
+    secondary = raw.get("secondary_user", {})
+
+    if isinstance(raw.get("allowed_user_ids"), list):
+        users["allowed_user_ids"] = [
+            user_id
+            for user_id in (parse_int(value, 0) for value in raw.get("allowed_user_ids", []))
+            if user_id != 0
+        ]
+
+    if isinstance(primary, dict):
+        users["primary_user"]["id"] = parse_int(primary.get("id"), users["primary_user"]["id"])
+        for key in ("name", "location", "timezone", "birthday", "family", "profession"):
+            value = str(primary.get(key, users["primary_user"][key])).strip()
+            users["primary_user"][key] = value or users["primary_user"][key]
+
+    if isinstance(secondary, dict):
+        users["secondary_user"]["id"] = parse_int(secondary.get("id"), users["secondary_user"]["id"])
+        for key in ("name", "birthday", "family", "profession"):
+            value = str(secondary.get(key, users["secondary_user"][key])).strip()
+            users["secondary_user"][key] = value or users["secondary_user"][key]
+
+    users["relationship"] = str(raw.get("relationship", users["relationship"])).strip()
+    return users
+
+
+def normalize_news_seed(raw):
+    feeds = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            if name and url:
+                feeds.append({"name": name, "url": url})
+    return feeds or clone_default(DEFAULT_NEWS_FEEDS)
+
+
+def seeded_text(current_value, env_value, default_value=""):
+    current = str(current_value or "").strip()
+    env = str(env_value or "").strip()
+    default = str(default_value or "").strip()
+    if not current or current == default:
+        return env or current or default
+    return current
+
+
+def seeded_int(current_value, env_value, default_value=0):
+    current = parse_int(current_value, default_value)
+    if current == default_value:
+        env_parsed = parse_int(env_value, default_value)
+        if env_parsed != default_value:
+            return env_parsed
+    return current
+
+
+def seeded_list(current_value, env_value, default_value=None, parser=None):
+    default = default_value or []
+    current = list(current_value) if isinstance(current_value, list) else []
+    env_parsed = parser(env_value) if parser else []
+    if not current or current == default:
+        return env_parsed or current or list(default)
+    return current
 
 
 def validate_url(value):
@@ -325,6 +497,28 @@ def validate_url_prompt(value):
     if validate_url(value):
         return True, ""
     return False, "Enter a full URL such as http://localhost:11434/api/chat."
+
+
+def validate_reolink_channel(value):
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return False, "Enter a whole-number camera channel like 0, 1, or 5."
+    if parsed < 0:
+        return False, "Camera channel must be 0 or greater."
+    return True, ""
+
+
+def print_banner():
+    print(BANNER.rstrip())
+    print("Interactive setup for EmeryChat")
+    print("=" * 56)
+
+
+def print_section(title, subtitle=None):
+    print(f"\n== {title} ==")
+    if subtitle:
+        print(subtitle)
 
 
 def backup_if_needed(path: Path):
@@ -469,32 +663,99 @@ def derive_seed(args):
     if args.import_env:
         env_seed.update(load_dotenv_like(Path(args.import_env).expanduser()))
 
-    users_seed = load_json(USERS_CONFIG_PATH, DEFAULT_USERS)
-    integrations_seed = load_json(INTEGRATIONS_CONFIG_PATH, DEFAULT_INTEGRATIONS)
-    news_seed = load_json(NEWS_FEEDS_CONFIG_PATH, DEFAULT_NEWS_FEEDS)
+    if args.fresh:
+        users_seed = clone_default(DEFAULT_USERS)
+        integrations_seed = clone_default(DEFAULT_INTEGRATIONS)
+        news_seed = clone_default(DEFAULT_NEWS_FEEDS)
+    else:
+        users_seed = normalize_users_seed(load_json(USERS_CONFIG_PATH, DEFAULT_USERS))
+        integrations_seed = normalize_integrations_seed(load_json(INTEGRATIONS_CONFIG_PATH, DEFAULT_INTEGRATIONS))
+        news_seed = normalize_news_seed(load_json(NEWS_FEEDS_CONFIG_PATH, DEFAULT_NEWS_FEEDS))
 
-    users_seed["allowed_user_ids"] = users_seed.get("allowed_user_ids") or parse_csv_ints(env_seed.get("TELEGRAM_ALLOWED_USERS"))
-    users_seed["primary_user"]["id"] = users_seed["primary_user"].get("id") or parse_int(env_seed.get("PRIMARY_USER_ID"), 0)
-    users_seed["primary_user"]["name"] = users_seed["primary_user"].get("name") or env_seed.get("USER_NAME", "User")
-    users_seed["primary_user"]["location"] = users_seed["primary_user"].get("location") or env_seed.get("USER_LOCATION", "Earth")
-    users_seed["primary_user"]["timezone"] = users_seed["primary_user"].get("timezone") or env_seed.get("USER_TIMEZONE", "America/New_York")
-    users_seed["primary_user"]["birthday"] = users_seed["primary_user"].get("birthday") or env_seed.get("USER_BIRTHDAY", "UNKNOWN")
-    users_seed["primary_user"]["family"] = users_seed["primary_user"].get("family") or env_seed.get("USER_FAMILY", "")
-    users_seed["primary_user"]["profession"] = users_seed["primary_user"].get("profession") or env_seed.get("USER_PROFESSION", "Unemployed")
-    users_seed["secondary_user"]["id"] = users_seed["secondary_user"].get("id") or parse_int(env_seed.get("SECONDARY_USER_ID"), 0)
-    users_seed["secondary_user"]["name"] = users_seed["secondary_user"].get("name") or env_seed.get("USER_2_NAME", "Wife")
-    users_seed["secondary_user"]["birthday"] = users_seed["secondary_user"].get("birthday") or env_seed.get("USER_2_BIRTHDAY", "UNKNOWN")
-    users_seed["secondary_user"]["family"] = users_seed["secondary_user"].get("family") or env_seed.get("USER_2_FAMILY", "")
-    users_seed["secondary_user"]["profession"] = users_seed["secondary_user"].get("profession") or env_seed.get("USER_2_PROFESSION", "Unemployed")
-    users_seed["relationship"] = users_seed.get("relationship") or env_seed.get("USER_RELATIONSHIP", "")
+    users_seed["allowed_user_ids"] = seeded_list(
+        users_seed.get("allowed_user_ids"),
+        env_seed.get("TELEGRAM_ALLOWED_USERS"),
+        DEFAULT_USERS["allowed_user_ids"],
+        parser=parse_csv_ints,
+    )
+    users_seed["primary_user"]["id"] = seeded_int(
+        users_seed["primary_user"].get("id"),
+        env_seed.get("PRIMARY_USER_ID"),
+        DEFAULT_USERS["primary_user"]["id"],
+    )
+    users_seed["primary_user"]["name"] = seeded_text(
+        users_seed["primary_user"].get("name"),
+        env_seed.get("USER_NAME"),
+        DEFAULT_USERS["primary_user"]["name"],
+    )
+    users_seed["primary_user"]["location"] = seeded_text(
+        users_seed["primary_user"].get("location"),
+        env_seed.get("USER_LOCATION"),
+        DEFAULT_USERS["primary_user"]["location"],
+    )
+    users_seed["primary_user"]["timezone"] = seeded_text(
+        users_seed["primary_user"].get("timezone"),
+        env_seed.get("USER_TIMEZONE"),
+        DEFAULT_USERS["primary_user"]["timezone"],
+    )
+    users_seed["primary_user"]["birthday"] = seeded_text(
+        users_seed["primary_user"].get("birthday"),
+        env_seed.get("USER_BIRTHDAY"),
+        DEFAULT_USERS["primary_user"]["birthday"],
+    )
+    users_seed["primary_user"]["family"] = seeded_text(
+        users_seed["primary_user"].get("family"),
+        env_seed.get("USER_FAMILY"),
+        DEFAULT_USERS["primary_user"]["family"],
+    )
+    users_seed["primary_user"]["profession"] = seeded_text(
+        users_seed["primary_user"].get("profession"),
+        env_seed.get("USER_PROFESSION"),
+        DEFAULT_USERS["primary_user"]["profession"],
+    )
+    users_seed["secondary_user"]["id"] = seeded_int(
+        users_seed["secondary_user"].get("id"),
+        env_seed.get("SECONDARY_USER_ID"),
+        DEFAULT_USERS["secondary_user"]["id"],
+    )
+    users_seed["secondary_user"]["name"] = seeded_text(
+        users_seed["secondary_user"].get("name"),
+        env_seed.get("USER_2_NAME"),
+        DEFAULT_USERS["secondary_user"]["name"],
+    )
+    users_seed["secondary_user"]["birthday"] = seeded_text(
+        users_seed["secondary_user"].get("birthday"),
+        env_seed.get("USER_2_BIRTHDAY"),
+        DEFAULT_USERS["secondary_user"]["birthday"],
+    )
+    users_seed["secondary_user"]["family"] = seeded_text(
+        users_seed["secondary_user"].get("family"),
+        env_seed.get("USER_2_FAMILY"),
+        DEFAULT_USERS["secondary_user"]["family"],
+    )
+    users_seed["secondary_user"]["profession"] = seeded_text(
+        users_seed["secondary_user"].get("profession"),
+        env_seed.get("USER_2_PROFESSION"),
+        DEFAULT_USERS["secondary_user"]["profession"],
+    )
+    users_seed["relationship"] = seeded_text(
+        users_seed.get("relationship"),
+        env_seed.get("USER_RELATIONSHIP"),
+        DEFAULT_USERS["relationship"],
+    )
 
-    integrations_seed["google_calendar_ids"] = integrations_seed.get("google_calendar_ids") or parse_calendar_ids(env_seed.get("GOOGLE_CALENDAR_IDS"))
+    integrations_seed["google_calendar_ids"] = seeded_list(
+        integrations_seed.get("google_calendar_ids"),
+        env_seed.get("GOOGLE_CALENDAR_IDS"),
+        DEFAULT_INTEGRATIONS["google_calendar_ids"],
+        parser=parse_calendar_ids,
+    )
     integrations_seed["telegram"]["group_chat_id"] = integrations_seed["telegram"].get("group_chat_id") or parse_int(env_seed.get("TELEGRAM_GROUP_CHAT_ID"), 0) or None
     integrations_seed["telegram"]["security_topic_id"] = integrations_seed["telegram"].get("security_topic_id") or parse_int(env_seed.get("SECURITY_TOPIC_ID"), 0) or None
     integrations_seed["telegram"]["routines_topic_id"] = integrations_seed["telegram"].get("routines_topic_id") or parse_int(env_seed.get("ROUTINES_TOPIC_ID"), 0) or None
     integrations_seed["telegram"]["chat_topic_id"] = integrations_seed["telegram"].get("chat_topic_id") or parse_int(env_seed.get("CHAT_TOPIC_ID"), 0) or None
     integrations_seed["telegram"]["sticker_set_name"] = integrations_seed["telegram"].get("sticker_set_name") or env_seed.get("TELEGRAM_STICKER_SET") or None
-    integrations_seed["reolink"]["cameras"] = integrations_seed["reolink"].get("cameras") or parse_name_map(env_seed.get("REOLINK_CAMERAS"))
+    integrations_seed["reolink"]["cameras"] = integrations_seed["reolink"].get("cameras") or normalize_reolink_channels(parse_name_map(env_seed.get("REOLINK_CAMERAS")))
     integrations_seed["reolink"]["camera_descriptions"] = integrations_seed["reolink"].get("camera_descriptions") or parse_name_map(env_seed.get("REOLINK_CAMERA_DESCRIPTIONS"))
     integrations_seed["reolink"]["silent_alerts"] = parse_bool(env_seed.get("REOLINK_SILENT_ALERTS"), integrations_seed["reolink"].get("silent_alerts", True))
     integrations_seed["reolink"]["threading_enabled"] = parse_bool(env_seed.get("ENABLE_REOLINK_THREADING"), integrations_seed["reolink"].get("threading_enabled", True))
@@ -510,7 +771,7 @@ def derive_seed(args):
 
 
 def ask_core(env_seed):
-    print("\nCore bot setup")
+    print_section("Core Bot Setup")
     env_seed["TELEGRAM_TOKEN"] = prompt_text("Telegram bot token", env_seed.get("TELEGRAM_TOKEN"), required=True)
     env_seed["MODEL_NAME"] = prompt_text("Assistant display name", env_seed.get("MODEL_NAME"))
     env_seed["MODEL_ID"] = prompt_text("Primary model ID", env_seed.get("MODEL_ID"), required=True)
@@ -523,7 +784,7 @@ def ask_core(env_seed):
 
 
 def ask_users(users_seed):
-    print("\nPrimary user profile")
+    print_section("Primary User Profile")
     primary = users_seed["primary_user"]
     primary["name"] = prompt_text("Primary user name", primary.get("name"), required=True)
     primary["location"] = prompt_text("Primary user location", primary.get("location"), required=True)
@@ -536,7 +797,7 @@ def ask_users(users_seed):
     users_seed["allowed_user_ids"] = prompt_csv_ids("Allowed Telegram user IDs, comma-separated (optional)", users_seed.get("allowed_user_ids", []))
 
     if prompt_yes_no("Configure a secondary user / family mode", users_seed.get("secondary_user", {}).get("id", 0) != 0):
-        print("\nSecondary user profile")
+        print_section("Secondary User Profile")
         secondary = users_seed["secondary_user"]
         secondary["name"] = prompt_text("Secondary user name", secondary.get("name"), required=True)
         secondary["birthday"] = prompt_text("Secondary user birthday", secondary.get("birthday"))
@@ -552,7 +813,7 @@ def ask_users(users_seed):
 
 
 def ask_telegram(integrations_seed):
-    print("\nTelegram routing")
+    print_section("Telegram Routing")
     if prompt_yes_no("Configure a group chat / forum routing setup", integrations_seed["telegram"].get("group_chat_id") is not None):
         telegram = integrations_seed["telegram"]
         telegram["group_chat_id"] = prompt_int("Telegram group chat ID", telegram.get("group_chat_id"), allow_blank=True)
@@ -573,7 +834,7 @@ def ask_telegram(integrations_seed):
 
 
 def ask_features(env_seed):
-    print("\nFeature toggles")
+    print_section("Feature Toggles")
     feature_prompts = {
         "ENABLE_CALENDAR": "Enable Google Calendar",
         "ENABLE_NEST": "Enable Google Nest thermostat",
@@ -600,7 +861,7 @@ def ask_features(env_seed):
 
 
 def ask_integrations(env_seed, integrations_seed, news_seed):
-    print("\nIntegration details")
+    print_section("Integration Details")
 
     if parse_bool(env_seed["ENABLE_CALENDAR"]):
         raw_default = ",".join(integrations_seed.get("google_calendar_ids", ["primary"]))
@@ -623,7 +884,7 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
             home_location = ""
             env_seed["NOAA_LAT"] = prompt_text("Optional NOAA fallback latitude", env_seed.get("NOAA_LAT"))
             env_seed["NOAA_LONG"] = prompt_text("Optional NOAA fallback longitude", env_seed.get("NOAA_LONG"))
-        weather_locations = {"home": home_location} if home_location else {}
+        weather_locations = {"home": {"label": home_location}} if home_location else {}
     else:
         weather_locations = {}
 
@@ -672,6 +933,10 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
         env_seed["PORTAINER_SSL_VERIFY"] = bool_to_env(prompt_yes_no("Verify Portainer SSL certificates", parse_bool(env_seed.get("PORTAINER_SSL_VERIFY"), True)))
 
     if parse_bool(env_seed["ENABLE_REOLINK"]):
+        print_section(
+            "Reolink Cameras",
+            "Camera channels must be numeric. Example: frontdoor -> 0",
+        )
         env_seed["REOLINK_HOST"] = prompt_text("Reolink NVR host or IP", env_seed.get("REOLINK_HOST"), required=True)
         env_seed["REOLINK_USER"] = prompt_text("Reolink username", env_seed.get("REOLINK_USER"), required=True)
         env_seed["REOLINK_PASSWORD"] = prompt_text("Reolink password", env_seed.get("REOLINK_PASSWORD"), required=True)
@@ -698,11 +963,22 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
             camera_name = prompt_text("Camera name", "")
             if not camera_name:
                 break
-            camera_channel = prompt_text("Camera channel", "", required=True)
+            normalized_name = camera_name.strip()
+            if normalized_name.lower() in {name.lower() for name in cameras}:
+                print(f"  Camera '{normalized_name}' is already configured. Choose a different name.")
+                continue
+            camera_channel = prompt_text(
+                "Camera channel",
+                "",
+                required=True,
+                validator=validate_reolink_channel,
+                help_text="This should match the numeric channel shown in your Reolink/NVR config.",
+            )
             camera_description = prompt_text("Camera description (optional)", "")
-            cameras[camera_name] = camera_channel
+            cameras[normalized_name] = str(int(camera_channel))
             if camera_description:
-                descriptions[camera_name] = camera_description
+                descriptions[normalized_name] = camera_description
+            print(f"  Added '{normalized_name}' on channel {cameras[normalized_name]}.")
         integrations_seed["reolink"]["cameras"] = cameras
         integrations_seed["reolink"]["camera_descriptions"] = descriptions
 
@@ -710,7 +986,7 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
 
 
 def ask_runtime(env_seed):
-    print("\nRuntime tuning")
+    print_section("Runtime Tuning")
     env_seed["CHAT_DEBOUNCE_DELAY"] = str(prompt_float("Chat debounce delay seconds", parse_float(env_seed.get("CHAT_DEBOUNCE_DELAY"), 4.0)))
     env_seed["MAX_HISTORY_LEN"] = str(prompt_int("Max in-memory history length", parse_int(env_seed.get("MAX_HISTORY_LEN"), 200)))
     env_seed["TOOL_LOOP"] = str(prompt_int("Max tool loop count", parse_int(env_seed.get("TOOL_LOOP"), 15)))
@@ -756,7 +1032,7 @@ def write_setup(env_data, users_data, integrations_data, news_data, weather_loca
 
 
 def print_next_steps(env_data):
-    print("\nSetup complete.")
+    print_section("Setup Complete")
     print("- Wrote .env")
     print("- Wrote config/users.json")
     print("- Wrote config/integrations.json")
@@ -780,15 +1056,20 @@ def main():
         "--import-env",
         help="Optional path to a legacy .env file to use as defaults during setup.",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore existing JSON config files and rebuild them from defaults plus env/imported env values.",
+    )
     args = parser.parse_args()
 
-    print("========================================================")
-    print("                EmeryChat First-Time Setup              ")
-    print("========================================================")
+    print_banner()
     if args.import_env:
         print(f"Using legacy env defaults from: {Path(args.import_env).expanduser()}")
     elif ENV_PATH.exists():
         print(f"Using existing .env defaults from: {ENV_PATH}")
+    if args.fresh:
+        print("Ignoring existing JSON config files for this setup run.")
 
     env_seed, users_seed, integrations_seed, news_seed = derive_seed(args)
 
