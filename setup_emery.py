@@ -817,6 +817,8 @@ def ask_telegram(integrations_seed):
     if prompt_yes_no("Configure a group chat / forum routing setup", integrations_seed["telegram"].get("group_chat_id") is not None):
         telegram = integrations_seed["telegram"]
         telegram["group_chat_id"] = prompt_int("Telegram group chat ID", telegram.get("group_chat_id"), allow_blank=True)
+        if telegram["group_chat_id"] and telegram["group_chat_id"] > 0 and telegram["group_chat_id"] >= 10**12:
+            telegram["group_chat_id"] = -telegram["group_chat_id"]
         telegram["chat_topic_id"] = prompt_int("General chat topic ID (optional)", telegram.get("chat_topic_id"), allow_blank=True)
         telegram["routines_topic_id"] = prompt_int("Routines topic ID (optional)", telegram.get("routines_topic_id"), allow_blank=True)
         telegram["security_topic_id"] = prompt_int("Security topic ID (optional)", telegram.get("security_topic_id"), allow_blank=True)

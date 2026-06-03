@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytz
 from dotenv import load_dotenv
+from emery.telegram_utils import normalize_group_chat_id
 
 load_dotenv()
 
@@ -209,7 +210,7 @@ def _normalize_integrations_config(raw):
     return {
         "google_calendar_ids": calendar_ids,
         "telegram": {
-            "group_chat_id": _normalize_optional_int(telegram.get("group_chat_id")),
+            "group_chat_id": normalize_group_chat_id(_normalize_optional_int(telegram.get("group_chat_id"))),
             "security_topic_id": _normalize_optional_int(telegram.get("security_topic_id")),
             "routines_topic_id": _normalize_optional_int(telegram.get("routines_topic_id")),
             "chat_topic_id": _normalize_optional_int(telegram.get("chat_topic_id")),

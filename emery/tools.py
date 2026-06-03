@@ -34,6 +34,7 @@ from emery.config import (
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
 from emery.logging_utils import safe_preview
+from emery.telegram_utils import normalize_message_thread_id
 
 
 def _format_large_number(value):
@@ -271,7 +272,9 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
     audio = await get_voice_audio(text)
     if audio and globals.TARGET_CHAT_ID.get():
-        await globals.application_bot.send_voice(chat_id=globals.TARGET_CHAT_ID.get(), voice=audio, caption="Voice message", message_thread_id=globals.CURRENT_THREAD_ID.get())
+        chat_id = globals.TARGET_CHAT_ID.get()
+        thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
+        await globals.application_bot.send_voice(chat_id=chat_id, voice=audio, caption="Voice message", message_thread_id=thread_id)
         return "Voice message sent successfully."
     return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
 
@@ -297,11 +300,13 @@ async def generate_image(prompt): # Generates an image based on the prompt using
         if not image_bytes:
             return "No image data found in response parts."
         if globals.TARGET_CHAT_ID.get():
+            chat_id = globals.TARGET_CHAT_ID.get()
+            thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
             await globals.application_bot.send_photo(
-                chat_id=globals.TARGET_CHAT_ID.get(),
+                chat_id=chat_id,
                 photo=image_bytes,
                 caption=f"Here's your picture: {prompt[:1000]}",
-                message_thread_id=globals.CURRENT_THREAD_ID.get()
+                message_thread_id=thread_id
             )
             return "Image sent successfully."
         return "Chat context lost."
@@ -1821,6 +1826,7 @@ async def get_reolink_snapshot(
     else:
         actual_thread_id = message_thread_id
         use_alert_configs = True
+    actual_thread_id = normalize_message_thread_id(target_chat_id, actual_thread_id)
 
     # Resolve topics and silent settings
     silent_alerts = False
@@ -2299,7 +2305,7 @@ async def send_sticker(sticker_id_or_emoji: str) -> str:
             chat_id=chat_id,
             sticker=file_id,
             reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID.get()
+            message_thread_id=normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
         )
         return f"Successfully sent sticker: {sticker_id_or_emoji}."
     except Exception as e:
@@ -2364,7 +2370,7 @@ async def send_gif(query_or_url: str) -> str:
             chat_id=chat_id,
             animation=gif_url,
             reply_parameters=reply_params,
-            message_thread_id=globals.CURRENT_THREAD_ID.get()
+            message_thread_id=normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
         )
         return f"Successfully sent GIF for query/url: '{query_or_url}'."
     except Exception as e:

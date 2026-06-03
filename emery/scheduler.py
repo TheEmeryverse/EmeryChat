@@ -14,6 +14,7 @@ from emery.config import (
     ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
 )
 import emery.globals as globals
+from emery.telegram_utils import normalize_message_thread_id
 
 WEEKDAYS = {
     "monday": 0, "mon": 0,
@@ -93,6 +94,10 @@ def load_jobs_from_file() -> list:
             if job_id in seen_ids:
                 logging.warning("⚠️ SCHEDULER: Dropping duplicate persisted job id '%s'", job_id)
                 continue
+            job["message_thread_id"] = normalize_message_thread_id(
+                job.get("chat_id"),
+                job.get("message_thread_id"),
+            )
             seen_ids.add(job_id)
             deduped_jobs.append(job)
         deduped_jobs.reverse()
@@ -124,6 +129,7 @@ def remove_job_from_store(job_id: str):
 async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
     """Splits large messages to fit Telegram's character limits."""
     MAX_LIMIT = 4000
+    message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
     try:
         if len(text) <= MAX_LIMIT:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
@@ -222,6 +228,7 @@ async def run_custom_job(context):
 
     # Set context variables for target chat and thread/topic
     globals.TARGET_CHAT_ID.set(chat_id)
+    message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
     globals.CURRENT_THREAD_ID.set(message_thread_id)
 
     logging.info(

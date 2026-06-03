@@ -24,6 +24,7 @@ from emery.logging_utils import safe_preview
 from emery.memory import wipe_memory
 from emery.engine import emery_engine
 from emery.tools import get_voice_audio
+from emery.telegram_utils import normalize_message_thread_id
 
 def is_user_allowed(update: Update) -> bool:
     """Checks if the user interacting with the bot is whitelisted in TELEGRAM_ALLOWED_USERS."""
@@ -144,7 +145,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     globals.current_user_id.set(update.effective_user.id)
     chat_id = update.effective_chat.id
     globals.TARGET_CHAT_ID.set(chat_id)
-    globals.CURRENT_THREAD_ID.set(update.message.message_thread_id if update.message else None)
+    globals.CURRENT_THREAD_ID.set(
+        normalize_message_thread_id(
+            chat_id,
+            update.message.message_thread_id if update.message else None,
+        )
+    )
     
     # Dynamically associate user chat ID with any pending jobs (like default briefings)
     from emery.scheduler import update_jobs_with_chat_id
@@ -414,7 +420,10 @@ async def send_safe_large_message(update: Update, text: str, reply_to_message_id
 
     sent_msgs = []
     chat_id = update.effective_chat.id
-    thread_id = update.message.message_thread_id if update.message else None
+    thread_id = normalize_message_thread_id(
+        chat_id,
+        update.message.message_thread_id if update.message else None,
+    )
     
     if len(text) <= MAX_LIMIT:
         sent_msg = await globals.application_bot.send_message(
@@ -469,6 +478,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_message_id: int = None, message_thread_id: int = None):
     """Sends a safe split message directly to a chat, replying to a specific message ID."""
     MAX_LIMIT = 4000
+    message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
     reply_params = None
     if reply_to_message_id:
         reply_params = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
