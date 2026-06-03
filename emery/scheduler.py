@@ -190,8 +190,24 @@ async def run_custom_job(context):
         # Automated routine jobs must go to the designated group and topic
         if TELEGRAM_GROUP_CHAT_ID is not None:
             chat_id = TELEGRAM_GROUP_CHAT_ID
+        else:
+            logging.warning(
+                "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
+                "but telegram.group_chat_id is not configured. Falling back to stored chat_id=%s.",
+                description,
+                job_id,
+                chat_id,
+            )
         if ROUTINES_TOPIC_ID is not None:
             message_thread_id = ROUTINES_TOPIC_ID
+        else:
+            logging.warning(
+                "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
+                "but telegram.routines_topic_id is not configured. Using thread_id=%s.",
+                description,
+                job_id,
+                message_thread_id,
+            )
     else:
         # One-off reminders: fallback to CHAT_TOPIC_ID if they have no thread ID
         if message_thread_id is None and CHAT_TOPIC_ID is not None:
@@ -207,6 +223,17 @@ async def run_custom_job(context):
     # Set context variables for target chat and thread/topic
     globals.TARGET_CHAT_ID.set(chat_id)
     globals.CURRENT_THREAD_ID.set(message_thread_id)
+
+    logging.info(
+        "📅 SCHEDULER: Resolved destination for job '%s' (%s) -> chat_id=%s thread_id=%s "
+        "[schedule_type=%s route_to_routines=%s]",
+        description,
+        job_id,
+        chat_id,
+        message_thread_id,
+        schedule_type,
+        route_to_routines,
+    )
         
     if schedule_type == "yearly":
         try:
@@ -261,12 +288,20 @@ async def run_custom_job(context):
         # Run the engine with the job prompt
         res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
         # Send formatted reply
-        await send_safe_job_message(
+        sent_ok = await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
             text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{mention_prefix}{emery_format(res_text)}",
             message_thread_id=message_thread_id
         )
+        if not sent_ok:
+            logging.warning(
+                "⚠️ SCHEDULER: Job '%s' (%s) executed, but delivery to chat_id=%s thread_id=%s failed.",
+                description,
+                job_id,
+                chat_id,
+                message_thread_id,
+            )
     except Exception as e:
         logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
         

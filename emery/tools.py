@@ -2018,6 +2018,13 @@ async def trigger_webhook_alert(camera_name: str):
     if not alert_chat_id:
         logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set telegram.group_chat_id in config/integrations.json or message the bot first.")
         return
+
+    if TELEGRAM_GROUP_CHAT_ID is None:
+        logging.warning(
+            "⚠️ SECURITY ALERT: telegram.group_chat_id is not configured. "
+            "Falling back to the last in-memory chat target (%s), which may be stale.",
+            alert_chat_id,
+        )
         
     # Check if threading is enabled and configure parameters
     enable_threading = ENABLE_REOLINK_THREADING
@@ -2053,7 +2060,22 @@ async def trigger_webhook_alert(camera_name: str):
         message_thread_id=security_topic_id,
         update_thread_tracker=True
     )
-    logging.info(f"✅ SECURITY: Alert dispatched for '{camera_name}'")
+    if not isinstance(result, str) or not result.startswith("SUCCESS:"):
+        logging.warning(
+            "⚠️ SECURITY: Alert delivery failed for '%s' (chat_id=%s thread_id=%s): %s",
+            camera_name,
+            alert_chat_id,
+            security_topic_id,
+            result,
+        )
+        return
+
+    logging.info(
+        "✅ SECURITY: Alert dispatched for '%s' to chat_id=%s thread_id=%s",
+        camera_name,
+        alert_chat_id,
+        security_topic_id,
+    )
 
     # Get the sent photo's message ID from the thread tracker
     photo_msg_id = reply_to_message_id

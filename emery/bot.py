@@ -35,6 +35,84 @@ def is_user_allowed(update: Update) -> bool:
         return True  # Open by default if not set
     return user.id in ALLOWED_USER_IDS
 
+
+async def validate_telegram_routing(application) -> bool:
+    """Checks the configured Telegram group/topic routing and logs actionable warnings."""
+    from emery.config import SECURITY_TOPIC_ID, ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
+
+    group_chat_id = TELEGRAM_GROUP_CHAT_ID
+    topic_ids = {
+        "security_topic_id": SECURITY_TOPIC_ID,
+        "routines_topic_id": ROUTINES_TOPIC_ID,
+        "chat_topic_id": CHAT_TOPIC_ID,
+    }
+
+    configured_topics = {
+        name: topic_id
+        for name, topic_id in topic_ids.items()
+        if topic_id is not None
+    }
+
+    if group_chat_id is None:
+        if configured_topics:
+            logging.warning(
+                "⚠️ TELEGRAM ROUTING: topic IDs are configured (%s), but telegram.group_chat_id is missing. "
+                "Security alerts and scheduled routines will fall back to in-memory chat state until the bot is restarted in a chat.",
+                ", ".join(f"{name}={topic_id}" for name, topic_id in configured_topics.items()),
+            )
+        else:
+            logging.warning(
+                "⚠️ TELEGRAM ROUTING: telegram.group_chat_id is not configured. "
+                "Security alerts, routines, and heartbeat routing may be unstable until a chat is established."
+            )
+        return False
+
+    try:
+        chat = await application.bot.get_chat(group_chat_id)
+        chat_title = getattr(chat, "title", None) or getattr(chat, "full_name", None) or str(group_chat_id)
+        chat_type = getattr(chat, "type", "unknown")
+        is_forum = bool(getattr(chat, "is_forum", False))
+
+        logging.info(
+            "📡 TELEGRAM ROUTING: resolved group chat %s (type=%s, forum=%s)",
+            chat_title,
+            chat_type,
+            is_forum,
+        )
+
+        if configured_topics and not is_forum:
+            logging.warning(
+                "⚠️ TELEGRAM ROUTING: topic IDs are configured for chat_id=%s, but Telegram reports the chat is not a forum. "
+                "Topic sends may fail until the group is converted to a forum or the topic IDs are removed.",
+                group_chat_id,
+            )
+
+        if len(configured_topics) > 1:
+            duplicate_ids = {}
+            for name, topic_id in configured_topics.items():
+                duplicate_ids.setdefault(topic_id, []).append(name)
+            duplicate_ids = {topic_id: names for topic_id, names in duplicate_ids.items() if len(names) > 1}
+            if duplicate_ids:
+                logging.warning(
+                    "⚠️ TELEGRAM ROUTING: some topic IDs are reused across multiple roles: %s",
+                    ", ".join(f"{topic_id}={names}" for topic_id, names in duplicate_ids.items()),
+                )
+
+        if not configured_topics:
+            logging.warning(
+                "⚠️ TELEGRAM ROUTING: telegram.group_chat_id is configured, but no topic IDs are set. "
+                "That's fine for a non-forum group, but forum-specific delivery will use the chat root."
+            )
+
+        return True
+    except Exception as e:
+        logging.warning(
+            "⚠️ TELEGRAM ROUTING: unable to verify configured group chat %s via Telegram API: %s",
+            group_chat_id,
+            e,
+        )
+        return False
+
 # --- TELEGRAM HANDLERS ---
 async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for /clear command."""
@@ -721,6 +799,7 @@ async def start_bot_heartbeat(application) -> None:
 
 async def bot_post_init(application) -> None:
     """Consolidated post_init wrapper to launch Reolink polling and start the bot heartbeat."""
+    await validate_telegram_routing(application)
     from emery.tools import start_reolink_polling
     await start_reolink_polling(application)
     await start_bot_heartbeat(application)
