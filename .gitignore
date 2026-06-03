@@ -21,7 +21,7 @@ test_camera_log.md
 config/
 
 # Local Tests Folder
-/tests
+tests/
 
 
 # Backups
