@@ -33,9 +33,7 @@ from emery.tools import (
     search_fred_series, get_fred_series_observations,
     search_imf_indicators, get_imf_datamapper_series,
     get_stock_snapshot, get_stock_price_history,
-    get_bond_market_dashboard, get_inflation_dashboard,
-    get_us_macro_dashboard, get_equity_market_dashboard, get_global_macro_dashboard,
-    get_housing_consumer_dashboard, get_labor_market_dashboard,
+    get_us_macro, get_market_dashboard, get_global_macro,
     get_reolink_snapshot, get_available_cameras,
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
@@ -349,13 +347,9 @@ if is_enabled("ENABLE_FINANCE"):
         "get_imf_datamapper_series": get_imf_datamapper_series,
         "get_stock_snapshot": get_stock_snapshot,
         "get_stock_price_history": get_stock_price_history,
-        "get_bond_market_dashboard": get_bond_market_dashboard,
-        "get_inflation_dashboard": get_inflation_dashboard,
-        "get_us_macro_dashboard": get_us_macro_dashboard,
-        "get_equity_market_dashboard": get_equity_market_dashboard,
-        "get_global_macro_dashboard": get_global_macro_dashboard,
-        "get_housing_consumer_dashboard": get_housing_consumer_dashboard,
-        "get_labor_market_dashboard": get_labor_market_dashboard,
+        "get_us_macro": get_us_macro,
+        "get_market_dashboard": get_market_dashboard,
+        "get_global_macro": get_global_macro,
     })
     tools_schema.extend([
         {
@@ -457,39 +451,23 @@ if is_enabled("ENABLE_FINANCE"):
         {
             "type": "function",
             "function": {
-                "name": "get_bond_market_dashboard",
-                "description": "High-level bond-market bundle. Use this FIRST for broad questions about the bond market, yields, the yield curve, credit spreads, or how bonds relate to the economy. This tool returns a curated pack of relevant series so you do not have to discover each FRED ID one by one. After reading it, explain the current bond-market regime and how it relates to policy, growth, labor, and equities.",
+                "name": "get_us_macro",
+                "description": "High-level U.S. macro bundle. Use this FIRST for broad questions about the overall U.S. economy, growth, inflation, labor, housing, or the consumer. This tool returns a curated macro dashboard so you can ground your answer in multiple datasets before explaining what they imply.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
         {
             "type": "function",
             "function": {
-                "name": "get_inflation_dashboard",
-                "description": "High-level inflation bundle. Use this FIRST for broad inflation questions when you need headline and core inflation context plus market-based inflation expectations. This tool is preferred over manually searching multiple inflation series one by one unless the user explicitly requests a particular FRED series ID.",
+                "name": "get_market_dashboard",
+                "description": "High-level market bundle. Use this FIRST for broad questions about rates, the yield curve, credit spreads, the stock market, volatility, or cross-asset market context. This tool returns a curated pack of rates, inflation-expectation, credit, equity, volatility, and dollar indicators. If the user asks about a specific stock ticker instead of the broad market, use `get_stock_snapshot` or `get_stock_price_history` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
         {
             "type": "function",
             "function": {
-                "name": "get_us_macro_dashboard",
-                "description": "High-level U.S. macro bundle. Use this FIRST for broad questions about the overall U.S. economy, growth, labor, activity, and policy context. This tool returns a curated macro dashboard so you can ground your answer in multiple datasets before explaining what they imply.",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_equity_market_dashboard",
-                "description": "High-level equity-market bundle. Use this FIRST for broad questions about the stock market, market performance, risk sentiment, and cross-asset context. This tool returns a curated pack of equity, volatility, rates, credit, and dollar indicators. If the user asks about a specific stock ticker instead of the broad market, use `get_stock_snapshot` or `get_stock_price_history` instead.",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_global_macro_dashboard",
+                "name": "get_global_macro",
                 "description": "High-level global macro bundle. Use this FIRST for broad questions about the global economy, cross-country growth, inflation, labor conditions, public debt, or external balances. This tool returns a curated IMF-based cross-country dashboard so you can ground global-macro answers in structured international data before explaining what it implies.",
                 "parameters": {
                     "type": "object",
@@ -499,22 +477,6 @@ if is_enabled("ENABLE_FINANCE"):
                         "end_year": {"type": "integer", "description": "Optional end year for the comparison window. Defaults to the current year."}
                     }
                 }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_housing_consumer_dashboard",
-                "description": "High-level housing-and-consumer bundle. Use this FIRST for broad questions about housing, affordability, construction, household spending, consumer credit, or the health of the consumer. This tool returns a curated dashboard covering mortgage rates, home prices, housing activity, consumer spending, and credit stress so you can explain the household side of the economy with data.",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_labor_market_dashboard",
-                "description": "High-level labor-market bundle. Use this FIRST for broad questions about jobs, unemployment, layoffs, hiring, participation, quits, or wage growth. This tool returns a curated labor dashboard so you can ground labor-market answers in multiple datasets before explaining what they imply.",
-                "parameters": {"type": "object", "properties": {}}
             }
         }
     ])
@@ -858,13 +820,9 @@ TOOL_STATUS_MESSAGES = {
     "get_imf_datamapper_series": f"{MODEL_NAME} is pulling IMF economic data...",
     "get_stock_snapshot": f"{MODEL_NAME} is checking the market...",
     "get_stock_price_history": f"{MODEL_NAME} is pulling stock price history...",
-    "get_bond_market_dashboard": f"{MODEL_NAME} is assembling a bond market dashboard...",
-    "get_inflation_dashboard": f"{MODEL_NAME} is assembling an inflation dashboard...",
-    "get_us_macro_dashboard": f"{MODEL_NAME} is assembling a U.S. macro dashboard...",
-    "get_equity_market_dashboard": f"{MODEL_NAME} is assembling an equity market dashboard...",
-    "get_global_macro_dashboard": f"{MODEL_NAME} is assembling a global macro dashboard...",
-    "get_housing_consumer_dashboard": f"{MODEL_NAME} is assembling a housing and consumer dashboard...",
-    "get_labor_market_dashboard": f"{MODEL_NAME} is assembling a labor market dashboard...",
+    "get_us_macro": f"{MODEL_NAME} is assembling a U.S. macro dashboard...",
+    "get_market_dashboard": f"{MODEL_NAME} is assembling a market dashboard...",
+    "get_global_macro": f"{MODEL_NAME} is assembling a global macro dashboard...",
     "get_reolink_snapshot": f"{MODEL_NAME} is investigating a bump in the night...",
     "get_available_cameras": f"{MODEL_NAME} is reading your camera configuration...",
     "get_camera_security_log": f"{MODEL_NAME} is reviewing the security log...",

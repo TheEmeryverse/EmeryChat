@@ -260,12 +260,8 @@ Supported schedules:
 - IMF DataMapper indicator search and cross-country data
 - Alpha Vantage stock snapshots and price history
 - Curated dashboards for:
-  - bond markets
-  - inflation
   - U.S. macro
-  - equity market
-  - housing/consumer
-  - labor market
+  - markets
   - global macro
 
 ### Smart home and infrastructure

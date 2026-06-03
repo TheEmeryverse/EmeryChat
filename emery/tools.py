@@ -1074,7 +1074,38 @@ async def get_stock_price_history(
         return "Stock price history lookup failed."
 
 
-async def get_bond_market_dashboard() -> str:
+async def get_us_macro() -> str:
+    config_error = _fred_error_prefix()
+    if config_error:
+        return config_error
+
+    series_specs = [
+        ("Real GDP", "GDPC1", "Top-line real output measure for U.S. growth.", 4, "q", "pch"),
+        ("Headline CPI", "CPIAUCSL", "Broad consumer inflation trend.", 4, "m", "pc1"),
+        ("Core PCE Price Index", "PCEPILFE", "Fed-preferred core inflation gauge.", 4, "m", "pc1"),
+        ("Unemployment Rate", "UNRATE", "Headline labor-market slack measure.", 4, "m", "lin"),
+        ("Nonfarm Payrolls", "PAYEMS", "Employment growth and labor demand trend.", 4, "m", "chg"),
+        ("Retail Sales", "RSAFS", "Consumer demand proxy.", 4, "m", "pch"),
+        ("Industrial Production", "INDPRO", "Production-side activity gauge.", 4, "m", "pch"),
+        ("Housing Starts", "HOUST", "Housing-cycle activity and construction demand.", 4, "m", "pch"),
+        ("Consumer Credit", "TOTALSL", "Household borrowing backdrop.", 4, "m", "chg"),
+        ("Average Hourly Earnings", "CES0500000003", "Nominal wage-growth and labor-income signal.", 4, "m", "pch"),
+    ]
+
+    entries = await asyncio.gather(*[
+        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
+        for label, series_id, summary_hint, limit, frequency, units in series_specs
+    ])
+
+    lines = [
+        "U.S. Macro Dashboard:",
+        "Use this bundle for broad U.S. economy questions. It includes growth, inflation, labor, demand, production, housing, and consumer context.",
+    ]
+    lines.extend(_format_dashboard_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+async def get_market_dashboard() -> str:
     config_error = _fred_error_prefix()
     if config_error:
         return config_error
@@ -1085,94 +1116,13 @@ async def get_bond_market_dashboard() -> str:
         ("10-Year Treasury Yield", "DGS10", "Benchmark long-end yield for growth and inflation expectations.", 5, "d", "lin"),
         ("30-Year Treasury Yield", "DGS30", "Long-duration rate used for term-premium and long-horizon rate context.", 5, "d", "lin"),
         ("10Y-2Y Treasury Spread", "T10Y2Y", "Curve slope signal that helps frame recession risk and market expectations.", 5, "d", "lin"),
-        ("30-Year Mortgage Rate", "MORTGAGE30US", "Housing and consumer-finance transmission channel for long rates.", 5, "w", "lin"),
-        ("5-Year Breakeven Inflation", "T5YIE", "Market-based inflation expectation that helps explain nominal yields.", 5, "d", "lin"),
-        ("5-Year Forward Inflation Expectation Rate", "T5YIFR", "Longer-run inflation expectation gauge for term-structure context.", 5, "d", "lin"),
-        ("BBB Corporate Bond Spread", "BAA10Y", "Credit spread proxy for corporate borrowing stress relative to Treasuries.", 5, "d", "lin"),
-        ("High Yield Bond Spread", "BAMLH0A0HYM2", "Riskier credit-spread gauge that helps frame stress appetite beyond Treasuries.", 5, "d", "lin"),
-        ("S&P 500 Index", "SP500", "Risk-asset cross-check to compare bond moves with equities.", 5, "d", "lin"),
-        ("Unemployment Rate", "UNRATE", "Labor-market context for whether rates look restrictive or supportive.", 4, "m", "lin"),
-    ]
-
-    entries = await asyncio.gather(*[
-        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
-        for label, series_id, summary_hint, limit, frequency, units in series_specs
-    ])
-
-    lines = [
-        "Bond Market Dashboard:",
-        "Use this bundle for broad bond-market questions. It includes policy, Treasury curve, mortgage, inflation-expectation, credit-spread, equity, and labor context.",
-    ]
-    lines.extend(_format_dashboard_entry(entry) for entry in entries)
-    return "\n".join(lines)
-
-
-async def get_inflation_dashboard() -> str:
-    config_error = _fred_error_prefix()
-    if config_error:
-        return config_error
-
-    series_specs = [
-        ("Headline CPI", "CPIAUCSL", "Broad consumer inflation level.", 4, "m", "pc1"),
-        ("Core CPI", "CPILFESL", "Underlying CPI excluding food and energy.", 4, "m", "pc1"),
-        ("Headline PCE Price Index", "PCEPI", "Fed-preferred broad inflation gauge.", 4, "m", "pc1"),
-        ("Core PCE Price Index", "PCEPILFE", "Fed-preferred core inflation gauge.", 4, "m", "pc1"),
         ("5-Year Breakeven Inflation", "T5YIE", "Market-based inflation expectations proxy.", 5, "d", "lin"),
         ("5-Year Forward Inflation Expectation Rate", "T5YIFR", "Longer-term inflation expectation gauge.", 5, "d", "lin"),
-    ]
-
-    entries = await asyncio.gather(*[
-        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
-        for label, series_id, summary_hint, limit, frequency, units in series_specs
-    ])
-
-    lines = [
-        "Inflation Dashboard:",
-        "Use this bundle for inflation questions. It includes headline/core CPI and PCE plus market-based inflation expectations.",
-    ]
-    lines.extend(_format_dashboard_entry(entry) for entry in entries)
-    return "\n".join(lines)
-
-
-async def get_us_macro_dashboard() -> str:
-    config_error = _fred_error_prefix()
-    if config_error:
-        return config_error
-
-    series_specs = [
-        ("Real GDP", "GDPC1", "Top-line real output measure for U.S. growth.", 4, "q", "pch"),
-        ("Unemployment Rate", "UNRATE", "Headline labor-market slack measure.", 4, "m", "lin"),
-        ("Nonfarm Payrolls", "PAYEMS", "Employment growth and labor demand trend.", 4, "m", "chg"),
-        ("Retail Sales", "RSAFS", "Consumer demand proxy.", 4, "m", "pch"),
-        ("Industrial Production", "INDPRO", "Production-side activity gauge.", 4, "m", "pch"),
-        ("Fed Funds Rate", "FEDFUNDS", "Policy stance anchor.", 4, "m", "lin"),
-        ("10-Year Treasury Yield", "DGS10", "Long-term rate context.", 5, "d", "lin"),
-    ]
-
-    entries = await asyncio.gather(*[
-        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
-        for label, series_id, summary_hint, limit, frequency, units in series_specs
-    ])
-
-    lines = [
-        "U.S. Macro Dashboard:",
-        "Use this bundle for broad U.S. economy questions. It includes growth, labor, demand, production, and policy context.",
-    ]
-    lines.extend(_format_dashboard_entry(entry) for entry in entries)
-    return "\n".join(lines)
-
-
-async def get_equity_market_dashboard() -> str:
-    config_error = _fred_error_prefix()
-    if config_error:
-        return config_error
-
-    series_specs = [
+        ("BBB Corporate Bond Spread", "BAA10Y", "Credit spread proxy for corporate borrowing stress relative to Treasuries.", 5, "d", "lin"),
+        ("High Yield Bond Spread", "BAMLH0A0HYM2", "Credit-risk backdrop for risky assets.", 5, "d", "lin"),
         ("S&P 500 Index", "SP500", "Core U.S. large-cap equity benchmark.", 5, "d", "lin"),
         ("Nasdaq Composite", "NASDAQCOM", "Growth and tech-heavy equity benchmark.", 5, "d", "lin"),
         ("CBOE VIX", "VIXCLS", "Equity implied-volatility and risk-sentiment gauge.", 5, "d", "lin"),
-        ("10-Year Treasury Yield", "DGS10", "Rates backdrop for equity valuation pressure.", 5, "d", "lin"),
-        ("High Yield Bond Spread", "BAMLH0A0HYM2", "Credit-risk backdrop for equities.", 5, "d", "lin"),
         ("Dollar Index Broad", "DTWEXBGS", "Dollar backdrop for earnings and global risk appetite.", 5, "d", "lin"),
     ]
 
@@ -1182,14 +1132,14 @@ async def get_equity_market_dashboard() -> str:
     ])
 
     lines = [
-        "Equity Market Dashboard:",
-        "Use this bundle for broad equity-market questions. It includes index performance, volatility, rates, credit, and dollar context.",
+        "Market Dashboard:",
+        "Use this bundle for broad market questions. It includes rates, the yield curve, inflation expectations, credit spreads, equities, volatility, and the dollar.",
     ]
     lines.extend(_format_dashboard_entry(entry) for entry in entries)
     return "\n".join(lines)
 
 
-async def get_global_macro_dashboard(
+async def get_global_macro(
     countries: str = "USA,CHN,EAQ,JPN,GBR,IND",
     start_year: int = 2022,
     end_year: int = None,
@@ -1252,64 +1202,6 @@ async def get_global_macro_dashboard(
         logging.error(f"❌ Global Macro Dashboard Error: {e}", exc_info=True)
         return "Global macro dashboard lookup failed."
 
-
-async def get_housing_consumer_dashboard() -> str:
-    config_error = _fred_error_prefix()
-    if config_error:
-        return config_error
-
-    series_specs = [
-        ("30-Year Mortgage Rate", "MORTGAGE30US", "Primary housing-finance rate for affordability and demand.", 5, "w", "lin"),
-        ("Home Price Index", "CSUSHPINSA", "National home-price trend and shelter-wealth backdrop.", 4, "m", "pch"),
-        ("Housing Starts", "HOUST", "New residential construction and housing-cycle activity.", 4, "m", "pch"),
-        ("Building Permits", "PERMIT", "Forward-looking housing construction pipeline.", 4, "m", "pch"),
-        ("Retail Sales", "RSAFS", "Top-line consumer spending proxy.", 4, "m", "pch"),
-        ("Real Personal Consumption Expenditures", "DPCERC1Q027SBEA", "Inflation-adjusted household consumption trend.", 4, "q", "pch"),
-        ("Consumer Credit", "TOTALSL", "Household credit growth and borrowing backdrop.", 4, "m", "chg"),
-        ("Delinquency Rate on Consumer Loans", "DRCLACBS", "Household credit stress and repayment quality signal.", 4, "q", "lin"),
-    ]
-
-    entries = await asyncio.gather(*[
-        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
-        for label, series_id, summary_hint, limit, frequency, units in series_specs
-    ])
-
-    lines = [
-        "Housing & Consumer Dashboard:",
-        "Use this bundle for broad housing, consumer, and household-balance-sheet questions. It includes affordability, construction, spending, and consumer-credit stress context.",
-    ]
-    lines.extend(_format_dashboard_entry(entry) for entry in entries)
-    return "\n".join(lines)
-
-
-async def get_labor_market_dashboard() -> str:
-    config_error = _fred_error_prefix()
-    if config_error:
-        return config_error
-
-    series_specs = [
-        ("Unemployment Rate", "UNRATE", "Headline labor-market slack measure.", 4, "m", "lin"),
-        ("Nonfarm Payrolls", "PAYEMS", "Employment growth and labor demand trend.", 4, "m", "chg"),
-        ("Initial Jobless Claims", "ICSA", "High-frequency layoff and labor-softness signal.", 5, "w", "lin"),
-        ("Continuing Jobless Claims", "CCSA", "Persistence of unemployment and rehiring difficulty signal.", 5, "w", "lin"),
-        ("Job Openings", "JTSJOL", "Labor demand and hiring appetite proxy.", 4, "m", "chg"),
-        ("Quits Rate", "JTSQUR", "Worker confidence and labor-market tightness signal.", 4, "m", "lin"),
-        ("Labor Force Participation Rate", "CIVPART", "Labor supply participation backdrop.", 4, "m", "lin"),
-        ("Employment-Population Ratio", "EMRATIO", "Broad employment utilization measure.", 4, "m", "lin"),
-        ("Average Hourly Earnings", "CES0500000003", "Nominal wage-growth and labor-income signal.", 4, "m", "pch"),
-    ]
-
-    entries = await asyncio.gather(*[
-        _build_fred_dashboard_entry(label, series_id, summary_hint, limit=limit, frequency=frequency, units=units)
-        for label, series_id, summary_hint, limit, frequency, units in series_specs
-    ])
-
-    lines = [
-        "Labor Market Dashboard:",
-        "Use this bundle for broad labor-market questions. It includes employment, unemployment, claims, openings, quits, participation, and wage-growth context.",
-    ]
-    lines.extend(_format_dashboard_entry(entry) for entry in entries)
-    return "\n".join(lines)
 
 # --- UTILITIES ---
 async def get_news_headlines(): # Fetches news headlines from RSS feeds
