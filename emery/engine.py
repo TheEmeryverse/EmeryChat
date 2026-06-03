@@ -1,6 +1,8 @@
 import logging
 import re
 
+from telegram.error import BadRequest
+
 from emery.config import (
     OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, ENABLE_MEMORY,
     ENABLE_CALENDAR, ENABLE_SEERR, ENABLE_WEATHER, ENABLE_NEWS, ENABLE_NASA,
@@ -1008,7 +1010,30 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     
                     if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
                         status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
-                        await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID.get(), text=f"<i>{status_msg}</i>", parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
+                        chat_id = globals.TARGET_CHAT_ID.get()
+                        if chat_id is not None:
+                            try:
+                                await globals.application_bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"<i>{status_msg}</i>",
+                                    parse_mode="HTML",
+                                    message_thread_id=globals.CURRENT_THREAD_ID.get(),
+                                )
+                            except BadRequest as e:
+                                logging.warning(
+                                    "⚠️ ENGINE: Skipping tool status message for chat_id=%s thread_id=%s: %s",
+                                    chat_id,
+                                    globals.CURRENT_THREAD_ID.get(),
+                                    e,
+                                )
+                            except Exception as e:
+                                logging.error(
+                                    "❌ ENGINE: Unexpected error sending tool status message to chat_id=%s thread_id=%s: %s",
+                                    chat_id,
+                                    globals.CURRENT_THREAD_ID.get(),
+                                    e,
+                                    exc_info=True,
+                                )
                     
                     logging.info(f"🔧 TOOL: {fn} | Args: {format_logging_payload(args)}")
                     if fn == "speak_message": 

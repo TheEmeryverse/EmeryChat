@@ -7,6 +7,8 @@ from datetime import datetime, time, timedelta
 from collections import deque
 from pathlib import Path
 
+from telegram.error import BadRequest
+
 from emery.config import (
     USER_TIMEZONE, JOBS_FILE_PATH, TELEGRAM_GROUP_CHAT_ID,
     ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
@@ -122,22 +124,41 @@ def remove_job_from_store(job_id: str):
 async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
     """Splits large messages to fit Telegram's character limits."""
     MAX_LIMIT = 4000
-    if len(text) <= MAX_LIMIT:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
-        return
-
-    while len(text) > 0:
+    try:
         if len(text) <= MAX_LIMIT:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
-            break
-            
-        split_index = text.rfind('\n', 0, MAX_LIMIT)
-        if split_index == -1 or split_index < 3000:
-            split_index = MAX_LIMIT
-            
-        chunk = text[:split_index]
-        await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", message_thread_id=message_thread_id)
-        text = text[split_index:].strip()
+            return True
+
+        while len(text) > 0:
+            if len(text) <= MAX_LIMIT:
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", message_thread_id=message_thread_id)
+                break
+
+            split_index = text.rfind('\n', 0, MAX_LIMIT)
+            if split_index == -1 or split_index < 3000:
+                split_index = MAX_LIMIT
+
+            chunk = text[:split_index]
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", message_thread_id=message_thread_id)
+            text = text[split_index:].strip()
+        return True
+    except BadRequest as e:
+        logging.warning(
+            "⚠️ SCHEDULER: Telegram rejected job message for chat_id=%s thread_id=%s: %s",
+            chat_id,
+            message_thread_id,
+            e,
+        )
+        return False
+    except Exception as e:
+        logging.error(
+            "❌ SCHEDULER: Unexpected error while sending job message to chat_id=%s thread_id=%s: %s",
+            chat_id,
+            message_thread_id,
+            e,
+            exc_info=True,
+        )
+        return False
 
 async def run_custom_job(context):
     """Callback triggered by APScheduler/JobQueue when a job fires."""
