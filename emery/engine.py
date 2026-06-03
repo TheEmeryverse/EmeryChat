@@ -10,6 +10,7 @@ from emery.config import (
 )
 import emery.globals as globals
 from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
+from emery.logging_utils import format_logging_payload
 from emery.memory import save_user_memory, get_camera_security_log
 
 # Import all tools from tools.py
@@ -1009,7 +1010,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                         status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                         await globals.application_bot.send_message(chat_id=globals.TARGET_CHAT_ID.get(), text=f"<i>{status_msg}</i>", parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
                     
-                    logging.info(f"🔧 TOOL: {fn} | Args: {args}")
+                    logging.info(f"🔧 TOOL: {fn} | Args: {format_logging_payload(args)}")
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     

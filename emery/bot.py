@@ -20,6 +20,7 @@ from emery.helpers import (
     emery_format, transcribe_audio, compress_image_bytes,
     get_image_description, clean_thinking_tags
 )
+from emery.logging_utils import safe_preview
 from emery.memory import wipe_memory
 from emery.engine import emery_engine
 from emery.tools import get_voice_audio
@@ -140,10 +141,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         if not replied_text:
             replied_text = reply_to.text or "[Non-text message]"
-        preview = replied_text[:80] + "..." if len(replied_text) > 80 else replied_text
+        preview = safe_preview(replied_text, max_len=80)
         reply_info = f" (Replying to message ID {reply_to_id}: '{preview}')"
 
-    logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {content_text[:120]}{reply_info}")
+    logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {safe_preview(content_text, max_len=120)}{reply_info}")
     globals.chat_histories[chat_id].append({
         "role": "user", 
         "content": content + reply_info,
@@ -187,20 +188,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             should_reply = True
 
     if not should_reply:
-        logging.info(f"🤫 SILENT LISTEN: Recorded group message from {sender_name} (chat {chat_id}) for context, but not replying.")
+        logging.debug(f"🤫 SILENT LISTEN: Recorded group message from {sender_name} (chat {chat_id}) for context, but not replying.")
         return
 
     # --- DEBOUNCE LOGIC ---
     # Cancel existing debounce task for this chat
     if chat_id in globals.chat_debounce_tasks:
         globals.chat_debounce_tasks[chat_id].cancel()
-        logging.info(f"⏱️ DEBOUNCE: Cancelled timer for chat {chat_id}")
+        logging.debug(f"⏱️ DEBOUNCE: Cancelled timer for chat {chat_id}")
 
     # Define the worker that will run after CHAT_DEBOUNCE_DELAY seconds
     async def debounce_worker(delay):
         try:
             await asyncio.sleep(delay)
-            logging.info(f"⏱️ DEBOUNCE: Delay of {delay}s expired, processing chat {chat_id}...")
+            logging.debug(f"⏱️ DEBOUNCE: Delay of {delay}s expired, processing chat {chat_id}...")
             await run_engine_for_chat(update, context, model_to_use, is_input_voice)
         except asyncio.CancelledError:
             pass
@@ -257,7 +258,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info("🤫 HANDSHAKE: Suppressed text reply (silent check)")
+        logging.debug("🤫 HANDSHAKE: Suppressed text reply (silent check)")
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
@@ -381,9 +382,9 @@ async def send_safe_large_message(update: Update, text: str, reply_to_message_id
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs network drops and timeouts cleanly instead of crashing the thread."""
     if isinstance(context.error, TimedOut):
-        logging.warning("⚠️ Telegram API timed out temporarily due to high CPU load. The message will retry.")
+        logging.warning("⚠️ TELEGRAM: API timed out temporarily due to load. The message will retry.")
     else:
-        logging.error(f"⚠️ Telegram API Exception: {context.error}", exc_info=True)
+        logging.error(f"❌ TELEGRAM: Unhandled API exception: {context.error}", exc_info=True)
 
 # --- REACTION AND HEARTBEAT FUNCTIONALITY ---
 
@@ -471,7 +472,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if "reactions" not in found_msg:
             found_msg["reactions"] = {}
         found_msg["reactions"][actor_key] = emojis
-        logging.info(f"🎭 REACTION: {actor_key} reaction on {message_id} -> {emojis}")
+        logging.debug(f"🎭 REACTION: {actor_key} reaction on {message_id} -> {emojis}")
         
     # Trigger response evaluation if the user added/changed their reaction
     if not is_bot:
@@ -484,7 +485,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 
         if set(emojis) != set(old_emojis):
             if emojis:
-                logging.info(f"🎭 REACTION: Triggering evaluation for reaction {emojis} on {message_id}")
+                logging.debug(f"🎭 REACTION: Triggering evaluation for reaction {emojis} on {message_id}")
                 asyncio.create_task(handle_user_reaction_trigger(chat_id, message_id, emojis, user.id))
 
 async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: list[str], user_id: int):
@@ -552,7 +553,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info("🤫 REACTION: Suppressed response (model chose silence)")
+        logging.debug("🤫 REACTION: Suppressed response (model chose silence)")
         return
         
     globals.chat_histories[chat_id].append({
@@ -575,10 +576,10 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_HEARTBEAT:
         return
         
-    logging.info("💓 HEARTBEAT: Checking activity...")
+    logging.debug("💓 HEARTBEAT: Checking activity...")
     
     if TELEGRAM_GROUP_CHAT_ID is None:
-        logging.info("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID not set, skipping check.")
+        logging.debug("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID not set, skipping check.")
         return
     group_chat_id = TELEGRAM_GROUP_CHAT_ID
         
@@ -606,7 +607,7 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
                 is_asleep = True
                 
         if is_asleep:
-            logging.info(f"💓 HEARTBEAT: Suppressed check-in (inside sleep window: {HEARTBEAT_SLEEP_START}-{HEARTBEAT_SLEEP_END})")
+            logging.debug(f"💓 HEARTBEAT: Suppressed check-in (inside sleep window: {HEARTBEAT_SLEEP_START}-{HEARTBEAT_SLEEP_END})")
             return
     except Exception as e:
         logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
@@ -673,7 +674,7 @@ async def handle_heartbeat_trigger(chat_id: int):
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
-        logging.info(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
+        logging.debug(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
         if globals.chat_histories[chat_id]:
             globals.chat_histories[chat_id][-1]["timestamp"] = datetime.now(USER_TIMEZONE)
         return
@@ -703,7 +704,7 @@ async def handle_heartbeat_trigger(chat_id: int):
 async def start_bot_heartbeat(application) -> None:
     """Registers the bot heartbeat job in the Telegram JobQueue on startup."""
     if not ENABLE_HEARTBEAT:
-        logging.info("💓 HEARTBEAT: Spontaneous heartbeat disabled.")
+        logging.debug("💓 HEARTBEAT: Spontaneous heartbeat disabled.")
         return
         
     if not application.job_queue:

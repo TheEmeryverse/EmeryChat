@@ -16,6 +16,7 @@ from emery.config import (
     get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
+from emery.logging_utils import safe_preview
 
 def normalize_gemma_thinking(text: str) -> str:
     if not text:
@@ -130,7 +131,7 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
         async with globals.fast_model_lock:
             r = await globals.http_client.post(url, json=payload, timeout=300)
         if r.status_code != 200:
-            logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {r.text}")
+            logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {safe_preview(r.text, max_len=240)}")
             return ""
             
         data = r.json()
@@ -162,14 +163,14 @@ def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 
         compressed_bytes = compressed_buffer.getvalue()
         comp_size = len(compressed_bytes)
         
-        logging.info(f"🖼️ COMPRESS: {orig_size / 1024:.1f}KB -> {comp_size / 1024:.1f}KB")
+        logging.debug(f"🖼️ COMPRESS: {orig_size / 1024:.1f}KB -> {comp_size / 1024:.1f}KB")
         return compressed_bytes
     except Exception as e:
         logging.warning(f"⚠️ IMAGE COMPRESSION: Failed to compress image ({e}) — using original bytes.")
         return image_bytes
 
 async def get_image_description(b64_data: str, user_caption: str) -> str:
-    logging.info(f"👁️ VISION: Analyzing image with {VISION_MODEL_ID}...")
+    logging.debug(f"👁️ VISION: Analyzing image with {VISION_MODEL_ID}...")
     try:
         url = VISION_OLLAMA_URL
         if not url.endswith("/api/chat"):
@@ -218,7 +219,7 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             logging.warning("⚠️ Ollama Vision analyzed the image but returned an empty response.")
             return "No description generated."
             
-        logging.info(f"👁️ VISION: Completed analysis ({len(description)} chars)")
+        logging.debug(f"👁️ VISION: Completed analysis ({len(description)} chars)")
         return description
         
     except Exception as e:

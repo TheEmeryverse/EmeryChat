@@ -33,6 +33,7 @@ from emery.config import (
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
+from emery.logging_utils import safe_preview
 
 
 def _format_large_number(value):
@@ -648,7 +649,7 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
                 }
 
             if len(cleaned_text) > 1500:
-                logging.info(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {url}...")
+                logging.debug(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {url}...")
                 summary_prompt = (
                     f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "
                     f"Keep it objective, concise, and structured under 600 words.\n\n"
@@ -1261,7 +1262,7 @@ async def get_news_headlines(): # Fetches news headlines from RSS feeds
             titles = [f"- {i.title}" for i in feed.entries[:5]]
             return f"### {name.upper()}\n" + ("\n".join(titles) if titles else "- No recent news.")
         except Exception as e:
-            logging.error(f"Error fetching {name}: {e}")
+            logging.warning(f"⚠️ NEWS: Failed to fetch feed '{name}': {e}")
             return f"### {name.upper()}\n- Unavailable."
 
     results = await asyncio.gather(*(safe_parse(n, u) for n, u in FEEDS.items()))
@@ -1680,7 +1681,7 @@ async def overseer_search_movie(query: str) -> str:
     try:
         return await asyncio.to_thread(sync_search)
     except Exception as err:
-        logging.error(f"Overseerr Movie Search Failed: {err}")
+        logging.error(f"❌ OVERSEERR: Movie search failed: {err}")
         return f"Error: {err}"
 
 async def overseer_request_movie(tmdb_id):
@@ -1694,7 +1695,7 @@ async def overseer_request_movie(tmdb_id):
             return "ALREADY_AVAILABLE_OR_PENDING"
         return f"FAILED: Overseer returned {r.status_code}"
     except Exception as e:
-        logging.error(f"Overseerr Movie Request Failed: {e}")
+        logging.error(f"❌ OVERSEERR: Movie request failed: {e}")
         return f"Request failed: {e}"
 
 async def overseer_search_tv(query: str) -> str:
@@ -1727,7 +1728,7 @@ async def overseer_search_tv(query: str) -> str:
     try:
         return await asyncio.to_thread(sync_search)
     except Exception as err:
-        logging.error(f"Overseerr Search Failed: {err}")
+        logging.error(f"❌ OVERSEERR: TV search failed: {err}")
         return f"Error: {err}"
 
 async def overseer_request_tv_season(tmdb_id, season_number):
@@ -1738,7 +1739,7 @@ async def overseer_request_tv_season(tmdb_id, season_number):
         if r.status_code == 409: return f"Season {season_number} is already available or pending."
         return f"SUCCESS: Season {season_number} requested for user."
     except Exception as e:
-        logging.error(f"Overseerr TV Season Request Failed: {e}")
+        logging.error(f"❌ OVERSEERR: TV season request failed: {e}")
         return f"Request failed: {e}"
 
 # --- REOLINK CAMERA NVR INTEGRATIONS ---
@@ -1808,18 +1809,20 @@ async def get_reolink_snapshot(
 
     for proto in protocols:
         try:
-            logging.info(f"📹 CAMERA: Connecting via {proto['name']} → {host}...")
+            logging.debug(f"📹 CAMERA: Connecting via {proto['name']} → {host}...")
             r = await globals.http_client.get(proto["url"], timeout=8)
             
             if r.status_code == 200:
                 if r.content.startswith(b'\xff\xd8'):
                     response_content = r.content
                     successful_protocol = proto["name"]
-                    logging.info(f"✅ CAMERA: Snapshot fetched via {proto['name']}")
+                    logging.debug(f"✅ CAMERA: Snapshot fetched via {proto['name']}")
                     break
                 else:
                     error_msg = r.content.decode('utf-8', errors='ignore')
-                    logging.warning(f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {error_msg}")
+                    logging.warning(
+                        f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {safe_preview(error_msg, max_len=200)}"
+                    )
             else:
                 logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
                 
@@ -1862,7 +1865,7 @@ async def get_reolink_snapshot(
         )
         
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
-        logging.info("👁️ VISION [1/2]: Running threat analysis...")
+        logging.debug("👁️ VISION [1/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
             Analyze this image and report ONLY the following active elements if present:
             - People (assess sex, race/ethnicity, hair color, exact clothing details, and if they are holding or carrying any objects)
@@ -1878,7 +1881,7 @@ async def get_reolink_snapshot(
             6. If there are no people, vehicles, or packages in the image, respond EXACTLY with: "No active activity detected." """
             
         concise_report = await get_image_description(b64_image, security_prompt)
-        logging.info(f"👁️ VISION [1/2] Raw Response: '{concise_report}'")
+        logging.debug(f"👁️ VISION [1/2]: Completed ({len(concise_report or '')} chars)")
         
         if not concise_report or not concise_report.strip():
             concise_report = "No active activity detected."
@@ -1904,14 +1907,14 @@ async def get_reolink_snapshot(
                     }
             
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
-            logging.info("👁️ VISION [2/2]: Generating scene context...")
+            logging.debug("👁️ VISION [2/2]: Generating scene context...")
             context_prompt = (
                 f"This is a live feed from the {matched_camera_name} camera{desc_context}.{time_context} "
                 "Concisely describe the layout, stationary structures, background, "
                 "and visible inanimate objects in the frame."
             )
             scene_context = await get_image_description(b64_image, context_prompt)
-            logging.info(f"👁️ VISION [2/2] Raw Response: '{scene_context}'")
+            logging.debug(f"👁️ VISION [2/2]: Completed ({len(scene_context or '')} chars)")
             
             # Write to out-of-context log
             from emery.memory import append_camera_log
@@ -1968,12 +1971,12 @@ async def trigger_webhook_alert(camera_name: str):
             elapsed = (now_dt - first_alert_time).total_seconds()
             if elapsed < thread_window_minutes * 60:
                 reply_to_message_id = tracker["message_id"]
-                logging.info(f"🧵 REOLINK THREAD: Successive alert within window for camera '{camera_name}'. Replying to message ID {reply_to_message_id} (elapsed: {elapsed:.1f}s)")
+                logging.debug(f"🧵 REOLINK THREAD: Successive alert within window for camera '{camera_name}'. Replying to message ID {reply_to_message_id} (elapsed: {elapsed:.1f}s)")
             else:
-                logging.info(f"🧵 REOLINK THREAD: Thread window ({thread_window_minutes}m) expired for camera '{camera_name}'. Starting a new thread.")
+                logging.debug(f"🧵 REOLINK THREAD: Thread window ({thread_window_minutes}m) expired for camera '{camera_name}'. Starting a new thread.")
                 globals.reolink_thread_trackers.pop(cam_key, None)
         else:
-            logging.info(f"🧵 REOLINK THREAD: No active thread for camera '{camera_name}'. Starting a new thread.")
+            logging.debug(f"🧵 REOLINK THREAD: No active thread for camera '{camera_name}'. Starting a new thread.")
             
     # Resolve the SECURITY_TOPIC_ID
     security_topic_id = SECURITY_TOPIC_ID
@@ -2060,13 +2063,13 @@ async def reolink_polling_loop(application):
     logging.info(f"📹 CAMERA POLL: Running startup self-test on '{test_cam}' (ch.{test_chan})...")
     try:
         r = await globals.http_client.post(test_url, json=test_body, timeout=10)
-        logging.info(f"📹 CAMERA POLL: Self-test HTTPS status {r.status_code}")
+        logging.debug(f"📹 CAMERA POLL: Self-test HTTPS status {r.status_code}")
         
         if r.status_code != 200:
             test_url_http = test_url.replace("https://", "http://")
-            logging.info(f"📹 CAMERA POLL: HTTPS failed — trying HTTP fallback...")
+            logging.debug(f"📹 CAMERA POLL: HTTPS failed — trying HTTP fallback...")
             r = await globals.http_client.post(test_url_http, json=test_body, timeout=10)
-            logging.info(f"📹 CAMERA POLL: HTTP fallback status {r.status_code}")
+            logging.debug(f"📹 CAMERA POLL: HTTP fallback status {r.status_code}")
             
         if r.status_code == 200:
             raw_json = r.json()
@@ -2102,7 +2105,9 @@ async def reolink_polling_loop(application):
                             code = entry.get("code", -1)
                             if code != 0:
                                 error_detail = entry.get("error", {})
-                                logging.warning(f"⚠️ REOLINK POLLING: Camera '{camera_name}' (Channel {channel}) returned API error code {code}: {error_detail}")
+                                logging.warning(
+                                    f"⚠️ REOLINK POLLING: Camera '{camera_name}' (Channel {channel}) returned API error code {code}: {safe_preview(error_detail, max_len=160)}"
+                                )
                                 continue
 
                             value = entry.get("value", {})
@@ -2120,16 +2125,18 @@ async def reolink_polling_loop(application):
 
                             tracker["last_state"] = current_state
                         else:
-                            logging.warning(f"⚠️ REOLINK POLLING: Unexpected response format from NVR: {data}")
+                            logging.warning(
+                                f"⚠️ REOLINK POLLING: Unexpected response format from NVR: {safe_preview(data, max_len=180)}"
+                            )
                     else:
                         logging.warning(f"⚠️ REOLINK POLLING: Both HTTP and HTTPS queries returned code {r.status_code} for camera '{camera_name}'")
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError) as e:
-                    logging.debug(f"REOLINK POLLING: Connection blip on camera '{camera_name}' (Channel {channel})")
+                    logging.debug(f"📹 REOLINK POLLING: Connection blip on camera '{camera_name}' (Channel {channel})")
                 except Exception as inner_e:
-                    logging.error(f"❌ REOLINK POLLING: Error evaluating state for camera '{camera_name}': {inner_e}")
+                    logging.error(f"❌ REOLINK POLLING: Error evaluating state for camera '{camera_name}': {inner_e}", exc_info=True)
                     
         except Exception as outer_e:
-            logging.error(f"❌ REOLINK POLLING: Global polling loop exception: {outer_e}")
+            logging.error(f"❌ REOLINK POLLING: Global polling loop exception: {outer_e}", exc_info=True)
 
 async def start_reolink_polling(application):
     if ENABLE_REOLINK_POLLING:

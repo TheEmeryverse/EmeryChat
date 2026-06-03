@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime, time, timedelta
 from collections import deque
+from pathlib import Path
 
 from emery.config import (
     USER_TIMEZONE, JOBS_FILE_PATH, TELEGRAM_GROUP_CHAT_ID,
@@ -21,6 +22,8 @@ WEEKDAYS = {
     "saturday": 5, "sat": 5,
     "sunday": 6, "sun": 6
 }
+
+LEGACY_JOBS_FILE_PATH = str(Path(JOBS_FILE_PATH).resolve().parent.parent / "custom_jobs.json")
 
 
 def parse_duration_to_seconds(val: str) -> int:
@@ -47,11 +50,55 @@ def parse_duration_to_seconds(val: str) -> int:
 
 def load_jobs_from_file() -> list:
     """Loads scheduled jobs from the custom_jobs.json file."""
-    if not os.path.exists(JOBS_FILE_PATH):
+    current_path = Path(JOBS_FILE_PATH)
+    legacy_path = Path(LEGACY_JOBS_FILE_PATH)
+
+    if not current_path.exists() and not legacy_path.exists():
         return []
+
     try:
-        with open(JOBS_FILE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        current_jobs = []
+        if current_path.exists():
+            with current_path.open("r", encoding="utf-8") as f:
+                current_jobs = json.load(f)
+        if not isinstance(current_jobs, list):
+            current_jobs = []
+
+        legacy_jobs = []
+        if legacy_path.exists():
+            with legacy_path.open("r", encoding="utf-8") as f:
+                legacy_jobs = json.load(f)
+        if not isinstance(legacy_jobs, list):
+            legacy_jobs = []
+
+        if (not current_jobs) and legacy_jobs:
+            save_jobs_to_file(legacy_jobs)
+            logging.info(
+                "📅 SCHEDULER: Migrated %s legacy jobs from %s to %s",
+                len(legacy_jobs),
+                legacy_path,
+                current_path,
+            )
+            current_jobs = legacy_jobs
+
+        deduped_jobs = []
+        seen_ids = set()
+        for job in reversed(current_jobs):
+            job_id = str(job.get("id") or "").strip()
+            if not job_id:
+                logging.warning("⚠️ SCHEDULER: Skipping persisted job without an id: %r", job)
+                continue
+            if job_id in seen_ids:
+                logging.warning("⚠️ SCHEDULER: Dropping duplicate persisted job id '%s'", job_id)
+                continue
+            seen_ids.add(job_id)
+            deduped_jobs.append(job)
+        deduped_jobs.reverse()
+
+        if deduped_jobs != current_jobs:
+            save_jobs_to_file(deduped_jobs)
+
+        return deduped_jobs
     except Exception as e:
         logging.error(f"❌ SCHEDULER: Error loading jobs file: {e}", exc_info=True)
         return []

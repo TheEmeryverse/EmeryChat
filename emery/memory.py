@@ -9,6 +9,7 @@ from emery.config import (
     CAMERA_LOG_FILE_PATH, get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
+from emery.logging_utils import safe_preview
 
 def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
     """
@@ -163,7 +164,7 @@ async def save_user_memory(fact: str, user_id: int = None) -> str:
     if not memory_file_path:
         return "Memory is disabled."
         
-    logging.info(f"💾 MEMORY: Appending new fact for user {user_id}: '{fact}'")
+    logging.debug(f"💾 MEMORY: Appending new fact for user {user_id}: '{safe_preview(fact, max_len=120)}'")
     if not os.path.exists(memory_file_path):
         # Create default if missing
         profile = get_user_profile(user_id)
@@ -211,7 +212,7 @@ async def save_user_memory(fact: str, user_id: int = None) -> str:
             f.write(updated_content)
             
         # Trigger background consolidation using the fast model
-        logging.info(f"💾 MEMORY: Scheduling consolidation for user {user_id}...")
+        logging.debug(f"💾 MEMORY: Scheduling consolidation for user {user_id}...")
         asyncio.create_task(consolidate_memory_background(user_id))
         
         return f"Successfully saved to memory log staging: '{fact}'"
@@ -236,7 +237,7 @@ async def consolidate_memory_background(user_id: int = None) -> None:
         logging.debug(f"💾 CONSOLIDATOR: Memory consolidation already in progress for user {user_id}. Skipping.")
         return
  
-    logging.info(f"💾 CONSOLIDATOR: Starting consolidation for user {user_id}...")
+    logging.debug(f"💾 CONSOLIDATOR: Starting consolidation for user {user_id}...")
     
     memory_file_path = get_memory_file_path(user_id)
     if not memory_file_path or not os.path.exists(memory_file_path):
@@ -388,7 +389,7 @@ async def append_camera_log(camera_name: str, threat_report: str, scene_context:
     try:
         with open(CAMERA_LOG_FILE_PATH, "w", encoding="utf-8") as f:
             f.writelines(out_lines)
-        logging.info(f"📹 CAMERA LOG: Logged activity for {camera_name}")
+        logging.debug(f"📹 CAMERA LOG: Logged activity for {camera_name}")
     except Exception as e:
         logging.error(f"❌ CAMERA LOG: Failed to write camera log: {e}", exc_info=True)
 
@@ -562,7 +563,7 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
         if summary and summary.upper() != "NONE" and (summary.startswith("-") or summary.startswith("*")):
             # Extract raw text from bullet to pass to save_user_memory
             raw_fact = summary.lstrip("-* ").strip()
-            logging.info(f"💾 TOPIC MONITOR: New topic: '{raw_fact}'")
+            logging.debug(f"💾 TOPIC MONITOR: New topic: '{raw_fact}'")
             # Save it to raw intake staging area (which triggers memory consolidation automatically)
             await save_user_memory(raw_fact, user_id)
             
