@@ -5,7 +5,9 @@ import asyncio
 import base64
 import json
 import subprocess
+import secrets
 import requests
+import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
 from datetime import datetime, time, timedelta
@@ -1703,6 +1705,21 @@ async def overseer_request_tv_season(tmdb_id, season_number):
         return f"Request failed: {e}"
 
 # --- REOLINK CAMERA NVR INTEGRATIONS ---
+def _build_reolink_request_params(cmd: str, user: str, password: str, channel: int = None, use_logical_channel: bool = False, snap_type: str = "main") -> dict:
+    params = {
+        "cmd": cmd,
+        "rs": secrets.token_hex(8),
+        "user": user,
+        "password": password,
+    }
+    if channel is not None:
+        params["channel"] = int(channel)
+    if use_logical_channel:
+        params["iLogicChannel"] = int(channel) if channel is not None else 0
+        params["snapType"] = snap_type
+    return params
+
+
 async def get_reolink_snapshot(
     camera_name: str, 
     reply_to_message_id: int = None,
@@ -1759,10 +1776,28 @@ async def get_reolink_snapshot(
     if not channel:
         available_cams = ", ".join(camera_map.keys())
         return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
-        
+    
     protocols = [
-        {"name": "HTTPS", "url": f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"},
-        {"name": "HTTP", "url": f"http://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"}
+        {
+            "name": "HTTPS",
+            "url": f"https://{host}/cgi-bin/api.cgi",
+            "params": _build_reolink_request_params("Snap", user, password, channel, True, "main"),
+        },
+        {
+            "name": "HTTP",
+            "url": f"http://{host}/cgi-bin/api.cgi",
+            "params": _build_reolink_request_params("Snap", user, password, channel, True, "main"),
+        },
+        {
+            "name": "HTTPS",
+            "url": f"https://{host}/cgi-bin/api.cgi",
+            "params": _build_reolink_request_params("Snap", user, password, 0, False, "main"),
+        },
+        {
+            "name": "HTTP",
+            "url": f"http://{host}/cgi-bin/api.cgi",
+            "params": _build_reolink_request_params("Snap", user, password, 0, False, "main"),
+        },
     ]
     
     response_content = None
@@ -1771,7 +1806,7 @@ async def get_reolink_snapshot(
     for proto in protocols:
         try:
             logging.debug(f"📹 CAMERA: Connecting via {proto['name']} → {host}...")
-            r = await globals.http_client.get(proto["url"], timeout=8)
+            r = await globals.http_client.get(proto["url"], params=proto["params"], timeout=8)
             
             if r.status_code == 200:
                 if r.content.startswith(b'\xff\xd8'):
@@ -1792,7 +1827,6 @@ async def get_reolink_snapshot(
         except Exception as e:
             logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
 
-    import httpx
     if not response_content:
         return (f"FAILED: Could not connect to your Reolink NVR at {host}. "
                 f"1. Please REBOOT your Reolink NVR to apply the HTTPS/CGI settings. "
@@ -2040,18 +2074,19 @@ async def reolink_polling_loop(application):
     # --- STARTUP DIAGNOSTIC SELF-TEST ---
     test_cam = next(iter(camera_map))
     test_chan = camera_map[test_cam]
-    test_url = f"https://{host}/cgi-bin/api.cgi?cmd=GetAiState&user={user}&password={password}"
+    test_url = f"https://{host}/cgi-bin/api.cgi"
+    test_params = _build_reolink_request_params("GetAiState", user, password, test_chan)
     test_body = [{"cmd": "GetAiState", "param": {"channel": int(test_chan)}}]
     
     logging.info(f"📹 CAMERA POLL: Running startup self-test on '{test_cam}' (ch.{test_chan})...")
     try:
-        r = await globals.http_client.post(test_url, json=test_body, timeout=10)
+        r = await globals.http_client.post(test_url, params=test_params, json=test_body, timeout=10)
         logging.debug(f"📹 CAMERA POLL: Self-test HTTPS status {r.status_code}")
         
         if r.status_code != 200:
             test_url_http = test_url.replace("https://", "http://")
             logging.debug(f"📹 CAMERA POLL: HTTPS failed — trying HTTP fallback...")
-            r = await globals.http_client.post(test_url_http, json=test_body, timeout=10)
+            r = await globals.http_client.post(test_url_http, params=test_params, json=test_body, timeout=10)
             logging.debug(f"📹 CAMERA POLL: HTTP fallback status {r.status_code}")
             
         if r.status_code == 200:
@@ -2072,14 +2107,15 @@ async def reolink_polling_loop(application):
         try:
             await asyncio.sleep(2.5)
             for camera_name, channel in camera_map.items():
-                url = f"https://{host}/cgi-bin/api.cgi?cmd=GetAiState&user={user}&password={password}"
+                url = f"https://{host}/cgi-bin/api.cgi"
+                params = _build_reolink_request_params("GetAiState", user, password, channel)
                 body = [{"cmd": "GetAiState", "param": {"channel": int(channel)}}]
                 
                 try:
-                    r = await globals.http_client.post(url, json=body, timeout=5)
+                    r = await globals.http_client.post(url, params=params, json=body, timeout=5)
                     if r.status_code != 200:
                         url_http = url.replace("https://", "http://")
-                        r = await globals.http_client.post(url_http, json=body, timeout=5)
+                        r = await globals.http_client.post(url_http, params=params, json=body, timeout=5)
                         
                     if r.status_code == 200:
                         data = r.json()
