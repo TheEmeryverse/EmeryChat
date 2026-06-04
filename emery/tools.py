@@ -1948,7 +1948,7 @@ async def trigger_webhook_alert(camera_name: str):
         alert_chat_id = globals.TARGET_CHAT_ID.get()
         
     if not alert_chat_id:
-        logging.warning("⚠️ SECURITY ALERT: Motion detected, but no target chat ID is available. Set telegram.group_chat_id in config/integrations.json or message the bot first.")
+        logging.warning("⚠️ SECURITY ALERT: Person detected, but no target chat ID is available. Set telegram.group_chat_id in config/integrations.json or message the bot first.")
         return
 
     if TELEGRAM_GROUP_CHAT_ID is None:
