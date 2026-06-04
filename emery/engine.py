@@ -982,7 +982,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 "num_ctx": ctx_size,
                 "temperature": 0.8,
                 "top_p": 0.9,
-                "num_gpu": 0,
+                # "num_gpu": 0,
                 "num_thread": 16
             }
         }
