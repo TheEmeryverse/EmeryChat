@@ -434,23 +434,37 @@ async def get_current_system_prompt(user_query="", user_id=None): # Injects the 
         if recalled:
             memory_section = "\n\n# Long-Term Persistent Memory"
             memory_section += f"\n## Scoped Memories for {user_name}:\n{recalled}"
-        memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
+        memory_instruction = (
+            "\n- You have a persistent memory tool: `save_user_memory`."
+            "\n- Use `save_user_memory` ONLY for information that is likely to matter again in a future conversation after chat history is cleared."
+            "\n- Save durable user facts such as preferences, recurring constraints, household facts, names, relationships, long-term projects, device ownership, standing instructions, and future-relevant plans."
+            "\n- Do NOT save one-off chatter, jokes, temporary status updates, facts already clearly captured in memory, or information that is too vague to be useful later."
+            "\n- In group chats, do NOT save private or sensitive facts unless the user clearly states them and they are appropriate for long-term memory."
+            "\n- When you do save memory, write one clean factual statement with no filler, no commentary, and no surrounding explanation."
+        )
 
     scheduler_instruction = ""
     if str(ENABLE_SCHEDULER).lower() == "true":
-        scheduler_instruction = "\n- You have the ability to schedule automated background jobs/tasks for the user (like checking the weather daily, fetching news headlines, or setting repeating or one-time reminders/alerts) using the `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job` tools."
+        scheduler_instruction = (
+            "\n- You have scheduling tools: `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job`."
+            "\n- Use `add_scheduled_job` ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future."
+            "\n- Do NOT create scheduled jobs proactively just because something seems useful."
+            "\n- Use `list_scheduled_jobs` when the user asks what is scheduled or refers to existing routines/reminders."
+            "\n- Use `remove_scheduled_job` ONLY when the user clearly asks to cancel, delete, stop, or remove a scheduled job."
+        )
 
     coprocessor_instruction = (
-        "\n- You operate in a dual-model topology. To keep system latency low and protect your context window, "
-        "you MUST delegate heavy text parsing, table formatting, data extraction, and general summarization tasks "
-        "to the coprocessor via the `delegate_to_coprocessor` tool, especially when the target content is long "
-        "(exceeds 1,500 characters) or highly repetitive."
+        "\n- You operate in a dual-model topology."
+        "\n- Use `delegate_to_coprocessor` for heavy text-only work such as summarization, extraction, classification, cleanup, or formatting when the source material is long, repetitive, or expensive to parse inline."
+        "\n- You MUST delegate when the target text is roughly over 1,500 characters or when the task is mainly mechanical text processing rather than conversation."
+        "\n- Do NOT delegate short ordinary conversational turns, simple factual answers, or tasks that require direct tool use instead of text processing."
     )
 
     reaction_instruction = (
         "\n- You can react to any message in the chat with an emoji using the `react_to_message` tool. "
         "Use this for normal texting interaction when a full text response is not needed, or in addition to text. "
         "Use reactions sparingly and only when highly natural (e.g. laughing at a joke, showing appreciation, or a simple status check-in). Do not react to every message. "
+        "Do NOT use reactions as a substitute for a substantive answer when the user asked a real question or requested work. "
         "If you only want to react to a message and send no text response, call the `react_to_message` tool and then respond with exactly 'DONE'."
         "\n- You can send a Telegram sticker using the `send_sticker` tool, and you can send a GIF (animation) using the `send_gif` tool. "
         "Use stickers and GIFs contextually and naturally (just like a human participant in the chat would). "
@@ -461,7 +475,8 @@ async def get_current_system_prompt(user_query="", user_id=None): # Injects the 
     reply_instruction = (
         "\n- You can quote/thread your response to a specific message using the `reply_to_message` tool. "
         "Use this ONLY when you want to explicitly quote an older message from earlier in the conversation, or if the user asks a question about a specific past message. "
-        "DO NOT use this tool for normal back-and-forth messaging. For normal replies, just write your response text directly without calling this tool."
+        "DO NOT use this tool for normal back-and-forth messaging. For normal replies, just write your response text directly without calling this tool. "
+        "If the user did not explicitly reference a specific earlier message, prefer a normal reply instead of forcing a threaded reply."
     )
 
     finance_instruction = ""

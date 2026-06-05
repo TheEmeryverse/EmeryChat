@@ -586,13 +586,13 @@ if ENABLE_MEMORY:
         "type": "function", 
         "function": {
             "name": "save_user_memory", 
-            "description": "Saves a new fact, preference, or critical piece of information about the user or their environment to the permanent memory log. Use when the user shares something they expect you to remember long-term.", 
+            "description": "Persist one durable memory item for future conversations. Use ONLY for long-term facts likely to matter again after chat history is cleared: preferences, recurring constraints, names, relationships, household facts, long-term projects, owned devices/services, or future-relevant standing instructions. Do NOT use for temporary chatter, one-off status updates, obvious short-lived context, jokes, or facts already clearly stored. In group chats, be conservative about saving sensitive private facts.", 
             "parameters": {
                 "type": "object", 
                 "properties": {
                     "fact": {
                         "type": "string",
-                        "description": "The exact fact, preference, or instruction to remember (e.g. 'User prefers tabs over spaces')."
+                        "description": "One clean factual statement to remember, with no filler or commentary (e.g. 'Hudson prefers tabs over spaces in code editors.')."
                     }
                 }, 
                 "required": ["fact"]
@@ -666,7 +666,7 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "add_scheduled_job",
-                "description": "Schedule a new automated job/task (like checking the weather daily, fetching the news, or setting a repeating or one-time reminder/alert).",
+                "description": "Create a scheduled reminder, recurring routine, or future automated check. Use ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future. Do NOT create jobs proactively just because it seems helpful.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -704,7 +704,7 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "list_scheduled_jobs",
-                "description": "Retrieve a list of all currently configured custom scheduled jobs, including their IDs, schedules, and prompts.",
+                "description": "List the currently configured scheduled jobs. Use when the user asks what is scheduled, what reminders/routines exist, or wants to inspect existing jobs before changing them.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -712,7 +712,7 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "remove_scheduled_job",
-                "description": "Cancel and delete a scheduled job using its unique ID.",
+                "description": "Cancel and delete a scheduled job by ID. Use ONLY when the user clearly asks to cancel, stop, delete, or remove an existing scheduled job.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -732,7 +732,7 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "delegate_to_coprocessor",
-        "description": "Send a lightweight sub-task, summarization, formatting, or text extraction to the fast secondary model (coprocessor). MANDATORY to use this to offload processing, clean up large text blocks, or analyze documents when input exceeds 1,500 characters, as your main context is limited and expensive.",
+        "description": "Delegate heavy text-only processing to the fast coprocessor. Use for long summarization, extraction, classification, cleanup, formatting, or document parsing tasks, especially when source text is over about 1,500 characters or highly repetitive. Do NOT use for ordinary short conversational replies, direct factual answers, or actions that should be handled by another tool instead.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -755,7 +755,7 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "react_to_message",
-        "description": "Reacts to a specific message in the chat with an emoji. Use this to express reactions (e.g. thumbs up, heart, laugh) when a full text response is not needed, or in addition to text. Use reactions sparingly and only when highly natural.",
+        "description": "React to a chat message with an emoji. Use only when a lightweight social reaction is natural and a full text reply is unnecessary, or as a small addition to text. Do NOT use reactions as a substitute when the user asked a substantive question or requested work.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -778,7 +778,7 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "reply_to_message",
-        "description": "Directs the bot's final response in this turn to reply directly to a specific previous message ID in the thread, instead of replying to the latest user message.",
+        "description": "Direct the bot's final response to reply to a specific earlier message ID. Use ONLY when the user is asking about a specific prior message or when explicitly threading to an older message adds important clarity. Do NOT use for normal back-and-forth replies.",
         "parameters": {
             "type": "object",
             "properties": {
