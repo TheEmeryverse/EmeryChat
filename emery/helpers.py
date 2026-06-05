@@ -9,10 +9,10 @@ from PIL import Image
 
 from emery.config import (
     MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
-    VISION_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
+    VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
-    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
+    OLLAMA_FAST_NUM_CTX, OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
     get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
@@ -100,10 +100,10 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
 
 async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     """
-    Queries the fast, vision-capable coprocessor model (e.g. gemma4:e4b) on a secondary endpoint.
-    Used to offload processing tasks from the main model's CPU.
+    Queries the fast text coprocessor model on a secondary endpoint.
+    Used to offload non-vision processing tasks from the main model.
     """
-    url = VISION_OLLAMA_URL
+    url = FAST_OLLAMA_URL
     if not url.endswith("/api/chat"):
         url = url.rstrip("/")
         if not url.endswith("/api"):
@@ -116,18 +116,18 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     messages.append({"role": "user", "content": prompt})
 
     payload = {
-        "model": VISION_MODEL_ID,
+        "model": FAST_MODEL_ID,
         "messages": messages,
         "stream": False,
         "keep_alive": -1,
         "think": True,
         "options": {
-            "num_ctx": 8192
+            "num_ctx": OLLAMA_FAST_NUM_CTX
         }
     }
     
     try:
-        logging.info(f"⚡ COPROCESSOR: Querying {VISION_MODEL_ID}...")
+        logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID}...")
         async with globals.fast_model_lock:
             r = await globals.http_client.post(url, json=payload, timeout=300)
         if r.status_code != 200:
@@ -143,7 +143,7 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
         
         return content
     except Exception as e:
-        logging.error(f"❌ FAST MODEL: Crash querying {VISION_MODEL_ID}: {e}", exc_info=True)
+        logging.error(f"❌ FAST MODEL: Crash querying {FAST_MODEL_ID}: {e}", exc_info=True)
         return ""
 
 def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 75) -> bytes:
@@ -404,7 +404,7 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
     logging.debug(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
     return ""
 
-def get_current_system_prompt(user_query="", user_id=None): # Injects the system prompt into model's context
+async def get_current_system_prompt(user_query="", user_id=None): # Injects the system prompt into model's context
     if user_id is None:
         user_id = globals.current_user_id.get()
         
@@ -429,30 +429,11 @@ def get_current_system_prompt(user_query="", user_id=None): # Injects the system
     if ENABLE_MEMORY:
         # Resolve circular import locally
         from emery.memory import retrieve_relevant_memories
-        recalled = retrieve_relevant_memories(user_query, user_id)
-        
-        # Also retrieve spouse's memories if a secondary user exists
-        from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID
-        spouse_recalled = ""
-        spouse_name = ""
-        if SECONDARY_USER_ID != 0:
-            spouse_id = None
-            if user_id == PRIMARY_USER_ID:
-                spouse_id = SECONDARY_USER_ID
-            elif user_id == SECONDARY_USER_ID:
-                spouse_id = PRIMARY_USER_ID
-                
-            if spouse_id is not None:
-                spouse_profile = get_user_profile(spouse_id)
-                spouse_name = spouse_profile["name"]
-                spouse_recalled = retrieve_relevant_memories(user_query, spouse_id)
-                
-        if recalled or spouse_recalled:
+        recalled = await retrieve_relevant_memories(user_query, user_id)
+
+        if recalled:
             memory_section = "\n\n# Long-Term Persistent Memory"
-            if recalled:
-                memory_section += f"\n## Memories of {user_name} (Active Conversational Partner):\n{recalled}"
-            if spouse_recalled:
-                memory_section += f"\n## Memories of {spouse_name} (Spouse):\n{spouse_recalled}"
+            memory_section += f"\n## Scoped Memories for {user_name}:\n{recalled}"
         memory_instruction = "\n- If the user shares new details, preferences, schedules, family updates, or tech choices that you should remember across chat clear cycles, you MUST use the `save_user_memory` tool to store them."
 
     scheduler_instruction = ""

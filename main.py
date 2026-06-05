@@ -3,7 +3,10 @@ from collections import deque
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, MessageReactionHandler, filters
 from telegram.request import HTTPXRequest
 
-from emery.config import TELEGRAM_TOKEN, USER_TIMEZONE, MODEL_ID, VISION_MODEL_ID, ENABLE_SCHEDULER
+from emery.config import (
+    TELEGRAM_TOKEN, USER_TIMEZONE, MODEL_ID, VISION_MODEL_ID,
+    FAST_MODEL_ID, EMBEDDING_MODEL_ID, ENABLE_SCHEDULER
+)
 import emery.globals as globals
 from emery.bot import (
     error_handler,
@@ -43,5 +46,8 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION | filters.Document.ALL, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))
 
-    logging.info(f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | vision: {VISION_MODEL_ID}")
+    logging.info(
+        f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | fast: {FAST_MODEL_ID} | "
+        f"vision: {VISION_MODEL_ID} | embed: {EMBEDDING_MODEL_ID}"
+    )
     application.run_polling()

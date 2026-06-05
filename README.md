@@ -11,15 +11,16 @@ The project is built around a simple operating model:
 
 - Telegram is the UI.
 - A primary model handles normal conversation and tool orchestration.
-- A secondary fast model can handle vision, summarization, memory cleanup, and delegated sub-tasks.
+- A fast text coprocessor can handle summarization, memory cleanup, and delegated sub-tasks.
+- A separate vision model is only needed for multimodal inputs and camera/security image analysis.
 - Long-lived state is kept in local files instead of bloating every prompt.
 
 ## What It Does
 
 - Runs as a Telegram bot with support for text, photos, voice messages, stickers, GIFs, and message reactions
 - Supports local or OpenAI-compatible chat endpoints through Ollama/Open WebUI-style APIs
-- Maintains persistent local memory in `memory.md`, plus per-user memory files for a second user when configured
-- Supports family/group-chat behavior with silent listening, debounced replies, and user-specific memory
+- Maintains structured persistent memory in `memory_store.json`, plus rendered per-user markdown views such as `memory.md`
+- Supports family/group-chat behavior with silent listening, debounced replies, scoped memory ownership, and user-specific recall
 - Can schedule one-off or recurring jobs and send the results back into Telegram
 - Can route chat, routines, and security alerts into separate Telegram forum topics
 - Supports optional tools for:
@@ -67,11 +68,18 @@ The project is built around a simple operating model:
 
 ### Memory model
 
-- Persistent facts live in `memory.md`.
-- New facts are staged into a raw intake section first.
-- The fast model can consolidate memory in the background to deduplicate and organize it.
-- If a secondary user is configured, their memory file name is derived from `MEMORY_FILE_PATH` and the secondary user name in `config/users.json`.
-  - Example: `memory.md` + secondary user `Alex Smith` becomes `memory_alex_smith.md`.
+- Persistent memory lives in `memory_store.json` as structured records with owner, scope, and visibility metadata.
+- `memory.md` and the secondary user's markdown file are rendered exports for inspection and backup, not the source of truth.
+- The embedding model can rank semantically relevant memories, while lexical fallback still works if embeddings are unavailable.
+- Group-chat topic memory is stored separately from private user memory so public context does not automatically leak into DM recall.
+- Topic summarization now asks the fast model for strict JSON, then validates and normalizes the result before storing it.
+
+### Topic Debugging
+
+- Set `LOG_LEVEL=DEBUG` to inspect topic-memory processing.
+- `TOPIC DEBUG [raw_model_payload]` shows the parsed JSON returned by the fast model.
+- `TOPIC DEBUG [normalized_topics]` shows the cleaned topic list after schema enforcement and dedupe.
+- `TOPIC DEBUG [final_topic_payload]` shows the final stored payload with resolved ownership and chat scope.
 
 ### Multi-user behavior
 
@@ -96,19 +104,22 @@ The project is built around a simple operating model:
 At minimum, EmeryChat needs:
 
 - a chat-completions endpoint for the main model
-- optionally a second endpoint/model for fast vision and background work
+- optionally separate fast-text, vision, and embedding endpoints/models
 
 Typical local setup:
 
 ```bash
 ollama pull qwen3.6:35b-a3b
 ollama pull gemma4:e4b
+ollama pull nomic-embed-text
 ```
 
 By default the app expects Ollama-compatible chat endpoints such as:
 
 - `OLLAMA_URL=http://localhost:11434/api/chat`
+- `FAST_OLLAMA_URL=http://localhost:11434/api/chat`
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
+- `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
 
 Optional services:
 
@@ -321,8 +332,12 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VISION_MODEL_ID` | `gemma4:e4b` | Fast/copilot model |
-| `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Fast model endpoint |
+| `FAST_MODEL_ID` | `gemma4:e4b` | Fast text coprocessor model |
+| `FAST_OLLAMA_URL` | `http://localhost:11434/api/chat` | Fast text coprocessor endpoint |
+| `VISION_MODEL_ID` | `gemma4:e4b` | Vision/multimodal model |
+| `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
+| `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
+| `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Embedding endpoint |
 | `NOAA_EMAIL` | `example@example.com` | Required for NOAA weather requests |
 | `GOOGLE_TOKEN_PATH` | `token.json` | Google Calendar token file |
 | `NEST_TOKEN_PATH` | `nest_token.json` | Google Nest token file |
@@ -333,6 +348,8 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | --- | --- | --- |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
 | `MEMORY_FILE_PATH` | `memory.md` | Base memory file path |
+| `MEMORY_STORE_PATH` | `memory_store.json` | Structured memory store path |
+| `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
 | `MAX_HISTORY_LEN` | `200` | In-memory chat history length |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |

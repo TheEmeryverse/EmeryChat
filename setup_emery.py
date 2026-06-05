@@ -23,10 +23,15 @@ CAMERA_LOG_PATH = BASE_DIR / "camera_log.md"
 DEFAULT_ENV = {
     "MODEL_NAME": "Emery",
     "MODEL_ID": "qwen3.6:35b-a3b",
+    "FAST_MODEL_ID": "gemma4:e4b",
     "VISION_MODEL_ID": "gemma4:e4b",
+    "EMBEDDING_MODEL_ID": "nomic-embed-text",
     "OLLAMA_URL": "http://localhost:11434/api/chat",
+    "FAST_OLLAMA_URL": "http://localhost:11434/api/chat",
     "VISION_OLLAMA_URL": "http://localhost:11434/api/chat",
+    "EMBEDDING_OLLAMA_URL": "http://localhost:11434/api/embed",
     "OLLAMA_NUM_CTX": "65536",
+    "OLLAMA_FAST_NUM_CTX": "8192",
     "OLLAMA_VISION_NUM_CTX": "65536",
     "OPEN_WEBUI_KEY": "YOUR_OPEN_WEBUI_KEY",
     "STT_URL": "http://localhost:3000/api/v1/audio/transcriptions",
@@ -67,6 +72,7 @@ DEFAULT_ENV = {
     "GIPHY_API_KEY": "YOUR_GIPHY_API_KEY",
     "TENOR_API_KEY": "YOUR_TENOR_API_KEY",
     "MEMORY_FILE_PATH": "memory.md",
+    "MEMORY_STORE_PATH": "memory_store.json",
     "CAMERA_LOG_FILE_PATH": "camera_log.md",
     "GOOGLE_TOKEN_PATH": "token.json",
     "NEST_TOKEN_PATH": "nest_token.json",
@@ -589,10 +595,15 @@ def build_env_content(env_data):
         "# Model information",
         "MODEL_NAME=" + maybe_quote(env_data["MODEL_NAME"]),
         "MODEL_ID=" + maybe_quote(env_data["MODEL_ID"]),
+        "FAST_MODEL_ID=" + maybe_quote(env_data["FAST_MODEL_ID"]),
         "VISION_MODEL_ID=" + maybe_quote(env_data["VISION_MODEL_ID"]),
+        "EMBEDDING_MODEL_ID=" + maybe_quote(env_data["EMBEDDING_MODEL_ID"]),
         "OLLAMA_URL=" + maybe_quote(env_data["OLLAMA_URL"]),
+        "FAST_OLLAMA_URL=" + maybe_quote(env_data["FAST_OLLAMA_URL"]),
         "VISION_OLLAMA_URL=" + maybe_quote(env_data["VISION_OLLAMA_URL"]),
+        "EMBEDDING_OLLAMA_URL=" + maybe_quote(env_data["EMBEDDING_OLLAMA_URL"]),
         "OLLAMA_NUM_CTX=" + env_value(env_data["OLLAMA_NUM_CTX"]),
+        "OLLAMA_FAST_NUM_CTX=" + env_value(env_data["OLLAMA_FAST_NUM_CTX"]),
         "OLLAMA_VISION_NUM_CTX=" + env_value(env_data["OLLAMA_VISION_NUM_CTX"]),
         "",
         "OPEN_WEBUI_KEY=" + maybe_quote(env_data["OPEN_WEBUI_KEY"]),
@@ -634,6 +645,7 @@ def build_env_content(env_data):
         "",
         "# File paths",
         "MEMORY_FILE_PATH=" + maybe_quote(env_data["MEMORY_FILE_PATH"]),
+        "MEMORY_STORE_PATH=" + maybe_quote(env_data["MEMORY_STORE_PATH"]),
         "CAMERA_LOG_FILE_PATH=" + maybe_quote(env_data["CAMERA_LOG_FILE_PATH"]),
         "GOOGLE_TOKEN_PATH=" + maybe_quote(env_data["GOOGLE_TOKEN_PATH"]),
         "NEST_TOKEN_PATH=" + maybe_quote(env_data["NEST_TOKEN_PATH"]),
@@ -776,10 +788,29 @@ def ask_core(env_seed):
     env_seed["MODEL_NAME"] = prompt_text("Assistant display name", env_seed.get("MODEL_NAME"))
     env_seed["MODEL_ID"] = prompt_text("Primary model ID", env_seed.get("MODEL_ID"), required=True)
     env_seed["OLLAMA_URL"] = prompt_text("Primary model URL", env_seed.get("OLLAMA_URL"), required=True, validator=validate_url_prompt)
-    use_vision = prompt_yes_no("Configure a separate vision / coprocessor model", True)
+    use_fast = prompt_yes_no("Configure a separate fast text coprocessor model", True)
+    if use_fast:
+        env_seed["FAST_MODEL_ID"] = prompt_text("Fast model ID", env_seed.get("FAST_MODEL_ID"), required=True)
+        env_seed["FAST_OLLAMA_URL"] = prompt_text("Fast model URL", env_seed.get("FAST_OLLAMA_URL"), required=True, validator=validate_url_prompt)
+    else:
+        env_seed["FAST_MODEL_ID"] = env_seed.get("MODEL_ID", DEFAULT_ENV["MODEL_ID"])
+        env_seed["FAST_OLLAMA_URL"] = env_seed.get("OLLAMA_URL", DEFAULT_ENV["OLLAMA_URL"])
+
+    use_vision = prompt_yes_no("Configure a separate vision model", True)
     if use_vision:
         env_seed["VISION_MODEL_ID"] = prompt_text("Vision model ID", env_seed.get("VISION_MODEL_ID"), required=True)
         env_seed["VISION_OLLAMA_URL"] = prompt_text("Vision model URL", env_seed.get("VISION_OLLAMA_URL"), required=True, validator=validate_url_prompt)
+    else:
+        env_seed["VISION_MODEL_ID"] = env_seed.get("FAST_MODEL_ID", env_seed.get("MODEL_ID", DEFAULT_ENV["MODEL_ID"]))
+        env_seed["VISION_OLLAMA_URL"] = env_seed.get("FAST_OLLAMA_URL", env_seed.get("OLLAMA_URL", DEFAULT_ENV["OLLAMA_URL"]))
+
+    use_embeddings = prompt_yes_no("Configure a separate embedding model", True)
+    if use_embeddings:
+        env_seed["EMBEDDING_MODEL_ID"] = prompt_text("Embedding model ID", env_seed.get("EMBEDDING_MODEL_ID"), required=True)
+        env_seed["EMBEDDING_OLLAMA_URL"] = prompt_text("Embedding model URL", env_seed.get("EMBEDDING_OLLAMA_URL"), required=True, validator=validate_url_prompt)
+    else:
+        env_seed["EMBEDDING_MODEL_ID"] = env_seed.get("FAST_MODEL_ID", DEFAULT_ENV["FAST_MODEL_ID"])
+        env_seed["EMBEDDING_OLLAMA_URL"] = env_seed.get("FAST_OLLAMA_URL", DEFAULT_ENV["FAST_OLLAMA_URL"])
     return env_seed
 
 

@@ -1,416 +1,936 @@
+import json
+import logging
+import math
 import os
 import re
-import logging
+import threading
 import asyncio
 
+from datetime import datetime, timedelta
+
 from emery.config import (
-    MEMORY_FILE_PATH, MEMORY_THRESHOLD, USER_NAME, USER_LOCATION,
-    USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION,
-    CAMERA_LOG_FILE_PATH, get_user_profile, get_memory_file_path
+    ENABLE_MEMORY, MEMORY_FILE_PATH, MEMORY_STORE_PATH, CAMERA_LOG_FILE_PATH,
+    EMBEDDING_MODEL_ID, EMBEDDING_OLLAMA_URL, USER_NAME, USER_2_NAME,
+    USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION,
+    SECONDARY_USER_ID, PRIMARY_USER_ID, USER_RELATIONSHIP,
+    get_user_profile, get_memory_file_path
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview
 
-def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
-    """
-    Reads memory.md and performs keyword filtering against the user's latest query
-    to load only relevant memories, keeping the CPU-only prompt evaluation window small.
-    """
+
+STORE_VERSION = 3
+MAX_MEMORY_RESULTS = 6
+MAX_TOPIC_RESULTS = 3
+MAX_GROUP_CONTEXT_RESULTS = 3
+_store_lock = threading.RLock()
+_is_consolidating = False
+_topic_summary_chats = set()
+_last_summary_hist_len = {}
+
+_STOP_WORDS = {
+    "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours",
+    "he", "him", "his", "she", "her", "hers", "it", "its", "they", "them", "their",
+    "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
+    "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until",
+    "while", "of", "at", "by", "for", "with", "about", "against", "between", "into",
+    "through", "during", "before", "after", "above", "below", "to", "from", "up", "down",
+    "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here",
+    "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more",
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
+    "please", "emery", "remember", "chat", "group", "today", "tomorrow", "yesterday"
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _tokenize(text: str) -> list[str]:
+    clean = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    tokens = []
+    for token in clean.split():
+        if len(token) < 3 or token in _STOP_WORDS:
+            continue
+        if token.endswith("ies") and len(token) > 5:
+            token = token[:-3] + "y"
+        elif token.endswith("es") and len(token) > 4:
+            token = token[:-2]
+        elif token.endswith("s") and len(token) > 4:
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
+
+
+def _extract_tags(text: str, limit: int = 6) -> list[str]:
+    counts = {}
+    for token in _tokenize(text):
+        counts[token] = counts.get(token, 0) + 1
+    return [token for token, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def _memory_store_path() -> str:
+    return MEMORY_STORE_PATH
+
+
+def _default_store() -> dict:
+    return {
+        "version": STORE_VERSION,
+        "next_id": 1,
+        "items": []
+    }
+
+
+def _build_item(
+    store: dict,
+    *,
+    owner_user_id=None,
+    source_user_id=None,
+    source_chat_id=None,
+    item_type: str = "fact",
+    text: str,
+    scope: str = "private",
+    visibility: str = "dm_only",
+    status: str = "active",
+    source_type: str = "chat",
+    tags: list[str] | None = None,
+    embedding: list[float] | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    item_id = f"mem_{store['next_id']}"
+    store["next_id"] += 1
+    now_iso = _utc_now_iso()
+    return {
+        "id": item_id,
+        "owner_user_id": owner_user_id,
+        "source_user_id": source_user_id,
+        "source_chat_id": source_chat_id,
+        "type": item_type,
+        "text": (text or "").strip(),
+        "scope": scope,
+        "visibility": visibility,
+        "status": status,
+        "source_type": source_type,
+        "tags": list(tags or _extract_tags(text)),
+        "embedding": list(embedding or []),
+        "metadata": dict(metadata or {}),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+
+def _load_legacy_sectioned_bullets(content: str) -> dict:
+    sections = {
+        "user profile & preferences": [],
+        "general facts & logs": [],
+        "conversational topics log": [],
+        "raw memory intake": [],
+    }
+    current_section = None
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("## "):
+            current_section = stripped[3:].strip().lower()
+            continue
+        if current_section in sections and (stripped.startswith("- ") or stripped.startswith("* ")):
+            sections[current_section].append(stripped[2:].strip())
+    return sections
+
+
+def _legacy_memory_files() -> list[tuple[int, str]]:
+    files = []
+    primary_path = get_memory_file_path(PRIMARY_USER_ID)
+    if primary_path:
+        files.append((PRIMARY_USER_ID, primary_path))
+    if SECONDARY_USER_ID != 0:
+        secondary_path = get_memory_file_path(SECONDARY_USER_ID)
+        if secondary_path and secondary_path != primary_path:
+            files.append((SECONDARY_USER_ID, secondary_path))
+    return files
+
+
+def _migrate_from_legacy_locked() -> dict:
+    store = _default_store()
+    for owner_user_id, path in _legacy_memory_files():
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            logging.warning("⚠️ MEMORY MIGRATION: failed reading %s: %s", path, e)
+            continue
+
+        sections = _load_legacy_sectioned_bullets(content)
+        for entry in sections["user profile & preferences"]:
+            baseline_prefixes = ("name:", "location:", "timezone:", "birthday:", "family:", "profession:")
+            if entry.lower().startswith(baseline_prefixes):
+                continue
+            store["items"].append(_build_item(
+                store,
+                owner_user_id=owner_user_id,
+                source_user_id=owner_user_id,
+                item_type="profile",
+                text=entry,
+                scope="private",
+                visibility="dm_only",
+                source_type="migration",
+            ))
+        for entry in sections["general facts & logs"]:
+            store["items"].append(_build_item(
+                store,
+                owner_user_id=owner_user_id,
+                source_user_id=owner_user_id,
+                item_type="fact",
+                text=entry,
+                scope="private",
+                visibility="dm_only",
+                source_type="migration",
+            ))
+        for entry in sections["conversational topics log"]:
+            store["items"].append(_build_item(
+                store,
+                owner_user_id=owner_user_id,
+                source_user_id=owner_user_id,
+                item_type="topic",
+                text=entry,
+                scope="private",
+                visibility="dm_only",
+                source_type="migration",
+            ))
+        for entry in sections["raw memory intake"]:
+            store["items"].append(_build_item(
+                store,
+                owner_user_id=owner_user_id,
+                source_user_id=owner_user_id,
+                item_type="fact",
+                text=entry,
+                scope="private",
+                visibility="dm_only",
+                status="raw",
+                source_type="migration",
+            ))
+    return store
+
+
+def _load_store_locked() -> dict:
+    path = _memory_store_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                data.setdefault("version", STORE_VERSION)
+                data.setdefault("next_id", len(data["items"]) + 1)
+                return data
+        except Exception as e:
+            logging.error("❌ MEMORY: Failed loading store %s: %s", path, e, exc_info=True)
+
+    store = _migrate_from_legacy_locked()
+    _save_store_locked(store)
+    _export_memory_views_locked(store)
+    return store
+
+
+def _save_store_locked(store: dict) -> None:
+    store["version"] = STORE_VERSION
+    path = _memory_store_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2, ensure_ascii=True)
+
+
+def _topic_text_from_metadata(item: dict) -> str:
+    metadata = item.get("metadata") or {}
+    if item.get("type") != "topic" or not metadata:
+        return item.get("text", "").strip()
+    summary = (metadata.get("summary") or item.get("text") or "").strip()
+    if not summary:
+        return ""
+    date_label = (metadata.get("date_label") or "").strip()
+    channel_type = (metadata.get("channel_type") or "").strip()
+    tags = metadata.get("tags") or item.get("tags", [])
+    tag_str = ", ".join(tag for tag in tags if tag)[:160]
+    prefix = "- "
+    if date_label and channel_type:
+        prefix += f"On {date_label} (in {channel_type}): "
+    elif date_label:
+        prefix += f"On {date_label}: "
+    return prefix + summary + (f" [Tags: {tag_str}]" if tag_str else "")
+
+
+def _default_profile_lines(user_id: int) -> list[str]:
+    profile = get_user_profile(user_id)
+    return [
+        f"- Name: {profile['name']}",
+        f"- Location: {USER_LOCATION}",
+        f"- Timezone: {USER_TIMEZONE}",
+        f"- Birthday: {profile['birthday']}",
+        f"- Family: {profile['family']}",
+        f"- Profession: {profile['profession']}",
+    ]
+
+
+def _render_user_memory_markdown(store: dict, user_id: int) -> str:
+    items = store.get("items", [])
+    profile_items = []
+    fact_items = []
+    topic_items = []
+    raw_items = []
+
+    for item in items:
+        owner = item.get("owner_user_id")
+        if owner not in (user_id, None):
+            continue
+        if item.get("status") not in {"active", "raw"}:
+            continue
+        if item.get("scope") == "group_context":
+            continue
+        item_text = _topic_text_from_metadata(item) if item.get("type") == "topic" else item.get("text", "").strip()
+        if not item_text:
+            continue
+        item_type = item.get("type")
+        if item.get("status") == "raw":
+            raw_items.append(f"- {item_text}")
+        elif item_type == "profile":
+            profile_items.append(f"- {item_text}")
+        elif item_type == "topic":
+            topic_items.append(f"- {item_text}")
+        else:
+            fact_items.append(f"- {item_text}")
+
+    sections = [
+        "# Emery's Memory Log",
+        "",
+        "## User Profile & Preferences",
+        *_default_profile_lines(user_id),
+    ]
+    if profile_items:
+        sections.extend(["", *profile_items])
+    sections.extend([
+        "",
+        "## General Facts & Logs",
+    ])
+    sections.extend(fact_items or [""])
+    sections.extend([
+        "",
+        "## Conversational Topics Log",
+    ])
+    sections.extend(topic_items or [""])
+    sections.extend([
+        "",
+        "## Raw Memory Intake",
+    ])
+    sections.extend(raw_items or [""])
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def _export_memory_views_locked(store: dict) -> None:
+    if not ENABLE_MEMORY:
+        return
+    primary_path = get_memory_file_path(PRIMARY_USER_ID)
+    if primary_path:
+        with open(primary_path, "w", encoding="utf-8") as f:
+            f.write(_render_user_memory_markdown(store, PRIMARY_USER_ID))
+    if SECONDARY_USER_ID != 0:
+        secondary_path = get_memory_file_path(SECONDARY_USER_ID)
+        if secondary_path:
+            with open(secondary_path, "w", encoding="utf-8") as f:
+                f.write(_render_user_memory_markdown(store, SECONDARY_USER_ID))
+
+
+def _resolve_embedding_url() -> str:
+    url = (EMBEDDING_OLLAMA_URL or "").strip()
+    if not url:
+        return ""
+    if url.endswith("/api/embed") or url.endswith("/api/embeddings"):
+        return url
+    url = url.rstrip("/")
+    if not url.endswith("/api"):
+        url += "/api"
+    return url + "/embed"
+
+
+async def _get_text_embedding(text: str) -> list[float]:
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    url = _resolve_embedding_url()
+    if not url:
+        return []
+
+    payload = {
+        "model": EMBEDDING_MODEL_ID,
+        "input": text,
+        "keep_alive": -1,
+    }
+    try:
+        response = await globals.http_client.post(url, json=payload, timeout=120)
+        if response.status_code != 200 and url.endswith("/embed"):
+            fallback_url = url[:-len("/embed")] + "/embeddings"
+            response = await globals.http_client.post(
+                fallback_url,
+                json={"model": EMBEDDING_MODEL_ID, "prompt": text, "keep_alive": -1},
+                timeout=120
+            )
+        if response.status_code != 200:
+            logging.warning(
+                "⚠️ EMBEDDINGS: API error %s from %s for %s",
+                response.status_code,
+                url,
+                EMBEDDING_MODEL_ID,
+            )
+            return []
+        data = response.json()
+        if isinstance(data.get("embedding"), list):
+            return [float(value) for value in data["embedding"]]
+        embeddings = data.get("embeddings")
+        if isinstance(embeddings, list) and embeddings:
+            first = embeddings[0]
+            if isinstance(first, list):
+                return [float(value) for value in first]
+        return []
+    except Exception as e:
+        logging.warning("⚠️ EMBEDDINGS: Failed querying %s: %s", EMBEDDING_MODEL_ID, e)
+        return []
+
+
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    mag_a = math.sqrt(sum(a * a for a in vec_a))
+    mag_b = math.sqrt(sum(b * b for b in vec_b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def _mentions_household(query: str) -> bool:
+    clean = _normalize_text(query)
+    aliases = {
+        USER_2_NAME.lower().strip(),
+        USER_RELATIONSHIP.lower().strip(),
+        "spouse", "wife", "husband", "partner", "family", "household", "both of us", "together"
+    }
+    aliases.discard("")
+    return any(alias and alias in clean for alias in aliases)
+
+
+def _mentions_secondary_user(query: str) -> bool:
+    clean = _normalize_text(query)
+    aliases = {USER_2_NAME.lower().strip(), "spouse", "wife", "husband", "partner"}
+    aliases.discard("")
+    return any(alias and alias in clean for alias in aliases)
+
+
+def _primary_known_names() -> set[str]:
+    names = {USER_NAME.lower().strip()}
+    if USER_2_NAME:
+        names.add(USER_2_NAME.lower().strip())
+    relationship = USER_RELATIONSHIP.lower().strip()
+    if relationship:
+        names.add(relationship)
+    names.update({"spouse", "wife", "husband", "partner", "family"})
+    return {name for name in names if name}
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for value in values:
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _normalize_topic_tags(raw_tags, summary: str) -> list[str]:
+    tags = []
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            clean = str(tag).strip().lower()
+            if clean:
+                tags.append(clean)
+    tags = _dedupe_preserve_order(tags)
+    if len(tags) < 2:
+        fallback = [tag.lower() for tag in _extract_tags(summary, limit=5)]
+        tags = _dedupe_preserve_order(tags + fallback)
+    return tags[:5]
+
+
+def _normalize_topic_participants(raw_participants, allowed_names: list[str]) -> list[str]:
+    allowed_lookup = {name.lower(): name for name in allowed_names if name}
+    participants = []
+    if isinstance(raw_participants, list):
+        for name in raw_participants:
+            clean = str(name).strip()
+            if not clean:
+                continue
+            canonical = allowed_lookup.get(clean.lower())
+            if canonical:
+                participants.append(canonical)
+    return _dedupe_preserve_order(participants)
+
+
+def _topic_signature(topic_payload: dict) -> tuple:
+    summary_tokens = tuple(sorted(set(_tokenize(topic_payload.get("summary", "")))))
+    tags = tuple(sorted(set(topic_payload.get("tags") or [])))
+    return (
+        topic_payload.get("topic_class", ""),
+        summary_tokens[:8],
+        tags[:5],
+    )
+
+
+def _normalize_topic_payloads(raw_topics, *, allowed_names: list[str], default_topic_class: str) -> list[dict]:
+    normalized_topics = []
+    seen_signatures = set()
+    if not isinstance(raw_topics, list):
+        return normalized_topics
+
+    for raw_topic in raw_topics[:3]:
+        if not isinstance(raw_topic, dict):
+            continue
+        summary = str(raw_topic.get("summary") or "").strip()
+        if not summary:
+            continue
+
+        topic_class = str(raw_topic.get("topic_class") or default_topic_class).strip().lower()
+        if topic_class not in {"private", "household", "group"}:
+            topic_class = default_topic_class
+
+        tags = _normalize_topic_tags(raw_topic.get("tags"), summary)
+        if len(tags) < 2:
+            continue
+
+        participants = _normalize_topic_participants(raw_topic.get("participants"), allowed_names)
+
+        confidence_raw = raw_topic.get("confidence")
+        try:
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = 0.7
+        confidence = max(0.0, min(1.0, confidence))
+
+        topic_payload = {
+            "summary": summary,
+            "topic_class": topic_class,
+            "tags": tags,
+            "participants": participants,
+            "confidence": confidence,
+        }
+        signature = _topic_signature(topic_payload)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        normalized_topics.append(topic_payload)
+
+    return normalized_topics
+
+
+def _debug_topic_payloads(label: str, payload) -> None:
+    try:
+        serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    except Exception:
+        serialized = str(payload)
+    logging.debug("🧭 TOPIC DEBUG [%s]: %s", label, safe_preview(serialized, max_len=800))
+
+
+def _infer_scope_visibility(text: str, owner_user_id: int | None, chat_id: int | None, item_type: str) -> tuple[str, str]:
+    normalized = _normalize_text(text)
+    if item_type == "topic":
+        if chat_id and chat_id < 0:
+            return "group_context", "group_safe"
+        return "private", "dm_only"
+    if "camera" in normalized or "reolink" in normalized:
+        return "system", "group_safe"
+    household_markers = {
+        USER_2_NAME.lower().strip(),
+        USER_NAME.lower().strip(),
+        "spouse", "wife", "husband", "partner", "family", "house", "home", "kids"
+    }
+    household_markers.discard("")
+    if SECONDARY_USER_ID != 0 and any(marker in normalized for marker in household_markers):
+        return "shared_household", "household"
+    if chat_id and chat_id < 0:
+        return "private", "dm_only"
+    return "private", "dm_only"
+
+
+def _find_duplicate_locked(store: dict, item: dict) -> dict | None:
+    normalized = _normalize_text(item.get("text", ""))
+    for existing in store.get("items", []):
+        if existing.get("status") not in {"active", "raw"}:
+            continue
+        if existing.get("owner_user_id") != item.get("owner_user_id"):
+            continue
+        if existing.get("type") != item.get("type"):
+            continue
+        if existing.get("scope") != item.get("scope"):
+            continue
+        if item.get("type") == "topic":
+            existing_meta = existing.get("metadata") or {}
+            item_meta = item.get("metadata") or {}
+            existing_class = existing_meta.get("topic_class", "")
+            item_class = item_meta.get("topic_class", "")
+            if existing_class != item_class:
+                continue
+            existing_tags = set(existing_meta.get("tags") or existing.get("tags", []))
+            item_tags = set(item_meta.get("tags") or item.get("tags", []))
+            if existing_tags and item_tags and existing_tags.isdisjoint(item_tags):
+                continue
+        if _normalize_text(existing.get("text", "")) == normalized:
+            return existing
+    return None
+
+
+def _parse_iso_date(value: str) -> datetime:
+    if not value:
+        return datetime.min
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return datetime.min
+
+
+def _lexical_score(query_tokens: list[str], item: dict) -> float:
+    if not query_tokens:
+        return 0.0
+    item_tokens = set(_tokenize(item.get("text", "") + " " + " ".join(item.get("tags", []))))
+    if not item_tokens:
+        return 0.0
+    overlap = len(set(query_tokens) & item_tokens)
+    return overlap / max(len(set(query_tokens)), 1)
+
+
+def _candidate_items_for_query(store: dict, user_id: int, query: str, chat_id: int | None) -> tuple[list[dict], list[dict]]:
+    items = [item for item in store.get("items", []) if item.get("status") == "active"]
+    profile_items = []
+    candidates = []
+    is_group = bool(chat_id and chat_id < 0)
+    household_relevant = _mentions_household(query)
+    secondary_relevant = _mentions_secondary_user(query)
+
+    for item in items:
+        item_type = item.get("type")
+        owner = item.get("owner_user_id")
+        scope = item.get("scope")
+        visibility = item.get("visibility")
+
+        if item_type == "profile":
+            if owner == user_id or (secondary_relevant and owner == SECONDARY_USER_ID):
+                profile_items.append(item)
+            continue
+
+        if scope == "group_context":
+            if chat_id and item.get("source_chat_id") == chat_id:
+                candidates.append(item)
+            continue
+
+        if is_group:
+            if visibility != "group_safe":
+                continue
+            candidates.append(item)
+            continue
+
+        if owner == user_id:
+            candidates.append(item)
+            continue
+
+        if scope == "shared_household" and household_relevant:
+            candidates.append(item)
+            continue
+
+        if secondary_relevant and owner == SECONDARY_USER_ID:
+            candidates.append(item)
+
+    return profile_items, candidates
+
+
+async def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
+    if not ENABLE_MEMORY:
+        return ""
     if user_id is None:
         user_id = globals.current_user_id.get()
-        
-    memory_file_path = get_memory_file_path(user_id)
-    if not memory_file_path or not os.path.exists(memory_file_path):
+    if user_id is None:
         return ""
-        
-    try:
-        with open(memory_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            
-        # If the file is small, load it entirely to ensure maximum context
-        if len(content) < MEMORY_THRESHOLD:
-            return content
-            
-        # If larger, parse and filter sections to save context tokens on CPU
-        lines = content.splitlines()
-        
-        # Simple parser to separate critical header sections (Profile, Context)
-        # from General Facts section which we will filter by keyword.
-        profile_context_lines = []
-        general_facts_lines = []
-        
-        current_section = None
-        recent_topics_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                current_section = stripped.lower()
-                
-            # Keep header sections intact
-            if current_section in ["## user profile & preferences", "## project & system context"]:
-                profile_context_lines.append(line)
-            # Route general facts and raw memory intake to general_facts_lines for filtering
-            elif current_section in ["## general facts & logs", "## raw memory intake"]:
-                # Keep section headers, but only filter bullets
-                if stripped.startswith("## ") or not stripped:
-                    general_facts_lines.append(line)
-                elif stripped.startswith("- ") or stripped.startswith("* "):
-                    general_facts_lines.append(line)
-            # Route conversational topics log to its own list so we can pull the latest N
-            elif current_section in ["## conversational topics log"]:
-                if stripped.startswith("- ") or stripped.startswith("* "):
-                    recent_topics_lines.append(line)
-            else:
-                # Outside major sections (like main title)
-                if not stripped.startswith("## "):
-                    profile_context_lines.append(line)
-                    
-        # Tokenize user query to extract keywords
-        # 0. Strip leading timestamp prefix if present (e.g. "[Monday, May 26, 2026 at 04:43 PM]")
-        query_text = re.sub(r'^\[[^\]]+\]\s*', '', user_query)
-        
-        # 1. Clean query (lowercase, remove punctuation)
-        clean_query = re.sub(r'[^\w\s]', '', query_text.lower())
-        words = clean_query.split()
 
-        
-        # 2. Exclude common stop words
-        stop_words = {
-            "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", 
-            "he", "him", "his", "she", "her", "hers", "it", "its", "they", "them", "their", 
-            "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", 
-            "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", 
-            "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", 
-            "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", 
-            "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", 
-            "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", 
-            "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", 
-            "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", 
-            "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
-            "please", "emery", "remember"
-        }
-        
-        def stem_word(w: str) -> str:
-            w = w.lower().strip()
-            if w.endswith("'s"):
-                w = w[:-2]
-            elif w.endswith("s'"):
-                w = w[:-2]
-            elif len(w) > 4 and w.endswith("s"):
-                if w.endswith("es"):
-                    if w.endswith("ies") and len(w) > 5:
-                        w = w[:-3] + "y"
-                    else:
-                        w = w[:-2]
-                else:
-                    w = w[:-1]
-            return w
+    with _store_lock:
+        store = _load_store_locked()
+        profile_items, candidates = _candidate_items_for_query(
+            store,
+            user_id=user_id,
+            query=user_query,
+            chat_id=globals.TARGET_CHAT_ID.get(),
+        )
 
-        keywords = [w for w in words if w not in stop_words and len(w) > 2]
-        stemmed_keywords = [stem_word(kw) for kw in keywords]
-        
-        if not stemmed_keywords:
-            # If no significant keywords found, just return the profile sections to save space
-            return "\n".join(profile_context_lines)
-            
-        # 3. Scan general facts and keep matching lines
-        matched_facts = []
-        for line in general_facts_lines:
-            stripped = line.strip()
-            if stripped.startswith("- ") or stripped.startswith("* "):
-                # It's a fact bullet, check for keyword match using stemming
-                lower_fact = stripped.lower()
-                fact_words = re.sub(r'[^\w\s]', '', lower_fact).split()
-                stemmed_fact_words = [stem_word(fw) for fw in fact_words]
-                
-                # Check if any stemmed keyword matches a stemmed fact word
-                match_found = False
-                for kw in stemmed_keywords:
-                    if any((kw in fw or fw in kw) for fw in stemmed_fact_words):
-                        match_found = True
-                        break
-                
-                if match_found:
-                    matched_facts.append(line)
-            else:
-                # Keep structure/spacing
-                matched_facts.append(line)
-                
-        # Extract the N most recent topic log entries
-        N = 5
-        recent_topics = recent_topics_lines[-N:]
-        
-        # Combine profile context with matched facts and recent topics
-        final_memories = profile_context_lines
-        if recent_topics:
-            final_memories += ["\n## Recent Conversation Topics"] + recent_topics
-            
-        final_memories += ["\n## Relevant Recalled Memories"] + matched_facts
-        return "\n".join(final_memories)
-        
-    except Exception as e:
-        logging.error(f"❌ MEMORY ENGINE: Error retrieving memories: {e}", exc_info=True)
-        return ""
+    query_text = re.sub(r'^\[[^\]]+\]\s*', '', user_query or '')
+    query_tokens = _tokenize(query_text)
+    query_embedding = await _get_text_embedding(query_text)
+
+    scored = []
+    for item in candidates:
+        lexical = _lexical_score(query_tokens, item)
+        semantic = _cosine_similarity(query_embedding, item.get("embedding", []))
+        freshness = 0.0
+        updated = _parse_iso_date(item.get("updated_at"))
+        if updated != datetime.min:
+            age_days = max((datetime.utcnow() - updated).days, 0)
+            freshness = max(0.0, 0.15 - min(age_days, 30) * 0.005)
+        score = (semantic * 0.75) + (lexical * 0.35) + freshness
+        if item.get("type") == "topic":
+            score += 0.05
+        if item.get("scope") == "group_context":
+            score += 0.08
+        if score > 0:
+            scored.append((score, item))
+
+    scored.sort(key=lambda entry: (entry[0], _parse_iso_date(entry[1].get("updated_at"))), reverse=True)
+
+    fact_lines = []
+    topic_lines = []
+    group_lines = []
+    for _score, item in scored:
+        line = _topic_text_from_metadata(item) if item.get("type") == "topic" else f"- {item.get('text', '').strip()}"
+        if item.get("scope") == "group_context":
+            if len(group_lines) < MAX_GROUP_CONTEXT_RESULTS and line not in group_lines:
+                group_lines.append(line)
+        elif item.get("type") == "topic":
+            if len(topic_lines) < MAX_TOPIC_RESULTS and line not in topic_lines:
+                topic_lines.append(line)
+        else:
+            if len(fact_lines) < MAX_MEMORY_RESULTS and line not in fact_lines:
+                fact_lines.append(line)
+
+    profile_lines = _default_profile_lines(user_id)
+    seen_profile = {line.lower() for line in profile_lines}
+    for item in sorted(profile_items, key=lambda entry: _parse_iso_date(entry.get("updated_at")), reverse=True):
+        line = _topic_text_from_metadata(item) if item.get("type") == "topic" else f"- {item.get('text', '').strip()}"
+        if line.lower() not in seen_profile:
+            profile_lines.append(line)
+            seen_profile.add(line.lower())
+
+    sections = ["## User Profile & Preferences", *profile_lines]
+    if fact_lines:
+        sections.extend(["", "## Relevant Recalled Memories", *fact_lines])
+    if topic_lines:
+        sections.extend(["", "## Relevant Conversation Topics", *topic_lines])
+    if group_lines:
+        sections.extend(["", "## Group Context Memory", *group_lines])
+    return "\n".join(sections)
+
+
+def _store_item_locked(
+    store: dict,
+    *,
+    owner_user_id=None,
+    source_user_id=None,
+    source_chat_id=None,
+    item_type: str,
+    text: str,
+    scope: str,
+    visibility: str,
+    status: str = "active",
+    source_type: str = "chat",
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+) -> tuple[dict, bool]:
+    item = _build_item(
+        store,
+        owner_user_id=owner_user_id,
+        source_user_id=source_user_id,
+        source_chat_id=source_chat_id,
+        item_type=item_type,
+        text=text,
+        scope=scope,
+        visibility=visibility,
+        status=status,
+        source_type=source_type,
+        tags=tags,
+        metadata=metadata,
+    )
+    duplicate = _find_duplicate_locked(store, item)
+    if duplicate:
+        duplicate["updated_at"] = _utc_now_iso()
+        merged_tags = set(duplicate.get("tags", []))
+        merged_tags.update(item.get("tags", []))
+        duplicate["tags"] = sorted(merged_tags)
+        duplicate_meta = duplicate.setdefault("metadata", {})
+        item_meta = item.get("metadata") or {}
+        if item_meta:
+            duplicate_meta.update({k: v for k, v in item_meta.items() if v not in (None, "", [], {})})
+        return duplicate, False
+    store["items"].append(item)
+    return item, True
+
 
 async def save_user_memory(fact: str, user_id: int = None) -> str:
-    """
-    Saves a new fact, preference, or critical piece of information about the user or their environment
-    to the persistent memory log. Use when the user shares something they expect you to remember long-term.
-    """
     if user_id is None:
         user_id = globals.current_user_id.get()
-        
-    memory_file_path = get_memory_file_path(user_id)
-    if not memory_file_path:
+    if not ENABLE_MEMORY or user_id is None:
         return "Memory is disabled."
-        
-    logging.debug(f"💾 MEMORY: Appending new fact for user {user_id}: '{safe_preview(fact, max_len=120)}'")
-    if not os.path.exists(memory_file_path):
-        # Create default if missing
-        profile = get_user_profile(user_id)
-        baseline_template = (
-            f"# Emery's Memory Log\n\n"
-            f"## User Profile & Preferences\n"
-            f"- Name: {profile['name']}\n"
-            f"- Location: {USER_LOCATION}\n"
-            f"- Timezone: {USER_TIMEZONE}\n"
-            f"- Birthday: {profile['birthday']}\n"
-            f"- Family: {profile['family']}\n"
-            f"- Profession: {profile['profession']}\n\n"
-            f"## General Facts & Logs\n\n"
-            f"## Conversational Topics Log\n\n"
-            f"## Raw Memory Intake\n"
+
+    fact = (fact or "").strip()
+    if not fact:
+        return "No memory content provided."
+
+    chat_id = globals.TARGET_CHAT_ID.get()
+    scope, visibility = _infer_scope_visibility(fact, user_id, chat_id, "fact")
+    with _store_lock:
+        store = _load_store_locked()
+        item, created = _store_item_locked(
+            store,
+            owner_user_id=user_id,
+            source_user_id=user_id,
+            source_chat_id=chat_id,
+            item_type="fact",
+            text=fact,
+            scope=scope,
+            visibility=visibility,
+            status="active",
+            source_type="chat",
         )
-        with open(memory_file_path, "w", encoding="utf-8") as f:
-            f.write(baseline_template)
+        _save_store_locked(store)
 
-    try:
-        # Append to the Raw Memory Intake section of memory.md
-        with open(memory_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            
-        # Standardize Raw Memory Intake heading presence
-        heading = "## Raw Memory Intake"
-        if heading not in content:
-            content += f"\n\n{heading}\n"
-            
-        # Insert the fact under the heading
-        new_fact_line = f"- {fact.strip()}"
-        
-        # We find the heading and inject right after it
-        parts = content.split(heading)
-        prefix = parts[0].rstrip()
-        suffix = parts[1].strip()
-        
-        updated_suffix = f"\n{new_fact_line}"
-        if suffix:
-            updated_suffix += f"\n{suffix}"
-            
-        updated_content = f"{prefix}\n\n{heading}{updated_suffix}\n"
-        
-        with open(memory_file_path, "w", encoding="utf-8") as f:
-            f.write(updated_content)
-            
-        # Trigger background consolidation using the fast model
-        logging.debug(f"💾 MEMORY: Scheduling consolidation for user {user_id}...")
-        asyncio.create_task(consolidate_memory_background(user_id))
-        
-        return f"Successfully saved to memory log staging: '{fact}'"
-        
-    except Exception as e:
-        logging.error(f"❌ MEMORY TOOL: Failed to write memory: {e}", exc_info=True)
-        return f"Failed to save fact to memory: {e}"
+    asyncio.create_task(consolidate_memory_background())
+    action = "saved" if created else "updated"
+    logging.debug("💾 MEMORY: %s memory for user %s: %s", action, user_id, safe_preview(fact, max_len=120))
+    return f"Successfully {action} memory: '{fact}'"
 
-_is_consolidating = set()
- 
+
 async def consolidate_memory_background(user_id: int = None) -> None:
-    """
-    A background consolidation task that reads memory.md, runs the coprocessor model
-    to deduplicate, sort, and organize the list, and then saves it.
-    This keeps the main chat model from blocking on heavy processing task execution.
-    """
     global _is_consolidating
-    if user_id is None:
-        user_id = globals.current_user_id.get()
-        
-    if user_id in _is_consolidating:
-        logging.debug(f"💾 CONSOLIDATOR: Memory consolidation already in progress for user {user_id}. Skipping.")
+    if _is_consolidating or not ENABLE_MEMORY:
         return
- 
-    logging.debug(f"💾 CONSOLIDATOR: Starting consolidation for user {user_id}...")
-    
-    memory_file_path = get_memory_file_path(user_id)
-    if not memory_file_path or not os.path.exists(memory_file_path):
-        logging.warning(f"⚠️ CONSOLIDATOR: Memory file '{memory_file_path}' does not exist. Aborting consolidation.")
-        return
-        
-    _is_consolidating.add(user_id)
+
+    _is_consolidating = True
     try:
-        # Prevent concurrent file reads/writes using a simple sleep
-        await asyncio.sleep(0.5)
-        
-        with open(memory_file_path, "r", encoding="utf-8") as f:
-            current_markdown = f.read()
-            
-        system_prompt = (
-            "You are Emery's Memory Consolidation System. Your job is to process the memory log (written in Markdown) "
-            "and merge any new facts or topic logs listed under '## Raw Memory Intake' into the main categories:\n"
-            "- '## User Profile & Preferences'\n"
-            "- '## General Facts & Logs'\n"
-            "- '## Conversational Topics Log'\n\n"
-            "Rules:\n"
-            "1. Categorize all raw facts and topic logs from '## Raw Memory Intake' into their appropriate section. User preferences/profile details go to 'User Profile & Preferences', general facts go to 'General Facts & Logs', and topic summaries (bullets that start with dates/days and include [Tags: ...] at the end) go to 'Conversational Topics Log'.\n"
-            "2. Completely empty/clear the '## Raw Memory Intake' section so it has no bullet points listed under it anymore.\n"
-            "3. Deduplicate facts and topic entries. If a new topic summary covers the same discussion as an existing one, merge them or keep the more detailed one.\n"
-            "4. Compact topics log: If there are multiple entries for the same day or week, merge them into a single concise bullet point describing all topics covered (e.g. '- On [Date]: Discussed OpenAI IPO, Artemis program, and weather. [Tags: space, rocket, ai, tech]').\n"
-            "5. Resolve contradictions: if a new fact directly contradicts an old one, update it with the newer information and remove the obsolete one.\n"
-            "6. Keep the exact markdown section structure. Maintain bullet points. Output ONLY a single, consolidated markdown document, starting with '# Emery's Memory Log'. Do not duplicate the document, repeat the headers, or output 'before' and 'after' versions. Do not include conversational remarks, explanations, or code block formatting like ```markdown."
-        )
-        
-        user_prompt = f"Here is the current memory file content:\n\n{current_markdown}\n\nPlease consolidate it now."
-        
-        # Local import to break circular dependency
-        from emery.helpers import query_fast_model
-        consolidated = await query_fast_model(user_prompt, system_prompt)
-        consolidated = consolidated.strip()
-        
-        if not consolidated or not consolidated.startswith("# Emery's Memory Log"):
-            logging.error(f"❌ CONSOLIDATOR: Fast model returned invalid markdown. Aborting overwrite. Response: '{consolidated[:200]}...'")
-            return
-            
-        # Safety Check: if the model duplicated the document, keep only the first document block
-        if consolidated.count("# Emery's Memory Log") > 1:
-            logging.warning("⚠️ CONSOLIDATOR: Model output contained multiple document blocks. Keeping only the first one.")
-            consolidated = "# Emery's Memory Log" + consolidated.split("# Emery's Memory Log")[1]
-            
-        # Safety check: make sure the Conversational Topics Log section exists
-        if "## Conversational Topics Log" not in consolidated:
-            if "## Raw Memory Intake" in consolidated:
-                consolidated = consolidated.replace("## Raw Memory Intake", "## Conversational Topics Log\n\n## Raw Memory Intake")
-            else:
-                consolidated = consolidated.replace("## Raw Memory Intake", "## Conversational Topics Log\n\n## Raw Memory Intake")
-                
-        # Safety check: make sure the Raw Memory Intake section exists
-        if "## Raw Memory Intake" not in consolidated:
-            consolidated += "\n\n## Raw Memory Intake\n"
-            
-        with open(memory_file_path, "w", encoding="utf-8") as f:
-            f.write(consolidated)
-            
-        logging.info(f"💾 CONSOLIDATOR: Consolidation for user {user_id} completed.")
-        
+        with _store_lock:
+            store = _load_store_locked()
+            targets = []
+            for item in store.get("items", []):
+                if item.get("status") == "raw":
+                    item["status"] = "active"
+                    item["updated_at"] = _utc_now_iso()
+                if item.get("status") == "active" and not item.get("embedding"):
+                    targets.append({"id": item["id"], "text": item.get("text", "")})
+
+        if targets:
+            resolved_embeddings = {}
+            for target in targets:
+                embedding = await _get_text_embedding(target["text"])
+                if embedding:
+                    resolved_embeddings[target["id"]] = embedding
+
+            with _store_lock:
+                store = _load_store_locked()
+                for item in store.get("items", []):
+                    if item.get("id") in resolved_embeddings:
+                        item["embedding"] = resolved_embeddings[item["id"]]
+                        item["updated_at"] = _utc_now_iso()
+                _save_store_locked(store)
+                _export_memory_views_locked(store)
+        else:
+            with _store_lock:
+                store = _load_store_locked()
+                _save_store_locked(store)
+                _export_memory_views_locked(store)
+
     except Exception as e:
-        logging.error(f"❌ CONSOLIDATOR: Background task crash for user {user_id}: {e}", exc_info=True)
+        logging.error("❌ MEMORY: Consolidation crash: %s", e, exc_info=True)
     finally:
-        _is_consolidating.discard(user_id)
- 
+        _is_consolidating = False
+
+
 def wipe_memory(user_id: int = None) -> bool:
-    """
-    Overwrites memory.md with the default baseline template structure,
-    clearing all custom saved facts and preferences.
-    """
     if user_id is None:
         user_id = globals.current_user_id.get()
-        
-    memory_file_path = get_memory_file_path(user_id)
-    if not memory_file_path:
+    if not ENABLE_MEMORY or user_id is None:
         return False
-        
-    logging.info(f"🧠 MEMORY: Wiping memories for user {user_id}...")
-    profile = get_user_profile(user_id)
-    baseline_template = (
-        f"# Emery's Memory Log\n\n"
-        f"## User Profile & Preferences\n"
-        f"- Name: {profile['name']}\n"
-        f"- Location: {USER_LOCATION}\n"
-        f"- Timezone: {USER_TIMEZONE}\n"
-        f"- Birthday: {profile['birthday']}\n"
-        f"- Family: {profile['family']}\n"
-        f"- Profession: {profile['profession']}\n\n"
-        f"## General Facts & Logs\n\n"
-        f"## Conversational Topics Log\n\n"
-        f"## Raw Memory Intake\n"
-    )
+
     try:
-        with open(memory_file_path, "w", encoding="utf-8") as f:
-            f.write(baseline_template)
+        with _store_lock:
+            store = _load_store_locked()
+            filtered_items = []
+            for item in store.get("items", []):
+                owner = item.get("owner_user_id")
+                if owner == user_id and item.get("scope") != "group_context":
+                    continue
+                filtered_items.append(item)
+            store["items"] = filtered_items
+            _save_store_locked(store)
+            _export_memory_views_locked(store)
         return True
     except Exception as e:
-        logging.error(f"❌ WIPE MEMORY: Failed to wipe memory file: {e}", exc_info=True)
+        logging.error("❌ WIPE MEMORY: Failed to wipe memory: %s", e, exc_info=True)
         return False
 
+
 async def append_camera_log(camera_name: str, threat_report: str, scene_context: str) -> None:
-    """
-    Appends a new security camera event to camera_log.md and prunes entries older than 7 days.
-    """
-    from datetime import datetime, timedelta
     now_dt = datetime.now(USER_TIMEZONE)
     now_str = now_dt.strftime("%Y-%m-%d %H:%M %Z")
-    
+
     header = "# Emery Camera Security Log\n"
     new_entry = f"- [{now_str}] [{camera_name.strip()}] THREAT: {threat_report.strip()} | SCENE: {scene_context.strip()}\n"
-    
+
     existing_lines = []
     if os.path.exists(CAMERA_LOG_FILE_PATH):
         try:
             with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
                 existing_lines = f.readlines()
         except Exception as e:
-            logging.error(f"❌ CAMERA LOG: Error reading camera log: {e}", exc_info=True)
-            
-    # Filter/prune old lines
+            logging.error("❌ CAMERA LOG: Error reading camera log: %s", e, exc_info=True)
+
     cutoff_date = (now_dt - timedelta(days=7)).date()
     pruned_lines = []
-    
     for line in existing_lines:
         if line.strip() == "# Emery Camera Security Log":
             continue
-        
-        # Check if line is a log entry
         match = re.match(r'^-\s+\[(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(?:\s+\w+)?\]', line)
         if match:
-            date_str = match.group(1)
             try:
-                entry_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                entry_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
                 if entry_date < cutoff_date:
-                    continue  # prune
+                    continue
             except Exception:
-                pass  # Keep if parsing fails
-        
+                pass
         if line.strip():
             pruned_lines.append(line)
-            
-    # Reassemble with the header at the top
+
     out_lines = [header, "\n"] + [line for line in pruned_lines if line.strip()]
-    if not out_lines[-1].endswith("\n"):
-        out_lines[-1] = out_lines[-1] + "\n"
+    if out_lines and not out_lines[-1].endswith("\n"):
+        out_lines[-1] += "\n"
     out_lines.append(new_entry)
-    
+
     try:
         with open(CAMERA_LOG_FILE_PATH, "w", encoding="utf-8") as f:
             f.writelines(out_lines)
-        logging.debug(f"📹 CAMERA LOG: Logged activity for {camera_name}")
+        logging.debug("📹 CAMERA LOG: Logged activity for %s", camera_name)
     except Exception as e:
-        logging.error(f"❌ CAMERA LOG: Failed to write camera log: {e}", exc_info=True)
+        logging.error("❌ CAMERA LOG: Failed to write camera log: %s", e, exc_info=True)
+
 
 async def get_camera_security_log(camera_name: str = None, limit: int = 10) -> str:
-    """
-    Retrieve recent security camera activity logs including AI threat reports and scene descriptions.
-    Use when the user asks what happened on a camera, what activity was detected, or wants a security summary.
-    """
     if not os.path.exists(CAMERA_LOG_FILE_PATH):
         return "No security camera logs are available."
-        
+
     try:
         with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         entries = []
         for line in lines:
             if not line.strip() or line.startswith("#"):
                 continue
-            
-            # Check for camera filter
             if camera_name:
                 cleaned_filter = camera_name.strip().lower()
                 match = re.search(r'^-\s+\[[^\]]+\]\s+\[([^\]]+)\]', line)
@@ -418,159 +938,250 @@ async def get_camera_security_log(camera_name: str = None, limit: int = 10) -> s
                     entry_camera = match.group(1).strip().lower()
                     if cleaned_filter not in entry_camera and entry_camera not in cleaned_filter:
                         continue
-                else:
-                    if cleaned_filter not in line.lower():
-                        continue
-            
+                elif cleaned_filter not in line.lower():
+                    continue
             entries.append(line.strip())
-            
+
         if not entries:
             filter_msg = f" for camera '{camera_name}'" if camera_name else ""
             return f"No security camera logs found{filter_msg}."
-            
-        # Get the latest 'limit' entries
         recent_entries = entries[-limit:]
-        result_str = "\n".join(recent_entries)
-        return f"Recent Security Camera Logs:\n{result_str}"
+        return "Recent Security Camera Logs:\n" + "\n".join(recent_entries)
     except Exception as e:
-        logging.error(f"❌ CAMERA LOG: Error reading security log: {e}", exc_info=True)
+        logging.error("❌ CAMERA LOG: Error reading security log: %s", e, exc_info=True)
         return f"Failed to retrieve security logs: {e}"
 
+
 def get_camera_log_summary() -> str:
-    """
-    Returns a brief, one-line summary of recent camera activity (within the last hour).
-    Called by helper functions to inject a hint into the system prompt.
-    """
     if not os.path.exists(CAMERA_LOG_FILE_PATH):
         return ""
-        
+
     try:
-        from datetime import datetime, timedelta
         now_dt = datetime.now(USER_TIMEZONE)
         one_hour_ago = now_dt - timedelta(hours=1)
-        
         with open(CAMERA_LOG_FILE_PATH, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         event_count = 0
         cameras_seen = set()
-        
         for line in lines:
             if not line.strip() or line.startswith("#"):
                 continue
-                
             match = re.match(r'^-\s+\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})(?:\s+\w+)?\]\s+\[([^\]]+)\]', line)
-            if match:
-                time_str = match.group(1)
-                camera = match.group(2).strip()
-                try:
-                    entry_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-                    naive_now = now_dt.replace(tzinfo=None)
-                    naive_one_hour_ago = one_hour_ago.replace(tzinfo=None)
-                    
-                    if naive_one_hour_ago <= entry_dt <= naive_now:
-                        event_count += 1
-                        cameras_seen.add(camera)
-                except Exception:
-                    pass
-                    
+            if not match:
+                continue
+            try:
+                entry_dt = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
+                if one_hour_ago.replace(tzinfo=None) <= entry_dt <= now_dt.replace(tzinfo=None):
+                    event_count += 1
+                    cameras_seen.add(match.group(2).strip())
+            except Exception:
+                pass
+
         if event_count == 0:
             return ""
-            
         camera_word = "camera" if len(cameras_seen) == 1 else "cameras"
-        camera_list = ", ".join(sorted(cameras_seen))
         event_word = "event" if event_count == 1 else "events"
-        return f"{event_count} security camera {event_word} detected in the last hour across {len(cameras_seen)} {camera_word} ({camera_list})"
+        return (
+            f"{event_count} security camera {event_word} detected in the last hour across "
+            f"{len(cameras_seen)} {camera_word} ({', '.join(sorted(cameras_seen))})"
+        )
     except Exception as e:
-        logging.error(f"❌ CAMERA LOG: Error summarizing logs: {e}", exc_info=True)
+        logging.error("❌ CAMERA LOG: Error summarizing logs: %s", e, exc_info=True)
         return ""
 
-# --- CONVERSATIONAL TOPIC MONITOR ---
 
-_is_summarizing_topics = False
-_last_summary_hist_len = {}
+async def _store_topic_memory(topic_text: str, chat_id: int, user_id: int | None) -> None:
+    if not topic_text:
+        return
+    metadata = {}
+    if isinstance(topic_text, dict):
+        metadata = dict(topic_text)
+        topic_summary = (metadata.get("summary") or "").strip()
+    else:
+        topic_summary = str(topic_text).strip()
+    if not topic_summary:
+        return
+
+    topic_class = (metadata.get("topic_class") or "").strip().lower()
+    if topic_class not in {"private", "household", "group"}:
+        if chat_id and chat_id < 0:
+            topic_class = "group"
+        elif _mentions_household(topic_summary):
+            topic_class = "household"
+        else:
+            topic_class = "private"
+
+    if topic_class == "group":
+        scope, visibility = "group_context", "group_safe"
+        owner_user_id = None
+    elif topic_class == "household":
+        scope, visibility = "shared_household", "household"
+        owner_user_id = user_id
+    else:
+        scope, visibility = "private", "dm_only"
+        owner_user_id = user_id
+
+    tags = metadata.get("tags") or _extract_tags(topic_summary)
+    metadata["tags"] = [tag for tag in tags if tag][:6]
+    metadata["summary"] = topic_summary
+    if "participants" in metadata and isinstance(metadata["participants"], list):
+        metadata["participants"] = [str(name).strip() for name in metadata["participants"] if str(name).strip()][:6]
+    if not metadata.get("channel_type"):
+        metadata["channel_type"] = "Group Chat" if chat_id and chat_id < 0 else "DM"
+    if not metadata.get("date_label"):
+        metadata["date_label"] = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y")
+
+    with _store_lock:
+        store = _load_store_locked()
+        _store_item_locked(
+            store,
+            owner_user_id=owner_user_id,
+            source_user_id=user_id,
+            source_chat_id=chat_id,
+            item_type="topic",
+            text=topic_summary,
+            scope=scope,
+            visibility=visibility,
+            status="active",
+            source_type="summary",
+            tags=metadata["tags"],
+            metadata=metadata,
+        )
+        _save_store_locked(store)
+    asyncio.create_task(consolidate_memory_background())
+
 
 async def summarize_topics_background(chat_id: int, user_id: int = None) -> None:
-    """
-    Summarizes the recent chat history topics and appends them
-    to the Raw Memory Intake staging area of memory.md.
-    """
-    global _is_summarizing_topics, _last_summary_hist_len
-    import emery.globals as globals
-    from datetime import datetime
-    
+    global _last_summary_hist_len
     if user_id is None:
         user_id = globals.current_user_id.get()
-    
-    # Get active history
+    if chat_id in _topic_summary_chats:
+        return
+
     history = list(globals.chat_histories.get(chat_id, []))
     hist_len = len(history)
-    
-    # Debounce check: only run if history length increased by at least 8 messages (4 full turns)
     last_len = _last_summary_hist_len.get(chat_id, 0)
-    if hist_len - last_len < 8:
+    if hist_len - last_len < 10:
         return
-        
-    if _is_summarizing_topics:
-        return
-        
-    _is_summarizing_topics = True
+
+    _topic_summary_chats.add(chat_id)
     try:
-        # Only check the last 6 messages (3 turns)
-        recent_history = history[-6:]
+        recent_history = history[max(last_len, hist_len - 12):]
         snippet = []
+        participants = []
+        seen_participants = set()
         for msg in recent_history:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            # Strip think tags or other system triggers
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
-            if not content.startswith("[System"):
-                snippet.append(f"{role.upper()}: {content}")
-                
-        if not snippet:
+            if msg.get("role") != "user":
+                continue
+            content = re.sub(r'<think>.*?</think>', '', msg.get("content", ""), flags=re.DOTALL | re.IGNORECASE).strip()
+            if content.startswith("[System"):
+                continue
+            sender_name = msg.get("sender_name") or "User"
+            sender_user_id = msg.get("user_id")
+            sender_key = f"{sender_name.lower()}::{sender_user_id}"
+            if sender_key not in seen_participants:
+                seen_participants.add(sender_key)
+                participants.append({
+                    "name": sender_name,
+                    "user_id": sender_user_id,
+                })
+            snippet.append(f"{sender_name.upper()}: {content}")
+        _last_summary_hist_len[chat_id] = hist_len
+        if len(snippet) < 2:
             return
-            
-        snippet_text = "\n".join(snippet)
-        
-        # Current localized date
-        now_dt = datetime.now(USER_TIMEZONE)
-        now_str = now_dt.strftime("%A, %B %d, %Y")
-        
+
+        now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y")
         chat_type = "DM" if chat_id > 0 else "Group Chat"
-        
+        allowed_names = [p["name"].upper() for p in participants if p.get("name")]
         system_prompt = (
-            "You are Emery's Conversation Topic Summarizer.\n"
-            "Your job is to read a recent snippet of the conversation and write a single, brief bullet point "
-            "summarizing the main topic(s) discussed, including the date and the channel type (DM or Group Chat), "
-            "AND append 3-5 high-level conceptual keywords/tags in brackets at the end.\n"
-            "Example format:\n"
-            f"- On {now_str} (in {chat_type}): Discussed SpaceX IPO valuations and compared it to OpenAI. [Tags: space exploration, rocket, investment, tech ipo]\n"
-            "Rules:\n"
-            "1. Focus ONLY on the topics/subject matters discussed (what was the chat about), not details, conversations, or decisions.\n"
-            "2. Keep it to a single, concise bullet point (maximum 1 sentence).\n"
-            f"3. Explicitly state that this occurred in the {chat_type} as shown in the example format.\n"
-            "4. Provide 3 to 5 broad concept tags inside brackets at the very end. The tags must help group the topic conceptually (e.g. if the topic is NASA Artemis, tags should include space exploration, moon, rocket).\n"
-            "5. If the recent snippet is just generic greeting, small talk, or tool command status with no real topic discussed, reply with exactly 'NONE'.\n"
-            "6. Do not include conversational remarks, explanations, or code block formatting."
+            "You are a strict JSON generator for durable topic memory.\n"
+            "Return ONLY valid JSON.\n"
+            "No markdown, no prose, no comments, no explanation.\n"
+            "The JSON must parse exactly as returned.\n"
+            "Return JSON with exactly this shape:\n"
+            "{\"topics\":[{\"summary\":\"...\",\"topic_class\":\"private|household|group\",\"tags\":[\"...\"],\"participants\":[\"...\"],\"confidence\":0.0}]}\n"
+            "Decision rules:\n"
+            "1. Include a topic only if it is genuinely worth long-term memory.\n"
+            "2. Prefer fewer topics; if one topic can cover the conversation cleanly, return one topic.\n"
+            "3. If two candidate topics overlap materially, keep only the stronger one.\n"
+            "4. Every returned topic MUST contain all 5 required keys: summary, topic_class, tags, participants, confidence.\n"
+            "5. tags must contain 2 to 5 items only.\n"
+            "6. participants must be copied exactly from the allowed participant list and may not include any other values.\n"
+            "7. confidence must always be a number from 0.0 to 1.0.\n"
+            "8. topic_class must be exactly one of private, household, or group.\n"
+            "9. If nothing is worth remembering, return exactly {\"topics\":[]}."
         )
-        
-        user_prompt = f"Here is the recent conversation snippet:\n\n{snippet_text}"
-        
+        known_names = sorted(_primary_known_names())
+        participant_names = ", ".join(p["name"] for p in participants if p.get("name"))
+        user_prompt = (
+            f"Date: {now_str}\n"
+            f"Channel: {chat_type}\n"
+            f"Known household names: {', '.join(known_names)}\n"
+            f"Observed participants: {participant_names}\n\n"
+            f"Allowed participant list: {allowed_names}\n\n"
+            "Conversation snippet:\n\n" + "\n".join(snippet)
+        )
+
         from emery.helpers import query_fast_model
-        summary = await query_fast_model(user_prompt, system_prompt)
-        summary = summary.strip()
-        
-        if summary and summary.upper() != "NONE" and (summary.startswith("-") or summary.startswith("*")):
-            # Extract raw text from bullet to pass to save_user_memory
-            raw_fact = summary.lstrip("-* ").strip()
-            logging.debug(f"💾 TOPIC MONITOR: New topic: '{raw_fact}'")
-            # Save it to raw intake staging area (which triggers memory consolidation automatically)
-            await save_user_memory(raw_fact, user_id)
-            
-            # Update last checked history length on success
-            _last_summary_hist_len[chat_id] = hist_len
-            
+        summary = (await query_fast_model(user_prompt, system_prompt)).strip()
+        if not summary or summary.upper() == "NONE":
+            return
+        try:
+            payload = json.loads(summary)
+        except Exception:
+            logging.warning("⚠️ TOPIC MONITOR: Invalid topic JSON, skipping payload: %s", safe_preview(summary, max_len=200))
+            return
+
+        _debug_topic_payloads("raw_model_payload", payload)
+
+        topics = payload.get("topics") if isinstance(payload, dict) else None
+        default_topic_class = "group" if chat_id < 0 and len(participants) > 1 else "private"
+        normalized_topics = _normalize_topic_payloads(
+            topics,
+            allowed_names=allowed_names,
+            default_topic_class=default_topic_class,
+        )
+        _debug_topic_payloads("normalized_topics", normalized_topics)
+        if not normalized_topics:
+            logging.debug("🧭 TOPIC DEBUG [normalized_topics]: no valid topics survived normalization")
+            return
+
+        participant_name_map = {p["name"].lower(): p["user_id"] for p in participants if p.get("name")}
+        for topic in normalized_topics:
+            cleaned_summary = topic["summary"]
+            topic_class = topic["topic_class"]
+            raw_participants = topic["participants"]
+            cleaned_participants = []
+            participant_user_ids = []
+            for name in raw_participants:
+                clean_name = str(name).strip()
+                if not clean_name:
+                    continue
+                cleaned_participants.append(clean_name)
+                user_match = participant_name_map.get(clean_name.lower())
+                if user_match:
+                    participant_user_ids.append(user_match)
+            topic_payload = {
+                "summary": cleaned_summary,
+                "topic_class": topic_class,
+                "tags": topic["tags"],
+                "participants": cleaned_participants,
+                "participant_user_ids": participant_user_ids[:6],
+                "channel_type": chat_type,
+                "date_label": now_str,
+                "confidence": topic["confidence"],
+            }
+            topic_owner_id = user_id
+            if topic_class == "private" and len(set(participant_user_ids)) == 1:
+                topic_owner_id = participant_user_ids[0]
+            _debug_topic_payloads("final_topic_payload", {
+                "topic_owner_id": topic_owner_id,
+                "chat_id": chat_id,
+                "payload": topic_payload,
+            })
+            await _store_topic_memory(topic_payload, chat_id, topic_owner_id)
     except Exception as e:
-        logging.error(f"❌ TOPIC MONITOR: Background topic summary crash: {e}", exc_info=True)
+        logging.error("❌ TOPIC MONITOR: Background topic summary crash: %s", e, exc_info=True)
     finally:
-        _is_summarizing_topics = False
+        _topic_summary_chats.discard(chat_id)

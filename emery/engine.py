@@ -912,7 +912,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
     else:
         sender_user_id = globals.current_user_id.get()
         
-    system_msg = {"role": "system", "content": get_current_system_prompt(user_query, sender_user_id)}
+    system_msg = {"role": "system", "content": await get_current_system_prompt(user_query, sender_user_id)}
     voice_sent_via_tool = False
     
     ollama_history = []
