@@ -299,6 +299,15 @@ async def generate_image(prompt): # Generates an image based on the prompt using
                 break
         if not image_bytes:
             return "No image data found in response parts."
+
+        compressed_bytes = compress_image_bytes(image_bytes)
+        vision_b64 = base64.b64encode(compressed_bytes).decode('utf-8')
+        vision_prompt = (
+            "Describe the generated image in detail so the calling model can compare it "
+            "against the original prompt and understand the final result."
+        )
+        generated_image_description = await get_image_description(vision_b64, vision_prompt)
+
         if globals.TARGET_CHAT_ID.get():
             chat_id = globals.TARGET_CHAT_ID.get()
             thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
@@ -308,8 +317,14 @@ async def generate_image(prompt): # Generates an image based on the prompt using
                 caption=f"Here's your picture: {prompt[:1000]}",
                 message_thread_id=thread_id
             )
-            return "Image sent successfully."
-        return "Chat context lost."
+            return (
+                "Image sent successfully.\n"
+                f"Generated image description: {generated_image_description}"
+            )
+        return (
+            "Chat context lost.\n"
+            f"Generated image description: {generated_image_description}"
+        )
     except Exception as e:
         logging.error(f"❌ Image Tool Crash: {e}")
         return f"Error: {e}"
