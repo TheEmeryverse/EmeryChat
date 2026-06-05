@@ -1982,41 +1982,83 @@ async def get_reolink_snapshot(
     if not channel:
         available_cams = ", ".join(camera_map.keys())
         return f"Error: Camera '{camera_name}' not found. Available cameras: {available_cams}"
-        
-    protocols = [
-        {"name": "HTTPS", "url": f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"},
-        {"name": "HTTP", "url": f"http://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"}
-    ]
-    
-    response_content = None
-    successful_protocol = None
 
-    for proto in protocols:
-        try:
-            logging.debug(f"📹 CAMERA: Connecting via {proto['name']} → {host}...")
-            r = await globals.http_client.get(proto["url"], timeout=8)
-            
-            if r.status_code == 200:
-                if r.content.startswith(b'\xff\xd8'):
-                    response_content = r.content
-                    successful_protocol = proto["name"]
-                    logging.debug(f"✅ CAMERA: Snapshot fetched via {proto['name']}")
-                    break
-                else:
-                    error_msg = r.content.decode('utf-8', errors='ignore')
-                    logging.warning(
-                        f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {safe_preview(error_msg, max_len=200)}"
+    async def _fetch_snapshot_bytes():
+        protocols = [
+            {"name": "HTTPS", "url": f"https://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"},
+            {"name": "HTTP", "url": f"http://{host}/cgi-bin/api.cgi?cmd=Snap&channel={channel}&user={user}&password={password}"}
+        ]
+        retry_delays = (0.0, 1.0, 2.0)
+        last_failure_reason = None
+        saw_transient_snap_error = False
+        saw_connection = False
+
+        for attempt_index, delay in enumerate(retry_delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+
+            for proto in protocols:
+                try:
+                    logging.debug(
+                        "📹 CAMERA: Snapshot attempt %s via %s → %s (camera=%s, channel=%s)",
+                        attempt_index,
+                        proto["name"],
+                        host,
+                        matched_camera_name or camera_name,
+                        channel,
                     )
-            else:
-                logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
-                
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
-            logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed or offline)")
-        except Exception as e:
-            logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
+                    r = await globals.http_client.get(proto["url"], timeout=8)
+
+                    if r.status_code == 200:
+                        saw_connection = True
+                        if r.content.startswith(b'\xff\xd8'):
+                            logging.debug(f"✅ CAMERA: Snapshot fetched via {proto['name']}")
+                            return r.content, proto["name"], saw_connection, saw_transient_snap_error, last_failure_reason
+
+                        error_msg = r.content.decode('utf-8', errors='ignore')
+                        error_preview = safe_preview(error_msg, max_len=200)
+                        logging.warning(
+                            f"⚠️ REOLINK: {proto['name']} connected, but API returned error: {error_preview}"
+                        )
+                        last_failure_reason = f"{proto['name']} API error: {error_preview}"
+
+                        lowered_error = error_msg.lower()
+                        if "rcv failed" in lowered_error or '"rspcode" : -17' in lowered_error or '"rspcode":-17' in lowered_error:
+                            saw_transient_snap_error = True
+                            logging.info(
+                                "📹 REOLINK: Snapshot capture busy on '%s'; retrying (%s/%s)",
+                                matched_camera_name or camera_name,
+                                attempt_index,
+                                len(retry_delays),
+                            )
+                    else:
+                        last_failure_reason = f"{proto['name']} HTTP {r.status_code}"
+                        logging.warning(f"⚠️ REOLINK: {proto['name']} returned HTTP status code {r.status_code}")
+
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
+                    last_failure_reason = f"{proto['name']} connection failed"
+                    logging.warning(f"⚠️ REOLINK: Connection via {proto['name']} failed. (Port closed or offline)")
+                except Exception as e:
+                    last_failure_reason = f"{proto['name']} unexpected error: {e}"
+                    logging.error(f"❌ REOLINK: Unexpected error on {proto['name']}: {e}")
+
+        return None, None, saw_connection, saw_transient_snap_error, last_failure_reason
 
     import httpx
+    async with globals.reolink_snapshot_lock:
+        response_content, successful_protocol, saw_connection, saw_transient_snap_error, last_failure_reason = await _fetch_snapshot_bytes()
+
     if not response_content:
+        if saw_transient_snap_error:
+            return (
+                f"FAILED: Reolink NVR at {host} is reachable, but snapshot capture kept returning a transient camera-busy error "
+                f"after retries for '{matched_camera_name or camera_name}'. Last failure: {last_failure_reason or 'unknown error'}."
+            )
+        if saw_connection:
+            return (
+                f"FAILED: Reolink NVR at {host} is reachable, but snapshot capture failed for "
+                f"'{matched_camera_name or camera_name}'. Last failure: {last_failure_reason or 'unknown error'}."
+            )
         return (f"FAILED: Could not connect to your Reolink NVR at {host}. "
                 f"1. Please REBOOT your Reolink NVR to apply the HTTPS/CGI settings. "
                 f"2. If the bot runs in Docker, ensure Docker's firewall allows routing to your LAN.")
