@@ -542,7 +542,7 @@ def _debug_topic_payloads(label: str, payload) -> None:
         serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except Exception:
         serialized = str(payload)
-    logging.debug("🧭 TOPIC DEBUG [%s]: %s", label, safe_preview(serialized, max_len=800))
+    logging.info("🧭 TOPIC DEBUG [%s]: %s", label, safe_preview(serialized, max_len=800))
 
 
 def _infer_scope_visibility(text: str, owner_user_id: int | None, chat_id: int | None, item_type: str) -> tuple[str, str]:
@@ -1144,7 +1144,7 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
         )
         _debug_topic_payloads("normalized_topics", normalized_topics)
         if not normalized_topics:
-            logging.debug("🧭 TOPIC DEBUG [normalized_topics]: no valid topics survived normalization")
+            logging.info("🧭 TOPIC DEBUG [normalized_topics]: no valid topics survived normalization")
             return
 
         participant_name_map = {p["name"].lower(): p["user_id"] for p in participants if p.get("name")}
