@@ -331,7 +331,9 @@ async def generate_image(prompt): # Generates an image based on the prompt using
 
 # --- NOAA WEATHER ---
 WEATHER_GEOCODER_URL = "https://nominatim.openstreetmap.org/search"
+WEATHER_FALLBACK_GEOCODER_URL = "https://geocoding-api.open-meteo.com/v1/search"
 WEATHER_SUPPORTED_COUNTRY_CODES = "us,pr,vi,gu,mp,as"
+WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2 = "US,PR,VI,GU,MP,AS"
 
 
 def _weather_headers():
@@ -423,7 +425,31 @@ def _default_weather_location():
     return _env_default_weather_location()
 
 
-async def _geocode_weather_location(location: str):
+def _parse_weather_coordinates(location: str):
+    if not isinstance(location, str):
+        return None
+
+    match = re.match(
+        r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$",
+        location,
+    )
+    if not match:
+        return None
+
+    lat = float(match.group(1))
+    lon = float(match.group(2))
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+
+    return {
+        "label": f"{lat:.4f}, {lon:.4f}",
+        "lat": lat,
+        "lon": lon,
+        "source": "direct-coordinates",
+    }
+
+
+async def _geocode_weather_location_nominatim(location: str):
     params = {
         "q": location,
         "format": "jsonv2",
@@ -440,22 +466,96 @@ async def _geocode_weather_location(location: str):
     response.raise_for_status()
     payload = response.json()
     if not payload:
-        return None, f"I couldn't resolve '{location}' to a U.S. weather location."
+        return None
 
     best = payload[0]
     try:
         lat = float(best["lat"])
         lon = float(best["lon"])
     except (KeyError, TypeError, ValueError):
-        return None, f"I found a match for '{location}', but the coordinates were invalid."
+        raise ValueError(f"Nominatim returned invalid coordinates for '{location}'.")
 
     display_name = best.get("display_name", location)
     return {
         "label": display_name,
         "lat": lat,
         "lon": lon,
-        "source": "geocoder",
-    }, None
+        "source": "geocoder:nominatim",
+    }
+
+
+async def _geocode_weather_location_open_meteo(location: str):
+    params = {
+        "name": location,
+        "count": 5,
+        "language": "en",
+        "format": "json",
+        "countryCode": WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2,
+    }
+    response = await globals.http_client.get(
+        WEATHER_FALLBACK_GEOCODER_URL,
+        params=params,
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    if not results:
+        return None
+
+    best = results[0]
+    try:
+        lat = float(best["latitude"])
+        lon = float(best["longitude"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(f"Open-Meteo returned invalid coordinates for '{location}'.")
+
+    label_parts = [
+        best.get("name"),
+        best.get("admin1"),
+        best.get("country"),
+    ]
+    display_name = ", ".join(str(part).strip() for part in label_parts if str(part or "").strip()) or location
+    return {
+        "label": display_name,
+        "lat": lat,
+        "lon": lon,
+        "source": "geocoder:open-meteo",
+    }
+
+
+async def _geocode_weather_location(location: str):
+    direct_coordinates = _parse_weather_coordinates(location)
+    if direct_coordinates:
+        return direct_coordinates, None
+
+    failures = []
+    geocoders = (
+        ("nominatim", _geocode_weather_location_nominatim),
+        ("open-meteo", _geocode_weather_location_open_meteo),
+    )
+    for geocoder_name, geocoder in geocoders:
+        try:
+            resolved = await geocoder(location)
+            if resolved:
+                return resolved, None
+        except Exception as exc:
+            failures.append(f"{geocoder_name}: {exc}")
+            logging.warning(
+                "⚠️ WEATHER: %s geocoder failed for %r: %s",
+                geocoder_name,
+                location,
+                exc,
+            )
+
+    if failures:
+        logging.error(
+            "❌ WEATHER: All geocoders failed for %r. Failures: %s",
+            location,
+            " | ".join(failures),
+        )
+    return None, f"I couldn't resolve '{location}' to a U.S. weather location."
 
 
 async def _resolve_weather_location(location: str = None):
