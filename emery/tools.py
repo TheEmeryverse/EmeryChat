@@ -333,7 +333,7 @@ async def generate_image(prompt): # Generates an image based on the prompt using
 WEATHER_GEOCODER_URL = "https://nominatim.openstreetmap.org/search"
 WEATHER_FALLBACK_GEOCODER_URL = "https://geocoding-api.open-meteo.com/v1/search"
 WEATHER_SUPPORTED_COUNTRY_CODES = "us,pr,vi,gu,mp,as"
-WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2 = "US,PR,VI,GU,MP,AS"
+WEATHER_FALLBACK_COUNTRY_CODE_ALPHA2 = "US"
 
 
 def _weather_headers():
@@ -521,7 +521,7 @@ async def _geocode_weather_location_open_meteo(location: str):
             "count": 5,
             "language": "en",
             "format": "json",
-            "countryCode": WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2,
+            "countryCode": WEATHER_FALLBACK_COUNTRY_CODE_ALPHA2,
         }
         response = await globals.http_client.get(
             WEATHER_FALLBACK_GEOCODER_URL,

@@ -261,6 +261,35 @@ async def test_open_meteo_normalizes_city_state_and_addresses():
     print("✅ Open-Meteo normalization verified.")
 
 
+async def test_open_meteo_uses_single_country_code():
+    print("--- 7. Testing Open-Meteo countryCode parameter ---")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        weather_file = os.path.join(tmpdir, "weather_locations.json")
+        globals_module, tools, _ = _reload_weather_modules(weather_file)
+
+        class ParamCaptureClient(MockHttpClient):
+            def __init__(self):
+                super().__init__()
+                self.country_codes = []
+
+            async def get(self, url, params=None, headers=None, timeout=None):
+                if "nominatim.openstreetmap.org/search" in url:
+                    raise RuntimeError("403 Forbidden")
+                if "geocoding-api.open-meteo.com/v1/search" in url:
+                    self.country_codes.append((params or {}).get("countryCode"))
+                return await super().get(url, params=params, headers=headers, timeout=timeout)
+
+        client = ParamCaptureClient()
+        globals_module.http_client = client
+
+        result, error = await tools._geocode_weather_location("Waukesha, WI")
+        assert error is None, error
+        assert result["label"].startswith("Waukesha"), result
+        assert client.country_codes, client.country_codes
+        assert all(code == "US" for code in client.country_codes), client.country_codes
+    print("✅ Open-Meteo countryCode verified.")
+
+
 async def main():
     await test_alias_roundtrip()
     await test_zero_config_direct_lookup()
@@ -268,6 +297,7 @@ async def main():
     await test_weather_prompt_includes_alias_write_guidance()
     await test_alias_save_survives_geocoder_failure()
     await test_open_meteo_normalizes_city_state_and_addresses()
+    await test_open_meteo_uses_single_country_code()
     print("\n🎉 Weather tools verified successfully!")
 
 
