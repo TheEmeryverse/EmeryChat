@@ -74,8 +74,8 @@ DEFAULT_ENV = {
     "TENOR_API_KEY": "YOUR_TENOR_API_KEY",
     "MEMORY_STORE_PATH": "data/memory/memory_store.json",
     "CAMERA_LOG_FILE_PATH": "data/logs/camera_log.md",
-    "GOOGLE_TOKEN_PATH": "secrets/token.json",
-    "NEST_TOKEN_PATH": "secrets/nest_token.json",
+    "GOOGLE_TOKEN_PATH": "secrets/google/token.json",
+    "NEST_TOKEN_PATH": "secrets/google/nest_token.json",
     "TOOL_LOOP": "15",
     "MAX_HISTORY_LEN": "200",
     "CHAT_DEBOUNCE_DELAY": "4.0",
@@ -1033,8 +1033,8 @@ def print_next_steps(env_data):
 
     if parse_bool(env_data["ENABLE_CALENDAR"]) or parse_bool(env_data["ENABLE_NEST"]):
         print("\nGoogle integrations next step:")
-        print("- Place credentials.json in secrets/credentials.json")
-        print("- For Nest, optionally place secrets/nest_credentials.json too")
+        print("- Place credentials.json in secrets/google/credentials.json")
+        print("- For Nest, optionally place secrets/google/nest_credentials.json too")
         print("- Run: python scripts/generate_google_token.py")
 
     print("\nYou can now start EmeryChat with:")

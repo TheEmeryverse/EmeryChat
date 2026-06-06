@@ -53,7 +53,8 @@ The project is built around a simple operating model:
 ├── config/                     # Auto-generated persistent JSON config/state
 ├── example.env                 # Environment template for secrets and toggles
 ├── data/                       # Runtime state like memory store and logs
-├── secrets/                    # Local OAuth credentials and tokens
+├── secrets/                    # Local secret material
+│   └── google/                 # Google OAuth credentials and generated tokens
 ├── backups/                    # Setup-script backups of overwritten files
 ├── Dockerfile
 └── docker-compose.yml
@@ -173,8 +174,8 @@ Notes:
 Before starting Docker, create the bind-mounted files on the host so Docker does not replace them with directories:
 
 ```bash
-mkdir -p config data/memory data/logs secrets
-touch secrets/token.json secrets/nest_token.json secrets/credentials.json secrets/nest_credentials.json
+mkdir -p config data/memory data/logs secrets/google
+touch secrets/google/token.json secrets/google/nest_token.json secrets/google/credentials.json secrets/google/nest_credentials.json
 ```
 
 Then start the stack:
@@ -196,9 +197,9 @@ Google Calendar and Nest require OAuth credentials.
    - Google Calendar API
    - Smart Device Management API for Nest
 3. Create a desktop OAuth client.
-4. Place the downloaded client JSON files in `secrets/`:
-   - `secrets/credentials.json` for Calendar
-   - `secrets/nest_credentials.json` for Nest
+4. Place the downloaded client JSON files in `secrets/google/`:
+   - `secrets/google/credentials.json` for Calendar
+   - `secrets/google/nest_credentials.json` for Nest
 5. Run:
 
 ```bash
@@ -207,8 +208,8 @@ python scripts/generate_google_token.py
 
 Then:
 
-- choose option `1` for Calendar, which creates `secrets/token.json`
-- choose option `2` for Nest, which creates `secrets/nest_token.json`
+- choose option `1` for Calendar, which creates `secrets/google/token.json`
+- choose option `2` for Nest, which creates `secrets/google/nest_token.json`
 
 ## Telegram Commands
 
@@ -340,8 +341,8 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
 | `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Embedding endpoint |
 | `NOAA_EMAIL` | `example@example.com` | Required for NOAA weather requests |
-| `GOOGLE_TOKEN_PATH` | `secrets/token.json` | Google Calendar token file |
-| `NEST_TOKEN_PATH` | `secrets/nest_token.json` | Google Nest token file |
+| `GOOGLE_TOKEN_PATH` | `secrets/google/token.json` | Google Calendar token file |
+| `NEST_TOKEN_PATH` | `secrets/google/nest_token.json` | Google Nest token file |
 
 ### Memory and behavior
 
@@ -415,5 +416,5 @@ You likely started Docker before creating the bind-mounted files. Stop the conta
 ### Calendar or Nest fails
 
 - Re-run `python scripts/generate_google_token.py`.
-- Confirm the expected token files exist under `secrets/`.
+- Confirm the expected token files exist under `secrets/google/`.
 - Make sure your OAuth app is configured correctly in Google Cloud.

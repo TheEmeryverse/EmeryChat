@@ -8,8 +8,9 @@ from datetime import datetime, timedelta
 from emery.config import GOOGLE_TOKEN_PATH, NEST_PROJECT_ID, NEST_TOKEN_PATH
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-CALENDAR_CREDENTIALS_PATH = REPO_DIR / "secrets" / "credentials.json"
-NEST_CREDENTIALS_PATH = REPO_DIR / "secrets" / "nest_credentials.json"
+GOOGLE_SECRETS_DIR = REPO_DIR / "secrets" / "google"
+CALENDAR_CREDENTIALS_PATH = GOOGLE_SECRETS_DIR / "credentials.json"
+NEST_CREDENTIALS_PATH = GOOGLE_SECRETS_DIR / "nest_credentials.json"
 
 
 def generate_calendar_token(creds_file):

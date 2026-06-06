@@ -1,6 +1,7 @@
 .env
 secrets/
 backups/
+.antigravitycli/
 script.py
 .DS_Store
 
@@ -11,6 +12,7 @@ __pycache__/
 
 # Personal Memory & Log files
 test_memory_temp.md
+data/legacy/
 data/logs/
 data/memory/
 test_camera_log.md
