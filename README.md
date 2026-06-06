@@ -19,7 +19,7 @@ The project is built around a simple operating model:
 
 - Runs as a Telegram bot with support for text, photos, voice messages, stickers, GIFs, and message reactions
 - Supports local or OpenAI-compatible chat endpoints through Ollama/Open WebUI-style APIs
-- Maintains structured persistent memory in `memory_store.json`, plus rendered per-user markdown views such as `memory.md`
+- Maintains structured persistent memory in `memory_store.json`
 - Supports family/group-chat behavior with silent listening, debounced replies, scoped memory ownership, and user-specific recall
 - Can schedule one-off or recurring jobs and send the results back into Telegram
 - Can route chat, routines, and security alerts into separate Telegram forum topics
@@ -50,7 +50,7 @@ The project is built around a simple operating model:
 │   └── tools.py                # Tool implementations
 ├── config/                     # Auto-generated persistent JSON config/state
 ├── example.env                 # Environment template for secrets and toggles
-├── memory.md                   # Primary user memory file
+├── memory_store.json           # Primary persistent memory store
 ├── camera_log.md               # Camera/security log storage
 ├── Dockerfile
 └── docker-compose.yml
@@ -69,7 +69,6 @@ The project is built around a simple operating model:
 ### Memory model
 
 - Persistent memory lives in `memory_store.json` as structured records with owner, scope, and visibility metadata.
-- `memory.md` and the secondary user's markdown file are rendered exports for inspection and backup, not the source of truth.
 - The embedding model can rank semantically relevant memories, while lexical fallback still works if embeddings are unavailable.
 - Group-chat topic memory is stored separately from private user memory so public context does not automatically leak into DM recall.
 - Topic summarization now asks the fast model for strict JSON, then validates and normalizes the result before storing it.
@@ -171,7 +170,7 @@ Before starting Docker, create the bind-mounted files on the host so Docker does
 
 ```bash
 mkdir -p config
-touch memory.md token.json nest_token.json credentials.json nest_credentials.json
+touch token.json nest_token.json credentials.json nest_credentials.json
 ```
 
 Then start the stack:
@@ -184,8 +183,6 @@ docker compose logs -f
 Important Docker note:
 
 - The entire `config/` directory is bind-mounted, so app-managed JSON survives restarts, rebuilds, and new image pulls.
-- If you use a secondary user and want their derived memory file persisted in Docker, add a bind mount for that specific derived filename.
-
 ## Google Authentication
 
 Google Calendar and Nest require OAuth credentials.
@@ -231,7 +228,7 @@ Most other behavior is natural-language driven through the model and enabled too
 
 ### Personal context and memory
 
-- Persistent local memory in `memory.md`
+- Persistent local memory in `memory_store.json`
 - Memory wipe and consolidation
 - Cross-chat recent-topic recall
 - Secondary-user segmented memory
@@ -347,7 +344,6 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
-| `MEMORY_FILE_PATH` | `memory.md` | Base memory file path |
 | `MEMORY_STORE_PATH` | `memory_store.json` | Structured memory store path |
 | `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
 | `MAX_HISTORY_LEN` | `200` | In-memory chat history length |

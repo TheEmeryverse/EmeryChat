@@ -13,7 +13,7 @@ from emery.config import (
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
     OLLAMA_FAST_NUM_CTX, OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
-    get_user_profile, get_memory_file_path
+    get_user_profile
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview

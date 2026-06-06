@@ -340,7 +340,6 @@ OLLAMA_NUM_CTX = _to_int(os.getenv("OLLAMA_NUM_CTX"), 65536)
 OLLAMA_FAST_NUM_CTX = _to_int(os.getenv("OLLAMA_FAST_NUM_CTX"), 8192)
 OLLAMA_VISION_NUM_CTX = _to_int(os.getenv("OLLAMA_VISION_NUM_CTX"), 65536)
 ENABLE_MEMORY = _to_bool(os.getenv("ENABLE_MEMORY"), True)
-MEMORY_FILE_PATH = os.getenv("MEMORY_FILE_PATH", "memory.md")
 MEMORY_STORE_PATH = os.getenv("MEMORY_STORE_PATH", "memory_store.json")
 CAMERA_LOG_FILE_PATH = os.getenv("CAMERA_LOG_FILE_PATH", "camera_log.md")
 MEMORY_THRESHOLD = _to_int(os.getenv("MEMORY_THRESHOLD"), 4000)
@@ -452,13 +451,3 @@ def get_user_profile(user_id: int) -> dict:
         "profession": USER_PROFESSION,
         "family": USER_FAMILY,
     }
-
-
-def get_memory_file_path(user_id: int) -> str:
-    if not ENABLE_MEMORY:
-        return ""
-    if SECONDARY_USER_ID != 0 and user_id == SECONDARY_USER_ID:
-        base, ext = os.path.splitext(MEMORY_FILE_PATH)
-        name = USER_2_NAME.lower().replace(" ", "_")
-        return f"{base}_{name}{ext}"
-    return MEMORY_FILE_PATH

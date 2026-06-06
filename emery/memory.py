@@ -9,11 +9,11 @@ import asyncio
 from datetime import datetime, timedelta
 
 from emery.config import (
-    ENABLE_MEMORY, MEMORY_FILE_PATH, MEMORY_STORE_PATH, CAMERA_LOG_FILE_PATH,
+    ENABLE_MEMORY, MEMORY_STORE_PATH, CAMERA_LOG_FILE_PATH,
     EMBEDDING_MODEL_ID, EMBEDDING_OLLAMA_URL, USER_NAME, USER_2_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY, USER_PROFESSION,
     SECONDARY_USER_ID, PRIMARY_USER_ID, USER_RELATIONSHIP,
-    get_user_profile, get_memory_file_path
+    get_user_profile
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview
@@ -125,100 +125,6 @@ def _build_item(
     }
 
 
-def _load_legacy_sectioned_bullets(content: str) -> dict:
-    sections = {
-        "user profile & preferences": [],
-        "general facts & logs": [],
-        "conversational topics log": [],
-        "raw memory intake": [],
-    }
-    current_section = None
-    for raw_line in content.splitlines():
-        stripped = raw_line.strip()
-        if stripped.startswith("## "):
-            current_section = stripped[3:].strip().lower()
-            continue
-        if current_section in sections and (stripped.startswith("- ") or stripped.startswith("* ")):
-            sections[current_section].append(stripped[2:].strip())
-    return sections
-
-
-def _legacy_memory_files() -> list[tuple[int, str]]:
-    files = []
-    primary_path = get_memory_file_path(PRIMARY_USER_ID)
-    if primary_path:
-        files.append((PRIMARY_USER_ID, primary_path))
-    if SECONDARY_USER_ID != 0:
-        secondary_path = get_memory_file_path(SECONDARY_USER_ID)
-        if secondary_path and secondary_path != primary_path:
-            files.append((SECONDARY_USER_ID, secondary_path))
-    return files
-
-
-def _migrate_from_legacy_locked() -> dict:
-    store = _default_store()
-    for owner_user_id, path in _legacy_memory_files():
-        if not path or not os.path.exists(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            logging.warning("⚠️ MEMORY MIGRATION: failed reading %s: %s", path, e)
-            continue
-
-        sections = _load_legacy_sectioned_bullets(content)
-        for entry in sections["user profile & preferences"]:
-            baseline_prefixes = ("name:", "location:", "timezone:", "birthday:", "family:", "profession:")
-            if entry.lower().startswith(baseline_prefixes):
-                continue
-            store["items"].append(_build_item(
-                store,
-                owner_user_id=owner_user_id,
-                source_user_id=owner_user_id,
-                item_type="profile",
-                text=entry,
-                scope="private",
-                visibility="dm_only",
-                source_type="migration",
-            ))
-        for entry in sections["general facts & logs"]:
-            store["items"].append(_build_item(
-                store,
-                owner_user_id=owner_user_id,
-                source_user_id=owner_user_id,
-                item_type="fact",
-                text=entry,
-                scope="private",
-                visibility="dm_only",
-                source_type="migration",
-            ))
-        for entry in sections["conversational topics log"]:
-            store["items"].append(_build_item(
-                store,
-                owner_user_id=owner_user_id,
-                source_user_id=owner_user_id,
-                item_type="topic",
-                text=entry,
-                scope="private",
-                visibility="dm_only",
-                source_type="migration",
-            ))
-        for entry in sections["raw memory intake"]:
-            store["items"].append(_build_item(
-                store,
-                owner_user_id=owner_user_id,
-                source_user_id=owner_user_id,
-                item_type="fact",
-                text=entry,
-                scope="private",
-                visibility="dm_only",
-                status="raw",
-                source_type="migration",
-            ))
-    return store
-
-
 def _load_store_locked() -> dict:
     path = _memory_store_path()
     if os.path.exists(path):
@@ -231,11 +137,7 @@ def _load_store_locked() -> dict:
                 return data
         except Exception as e:
             logging.error("❌ MEMORY: Failed loading store %s: %s", path, e, exc_info=True)
-
-    store = _migrate_from_legacy_locked()
-    _save_store_locked(store)
-    _export_memory_views_locked(store)
-    return store
+    return _default_store()
 
 
 def _save_store_locked(store: dict) -> None:
@@ -274,74 +176,6 @@ def _default_profile_lines(user_id: int) -> list[str]:
         f"- Family: {profile['family']}",
         f"- Profession: {profile['profession']}",
     ]
-
-
-def _render_user_memory_markdown(store: dict, user_id: int) -> str:
-    items = store.get("items", [])
-    profile_items = []
-    fact_items = []
-    topic_items = []
-    raw_items = []
-
-    for item in items:
-        owner = item.get("owner_user_id")
-        if owner not in (user_id, None):
-            continue
-        if item.get("status") not in {"active", "raw"}:
-            continue
-        if item.get("scope") == "group_context":
-            continue
-        item_text = _topic_text_from_metadata(item) if item.get("type") == "topic" else item.get("text", "").strip()
-        if not item_text:
-            continue
-        item_type = item.get("type")
-        if item.get("status") == "raw":
-            raw_items.append(f"- {item_text}")
-        elif item_type == "profile":
-            profile_items.append(f"- {item_text}")
-        elif item_type == "topic":
-            topic_items.append(f"- {item_text}")
-        else:
-            fact_items.append(f"- {item_text}")
-
-    sections = [
-        "# Emery's Memory Log",
-        "",
-        "## User Profile & Preferences",
-        *_default_profile_lines(user_id),
-    ]
-    if profile_items:
-        sections.extend(["", *profile_items])
-    sections.extend([
-        "",
-        "## General Facts & Logs",
-    ])
-    sections.extend(fact_items or [""])
-    sections.extend([
-        "",
-        "## Conversational Topics Log",
-    ])
-    sections.extend(topic_items or [""])
-    sections.extend([
-        "",
-        "## Raw Memory Intake",
-    ])
-    sections.extend(raw_items or [""])
-    return "\n".join(sections).rstrip() + "\n"
-
-
-def _export_memory_views_locked(store: dict) -> None:
-    if not ENABLE_MEMORY:
-        return
-    primary_path = get_memory_file_path(PRIMARY_USER_ID)
-    if primary_path:
-        with open(primary_path, "w", encoding="utf-8") as f:
-            f.write(_render_user_memory_markdown(store, PRIMARY_USER_ID))
-    if SECONDARY_USER_ID != 0:
-        secondary_path = get_memory_file_path(SECONDARY_USER_ID)
-        if secondary_path:
-            with open(secondary_path, "w", encoding="utf-8") as f:
-                f.write(_render_user_memory_markdown(store, SECONDARY_USER_ID))
 
 
 def _resolve_embedding_url() -> str:
@@ -838,12 +672,10 @@ async def consolidate_memory_background(user_id: int = None) -> None:
                         item["embedding"] = resolved_embeddings[item["id"]]
                         item["updated_at"] = _utc_now_iso()
                 _save_store_locked(store)
-                _export_memory_views_locked(store)
         else:
             with _store_lock:
                 store = _load_store_locked()
                 _save_store_locked(store)
-                _export_memory_views_locked(store)
 
     except Exception as e:
         logging.error("❌ MEMORY: Consolidation crash: %s", e, exc_info=True)
@@ -868,7 +700,6 @@ def wipe_memory(user_id: int = None) -> bool:
                 filtered_items.append(item)
             store["items"] = filtered_items
             _save_store_locked(store)
-            _export_memory_views_locked(store)
         return True
     except Exception as e:
         logging.error("❌ WIPE MEMORY: Failed to wipe memory: %s", e, exc_info=True)

@@ -16,7 +16,6 @@ INTEGRATIONS_CONFIG_PATH = CONFIG_DIR / "integrations.json"
 NEWS_FEEDS_CONFIG_PATH = CONFIG_DIR / "news_feeds.json"
 WEATHER_LOCATIONS_PATH = CONFIG_DIR / "weather_locations.json"
 CUSTOM_JOBS_PATH = CONFIG_DIR / "custom_jobs.json"
-MEMORY_PATH = BASE_DIR / "memory.md"
 CAMERA_LOG_PATH = BASE_DIR / "camera_log.md"
 
 
@@ -71,7 +70,6 @@ DEFAULT_ENV = {
     "REOLINK_PASSWORD": "",
     "GIPHY_API_KEY": "YOUR_GIPHY_API_KEY",
     "TENOR_API_KEY": "YOUR_TENOR_API_KEY",
-    "MEMORY_FILE_PATH": "memory.md",
     "MEMORY_STORE_PATH": "memory_store.json",
     "CAMERA_LOG_FILE_PATH": "camera_log.md",
     "GOOGLE_TOKEN_PATH": "token.json",
@@ -549,30 +547,6 @@ def ensure_file(path: Path, content: str = ""):
         path.write_text(content, encoding="utf-8")
 
 
-def memory_template(name, location, timezone, birthday, family, profession):
-    return (
-        "# Emery's Memory Log\n\n"
-        "## User Profile & Preferences\n"
-        f"- Name: {name}\n"
-        f"- Location: {location}\n"
-        f"- Timezone: {timezone}\n"
-        f"- Birthday: {birthday}\n"
-        f"- Family: {family}\n"
-        f"- Profession: {profession}\n\n"
-        "## General Facts & Logs\n\n"
-        "## Conversational Topics Log\n\n"
-        "## Raw Memory Intake\n"
-    )
-
-
-def secondary_memory_path(base_name: str, secondary_name: str) -> Path:
-    base = Path(base_name)
-    stem = base.stem
-    suffix = base.suffix or ".md"
-    safe_name = secondary_name.lower().replace(" ", "_")
-    return BASE_DIR / f"{stem}_{safe_name}{suffix}"
-
-
 def bool_to_env(value: bool) -> str:
     return "true" if value else "false"
 
@@ -644,7 +618,6 @@ def build_env_content(env_data):
         "TENOR_API_KEY=" + maybe_quote(env_data["TENOR_API_KEY"]),
         "",
         "# File paths",
-        "MEMORY_FILE_PATH=" + maybe_quote(env_data["MEMORY_FILE_PATH"]),
         "MEMORY_STORE_PATH=" + maybe_quote(env_data["MEMORY_STORE_PATH"]),
         "CAMERA_LOG_FILE_PATH=" + maybe_quote(env_data["CAMERA_LOG_FILE_PATH"]),
         "GOOGLE_TOKEN_PATH=" + maybe_quote(env_data["GOOGLE_TOKEN_PATH"]),
@@ -1041,27 +1014,7 @@ def write_setup(env_data, users_data, integrations_data, news_data, weather_loca
     if not CUSTOM_JOBS_PATH.exists():
         write_json_file(CUSTOM_JOBS_PATH, [])
 
-    ensure_file(MEMORY_PATH, memory_template(
-        users_data["primary_user"]["name"],
-        users_data["primary_user"]["location"],
-        users_data["primary_user"]["timezone"],
-        users_data["primary_user"]["birthday"],
-        users_data["primary_user"]["family"],
-        users_data["primary_user"]["profession"],
-    ))
     ensure_file(CAMERA_LOG_PATH, "# Camera Security Log\n")
-
-    secondary = users_data["secondary_user"]
-    if secondary.get("id", 0) != 0 and secondary.get("name"):
-        secondary_path = secondary_memory_path(env_data["MEMORY_FILE_PATH"], secondary["name"])
-        ensure_file(secondary_path, memory_template(
-            secondary["name"],
-            users_data["primary_user"]["location"],
-            users_data["primary_user"]["timezone"],
-            secondary["birthday"],
-            secondary["family"],
-            secondary["profession"],
-        ))
 
 
 def print_next_steps(env_data):
@@ -1071,7 +1024,7 @@ def print_next_steps(env_data):
     print("- Wrote config/integrations.json")
     print("- Wrote config/news_feeds.json")
     print("- Initialized config/weather_locations.json and config/custom_jobs.json")
-    print("- Ensured memory and camera log files exist")
+    print("- Ensured camera log file exists")
 
     if parse_bool(env_data["ENABLE_CALENDAR"]) or parse_bool(env_data["ENABLE_NEST"]):
         print("\nGoogle integrations next step:")
