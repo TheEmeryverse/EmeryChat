@@ -206,7 +206,7 @@ if is_enabled("ENABLE_WEATHER"):
             "type": "function",
             "function": {
                 "name": "set_weather_location_alias",
-                "description": "Save or update a persistent weather alias like 'home', 'work', or 'school' from a natural-language location. Use this when the user explicitly asks to set, save, update, or change one of their named places.",
+                "description": "Save or update a persistent weather alias like 'home', 'work', or 'school' from a natural-language location. Use this when the user explicitly asks to set, save, update, or change one of their named places. This tool is the correct way to handle requests such as 'set my home to Houston, TX' or 'make work Chicago'. Do not claim you cannot set locations when this tool is available.",
                 "parameters": {
                     "type": "object",
                     "properties": {

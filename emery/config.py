@@ -67,11 +67,11 @@ def _normalize_reolink_channel_map(raw_cameras):
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
-USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
-INTEGRATIONS_CONFIG_PATH = CONFIG_DIR / "integrations.json"
-NEWS_FEEDS_CONFIG_PATH = CONFIG_DIR / "news_feeds.json"
-WEATHER_LOCATIONS_FILE_PATH = str(CONFIG_DIR / "weather_locations.json")
-JOBS_FILE_PATH = str(CONFIG_DIR / "custom_jobs.json")
+USERS_CONFIG_PATH = Path(os.getenv("USERS_CONFIG_PATH", str(CONFIG_DIR / "users.json")))
+INTEGRATIONS_CONFIG_PATH = Path(os.getenv("INTEGRATIONS_CONFIG_PATH", str(CONFIG_DIR / "integrations.json")))
+NEWS_FEEDS_CONFIG_PATH = Path(os.getenv("NEWS_FEEDS_CONFIG_PATH", str(CONFIG_DIR / "news_feeds.json")))
+WEATHER_LOCATIONS_FILE_PATH = os.getenv("WEATHER_LOCATIONS_FILE_PATH", str(CONFIG_DIR / "weather_locations.json"))
+JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", str(CONFIG_DIR / "custom_jobs.json"))
 
 
 DEFAULT_NEWS_FEEDS = [

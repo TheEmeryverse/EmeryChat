@@ -449,6 +449,36 @@ def _parse_weather_coordinates(location: str):
     }
 
 
+def _open_meteo_query_candidates(location: str) -> list[str]:
+    raw = str(location or "").strip()
+    if not raw:
+        return []
+
+    candidates = []
+
+    def add(value: str):
+        clean = str(value or "").strip()
+        if clean and clean not in candidates:
+            candidates.append(clean)
+
+    add(raw)
+
+    zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", raw)
+    if zip_match:
+        add(zip_match.group(1))
+
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) >= 2:
+        add(parts[-2])
+        add(parts[0])
+
+    street_prefix = parts[0] if parts else raw
+    if re.search(r"\d", street_prefix) and len(parts) >= 2:
+        add(parts[-2])
+
+    return candidates
+
+
 async def _geocode_weather_location_nominatim(location: str):
     params = {
         "q": location,
@@ -485,44 +515,46 @@ async def _geocode_weather_location_nominatim(location: str):
 
 
 async def _geocode_weather_location_open_meteo(location: str):
-    params = {
-        "name": location,
-        "count": 5,
-        "language": "en",
-        "format": "json",
-        "countryCode": WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2,
-    }
-    response = await globals.http_client.get(
-        WEATHER_FALLBACK_GEOCODER_URL,
-        params=params,
-        timeout=20,
-    )
-    response.raise_for_status()
+    for candidate in _open_meteo_query_candidates(location):
+        params = {
+            "name": candidate,
+            "count": 5,
+            "language": "en",
+            "format": "json",
+            "countryCode": WEATHER_SUPPORTED_COUNTRY_CODES_ALPHA2,
+        }
+        response = await globals.http_client.get(
+            WEATHER_FALLBACK_GEOCODER_URL,
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
 
-    payload = response.json()
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    if not results:
-        return None
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        if not results:
+            continue
 
-    best = results[0]
-    try:
-        lat = float(best["latitude"])
-        lon = float(best["longitude"])
-    except (KeyError, TypeError, ValueError):
-        raise ValueError(f"Open-Meteo returned invalid coordinates for '{location}'.")
+        best = results[0]
+        try:
+            lat = float(best["latitude"])
+            lon = float(best["longitude"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"Open-Meteo returned invalid coordinates for '{candidate}'.")
 
-    label_parts = [
-        best.get("name"),
-        best.get("admin1"),
-        best.get("country"),
-    ]
-    display_name = ", ".join(str(part).strip() for part in label_parts if str(part or "").strip()) or location
-    return {
-        "label": display_name,
-        "lat": lat,
-        "lon": lon,
-        "source": "geocoder:open-meteo",
-    }
+        label_parts = [
+            best.get("name"),
+            best.get("admin1"),
+            best.get("country"),
+        ]
+        display_name = ", ".join(str(part).strip() for part in label_parts if str(part or "").strip()) or candidate
+        return {
+            "label": display_name,
+            "lat": lat,
+            "lon": lon,
+            "source": "geocoder:open-meteo",
+        }
+    return None
 
 
 async def _geocode_weather_location(location: str):
@@ -540,6 +572,11 @@ async def _geocode_weather_location(location: str):
             resolved = await geocoder(location)
             if resolved:
                 return resolved, None
+            logging.info(
+                "ℹ️ WEATHER: %s geocoder returned no matches for %r",
+                geocoder_name,
+                location,
+            )
         except Exception as exc:
             failures.append(f"{geocoder_name}: {exc}")
             logging.warning(
@@ -699,17 +736,25 @@ async def set_weather_location_alias(alias: str, location: str):
 
     try:
         resolved_location, error = await _geocode_weather_location(location)
-        if error:
-            return error
-
         locations = _load_weather_locations()
-        locations[normalized_alias] = {
-            "label": resolved_location["label"],
-            "lat": round(float(resolved_location["lat"]), 6),
-            "lon": round(float(resolved_location["lon"]), 6),
-        }
+        if error or not resolved_location:
+            # Persist the user-provided label even when geocoding is temporarily unavailable.
+            # A later weather lookup can retry resolution from the saved label.
+            locations[normalized_alias] = {"label": str(location).strip()}
+        else:
+            locations[normalized_alias] = {
+                "label": resolved_location["label"],
+                "lat": round(float(resolved_location["lat"]), 6),
+                "lon": round(float(resolved_location["lon"]), 6),
+            }
         if not _save_weather_locations(locations):
             return "Weather alias error: failed to save the location."
+
+        if error or not resolved_location:
+            return (
+                f"Saved weather alias '{normalized_alias}' as '{locations[normalized_alias]['label']}', "
+                "but I could not verify coordinates right now. I will retry resolution when you use that saved place."
+            )
 
         return (
             f"Saved weather alias '{normalized_alias}' as {resolved_location['label']} "

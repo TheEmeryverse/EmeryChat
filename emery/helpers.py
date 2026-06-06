@@ -494,8 +494,11 @@ async def get_current_system_prompt(user_query="", user_id=None): # Injects the 
     if str(ENABLE_WEATHER).lower() == "true":
         weather_instruction = (
             "\n- You have access to weather tools that support both direct place lookups and persistent named aliases."
+            "\n- You ARE able to save, update, list, and remove weather locations such as `home` and `work` by using the weather alias tools."
+            "\n- Do NOT say that you cannot set or save a weather location when the user asks you to do so. Use the tool instead."
             "\n- For questions like 'What is the weather in Houston?' or 'forecast for Dallas tomorrow', call `get_noaa_weather` with the user-specified place instead of assuming the home location."
             "\n- For requests like 'set my home to Houston, TX', 'make work Chicago', 'save school as Madison, WI', or 'update my office location', you MUST use `set_weather_location_alias`."
+            "\n- Examples: 'set my home to Austin, TX' -> alias=`home`, location=`Austin, TX`; 'set work to 60601' -> alias=`work`, location=`60601`."
             "\n- For requests like 'clear my work location', 'remove school', or 'delete my home weather alias', use `remove_weather_location_alias`."
             "\n- For requests asking what places are saved, use `list_weather_location_aliases`."
             "\n- If the user says 'weather at home', 'weather at work', or another saved place name, prefer the saved alias through `get_noaa_weather`."

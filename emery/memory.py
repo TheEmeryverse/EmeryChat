@@ -87,6 +87,32 @@ def _default_store() -> dict:
     }
 
 
+def _atomic_write_json(path: str, payload: dict) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=True)
+        f.write("\n")
+    os.replace(temp_path, path)
+
+
+def _repair_store_file(path: str, reason: str) -> dict:
+    repaired = _default_store()
+    try:
+        if os.path.exists(path):
+            backup_path = f"{path}.corrupt"
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            os.replace(path, backup_path)
+            logging.warning("⚠️ MEMORY: Moved corrupt store to %s after %s", backup_path, reason)
+        _atomic_write_json(path, repaired)
+    except Exception as e:
+        logging.error("❌ MEMORY: Failed repairing store %s: %s", path, e, exc_info=True)
+    return repaired
+
+
 def _build_item(
     store: dict,
     *,
@@ -127,24 +153,29 @@ def _build_item(
 
 def _load_store_locked() -> dict:
     path = _memory_store_path()
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("items"), list):
-                data.setdefault("version", STORE_VERSION)
-                data.setdefault("next_id", len(data["items"]) + 1)
-                return data
-        except Exception as e:
-            logging.error("❌ MEMORY: Failed loading store %s: %s", path, e, exc_info=True)
-    return _default_store()
+    if not os.path.exists(path):
+        store = _default_store()
+        _atomic_write_json(path, store)
+        return store
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            data.setdefault("version", STORE_VERSION)
+            data.setdefault("next_id", len(data["items"]) + 1)
+            return data
+        logging.error("❌ MEMORY: Invalid store structure in %s", path)
+        return _repair_store_file(path, "invalid structure")
+    except Exception as e:
+        logging.error("❌ MEMORY: Failed loading store %s: %s", path, e, exc_info=True)
+        return _repair_store_file(path, str(e))
 
 
 def _save_store_locked(store: dict) -> None:
     store["version"] = STORE_VERSION
     path = _memory_store_path()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2, ensure_ascii=True)
+    _atomic_write_json(path, store)
 
 
 def _topic_text_from_metadata(item: dict) -> str:

@@ -1,4 +1,8 @@
 .env
+token.json
+credentials.json
+nest_token.json
+nest_credentials.json
 secrets/
 backups/
 .antigravitycli/
@@ -12,10 +16,14 @@ __pycache__/
 
 # Personal Memory & Log files
 test_memory_temp.md
+camera_log.md
 data/legacy/
 data/logs/
 data/memory/
 test_camera_log.md
+custom_jobs.json
+memory.md
+memory_store.json
 config/
 
 # Local Tests Folder

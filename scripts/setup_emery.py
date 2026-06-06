@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
+BASE_DIR = REPO_DIR
 BACKUPS_DIR = REPO_DIR / "backups"
 CONFIG_DIR = REPO_DIR / "config"
 ENV_PATH = REPO_DIR / ".env"
@@ -18,6 +19,7 @@ INTEGRATIONS_CONFIG_PATH = CONFIG_DIR / "integrations.json"
 NEWS_FEEDS_CONFIG_PATH = CONFIG_DIR / "news_feeds.json"
 WEATHER_LOCATIONS_PATH = CONFIG_DIR / "weather_locations.json"
 CUSTOM_JOBS_PATH = CONFIG_DIR / "custom_jobs.json"
+MEMORY_PATH = REPO_DIR / "memory.md"
 CAMERA_LOG_PATH = REPO_DIR / "data" / "logs" / "camera_log.md"
 
 
