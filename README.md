@@ -19,7 +19,7 @@ The project is built around a simple operating model:
 
 - Runs as a Telegram bot with support for text, photos, voice messages, stickers, GIFs, and message reactions
 - Supports local or OpenAI-compatible chat endpoints through Ollama/Open WebUI-style APIs
-- Maintains structured persistent memory in `memory_store.json`
+- Maintains structured persistent memory in `data/memory/memory_store.json`
 - Supports family/group-chat behavior with silent listening, debounced replies, scoped memory ownership, and user-specific recall
 - Can schedule one-off or recurring jobs and send the results back into Telegram
 - Can route chat, routines, and security alerts into separate Telegram forum topics
@@ -39,7 +39,9 @@ The project is built around a simple operating model:
 ```text
 .
 ├── main.py                     # Telegram app entrypoint
-├── setup_emery.py              # Interactive first-run setup wizard
+├── scripts/                    # Setup and one-off utility scripts
+│   ├── setup_emery.py          # Interactive first-run setup wizard
+│   └── generate_google_token.py # OAuth token helper
 ├── emery/
 │   ├── bot.py                  # Telegram handlers and debounce flow
 │   ├── config.py               # Environment loading and config helpers
@@ -50,8 +52,9 @@ The project is built around a simple operating model:
 │   └── tools.py                # Tool implementations
 ├── config/                     # Auto-generated persistent JSON config/state
 ├── example.env                 # Environment template for secrets and toggles
-├── memory_store.json           # Primary persistent memory store
-├── camera_log.md               # Camera/security log storage
+├── data/                       # Runtime state like memory store and logs
+├── secrets/                    # Local OAuth credentials and tokens
+├── backups/                    # Setup-script backups of overwritten files
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -68,7 +71,7 @@ The project is built around a simple operating model:
 
 ### Memory model
 
-- Persistent memory lives in `memory_store.json` as structured records with owner, scope, and visibility metadata.
+- Persistent memory lives in `data/memory/memory_store.json` as structured records with owner, scope, and visibility metadata.
 - The embedding model can rank semantically relevant memories, while lexical fallback still works if embeddings are unavailable.
 - Group-chat topic memory is stored separately from private user memory so public context does not automatically leak into DM recall.
 - Topic summarization now asks the fast model for strict JSON, then validates and normalizes the result before storing it.
@@ -130,13 +133,13 @@ Optional services:
 
 ```bash
 cp example.env .env
-python setup_emery.py
+python scripts/setup_emery.py
 ```
 
 If you have an older personal `.env` from the pre-migration architecture, you can seed the wizard from it:
 
 ```bash
-python setup_emery.py --import-env /path/to/your/old.env
+python scripts/setup_emery.py --import-env /path/to/your/old.env
 ```
 
 The setup wizard will use that file as defaults, ask you to confirm/update values, then write the new `.env` and JSON config files.
@@ -145,6 +148,7 @@ Important:
 
 - `.env` is now intentionally slim. It should hold secrets, URLs, and top-level toggles.
 - EmeryChat auto-generates a persistent `config/` directory on startup for structured app-owned JSON.
+- `scripts/setup_emery.py` stores file backups under `backups/` when it overwrites `.env` or app-managed JSON files.
 - Users should not need to create or manually edit those JSON files in normal use.
 
 ### 4. Run locally
@@ -155,7 +159,7 @@ Install Python 3.10+ and `ffmpeg`, then:
 python -m venv venv
 source venv/bin/activate
 pip install "python-telegram-bot[job-queue]" httpx requests Pillow feedparser psutil pytz tghtml markdown python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4
-python setup_emery.py
+python scripts/setup_emery.py
 python main.py
 ```
 
@@ -169,8 +173,8 @@ Notes:
 Before starting Docker, create the bind-mounted files on the host so Docker does not replace them with directories:
 
 ```bash
-mkdir -p config
-touch token.json nest_token.json credentials.json nest_credentials.json
+mkdir -p config data/memory data/logs secrets
+touch secrets/token.json secrets/nest_token.json secrets/credentials.json secrets/nest_credentials.json
 ```
 
 Then start the stack:
@@ -192,19 +196,19 @@ Google Calendar and Nest require OAuth credentials.
    - Google Calendar API
    - Smart Device Management API for Nest
 3. Create a desktop OAuth client.
-4. Place the downloaded client JSON files in the repo root:
-   - `credentials.json` for Calendar
-   - `nest_credentials.json` for Nest
+4. Place the downloaded client JSON files in `secrets/`:
+   - `secrets/credentials.json` for Calendar
+   - `secrets/nest_credentials.json` for Nest
 5. Run:
 
 ```bash
-python generate_google_token.py
+python scripts/generate_google_token.py
 ```
 
 Then:
 
-- choose option `1` for Calendar, which creates `token.json`
-- choose option `2` for Nest, which creates `nest_token.json`
+- choose option `1` for Calendar, which creates `secrets/token.json`
+- choose option `2` for Nest, which creates `secrets/nest_token.json`
 
 ## Telegram Commands
 
@@ -228,7 +232,7 @@ Most other behavior is natural-language driven through the model and enabled too
 
 ### Personal context and memory
 
-- Persistent local memory in `memory_store.json`
+- Persistent local memory in `data/memory/memory_store.json`
 - Memory wipe and consolidation
 - Cross-chat recent-topic recall
 - Secondary-user segmented memory
@@ -336,15 +340,15 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
 | `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Embedding endpoint |
 | `NOAA_EMAIL` | `example@example.com` | Required for NOAA weather requests |
-| `GOOGLE_TOKEN_PATH` | `token.json` | Google Calendar token file |
-| `NEST_TOKEN_PATH` | `nest_token.json` | Google Nest token file |
+| `GOOGLE_TOKEN_PATH` | `secrets/token.json` | Google Calendar token file |
+| `NEST_TOKEN_PATH` | `secrets/nest_token.json` | Google Nest token file |
 
 ### Memory and behavior
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
-| `MEMORY_STORE_PATH` | `memory_store.json` | Structured memory store path |
+| `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
 | `MAX_HISTORY_LEN` | `200` | In-memory chat history length |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
@@ -410,6 +414,6 @@ You likely started Docker before creating the bind-mounted files. Stop the conta
 
 ### Calendar or Nest fails
 
-- Re-run `python generate_google_token.py`.
-- Confirm the expected token files exist in the repo root.
+- Re-run `python scripts/generate_google_token.py`.
+- Confirm the expected token files exist under `secrets/`.
 - Make sure your OAuth app is configured correctly in Google Cloud.

@@ -2,9 +2,14 @@ import os
 import json
 import urllib.request
 import urllib.parse
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from emery.config import GOOGLE_TOKEN_PATH, NEST_PROJECT_ID, NEST_TOKEN_PATH
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+CALENDAR_CREDENTIALS_PATH = REPO_DIR / "secrets" / "credentials.json"
+NEST_CREDENTIALS_PATH = REPO_DIR / "secrets" / "nest_credentials.json"
 
 
 def generate_calendar_token(creds_file):
@@ -27,6 +32,7 @@ def generate_calendar_token(creds_file):
         flow = InstalledAppFlow.from_client_secrets_file(creds_file, scopes)
         creds = flow.run_local_server(port=0)
         
+        Path(GOOGLE_TOKEN_PATH).parent.mkdir(parents=True, exist_ok=True)
         with open(GOOGLE_TOKEN_PATH, 'w') as token_file:
             token_file.write(creds.to_json())
             
@@ -145,6 +151,7 @@ def generate_nest_token(creds_file):
                 "expiry": expiry_time
             }
             
+            Path(NEST_TOKEN_PATH).parent.mkdir(parents=True, exist_ok=True)
             with open(NEST_TOKEN_PATH, 'w') as token_file:
                 json.dump(token_json, token_file)
                 
@@ -160,21 +167,21 @@ def main():
     print("========================================================")
     print("              EmeryChat Google Token Setup              ")
     print("========================================================")
-    print("1. Google Calendar (generates token.json)")
-    print("2. Google Nest Thermostat (generates nest_token.json)")
+    print(f"1. Google Calendar (generates {GOOGLE_TOKEN_PATH})")
+    print(f"2. Google Nest Thermostat (generates {NEST_TOKEN_PATH})")
     choice = input("Select an option (1 or 2): ").strip()
     
     if choice not in ("1", "2"):
         print("❌ Invalid selection. Exiting.")
         return
         
-    creds_file = 'credentials.json'
-    if choice == "2" and os.path.exists('nest_credentials.json'):
-        creds_file = 'nest_credentials.json'
+    creds_file = str(CALENDAR_CREDENTIALS_PATH)
+    if choice == "2" and NEST_CREDENTIALS_PATH.exists():
+        creds_file = str(NEST_CREDENTIALS_PATH)
         
     if not os.path.exists(creds_file):
         print(f"❌ Error: Credentials file '{creds_file}' not found.")
-        print("Please place your credentials JSON file in this directory.")
+        print("Please place your credentials JSON file under the secrets/ directory.")
         return
         
     if choice == "1":

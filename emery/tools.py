@@ -1574,7 +1574,7 @@ async def get_calendar_events(): # Fetches User's Google Calendars
         logging.error(f"❌ Calendar Token Refresh Error: {e}")
         return ("Calendar error: Google token expired and cannot be refreshed. "
                 "This usually happens if your Google Cloud app is in 'Testing' mode (tokens expire after 7 days) "
-                "or if the token was revoked. Please run `python generate_google_token.py` to re-authenticate, "
+                "or if the token was revoked. Please run `python scripts/generate_google_token.py` to re-authenticate, "
                 "and set your OAuth consent screen to 'In production' to prevent this from happening again.")
     except Exception as e:
         logging.error(f"❌ Calendar Tool Error: {e}")
@@ -1603,10 +1603,10 @@ async def get_nest_thermostats() -> str:
     try:
         creds = get_nest_credentials()
     except FileNotFoundError:
-        return "Nest error: Google token file not found. Please run `python generate_google_token.py` first."
+        return "Nest error: Google token file not found. Please run `python scripts/generate_google_token.py` first."
     except RefreshError as e:
         logging.error(f"❌ Nest Token Refresh Error: {e}")
-        return "Nest error: Google token expired and cannot be refreshed. Please run `python generate_google_token.py` to re-authenticate."
+        return "Nest error: Google token expired and cannot be refreshed. Please run `python scripts/generate_google_token.py` to re-authenticate."
     except Exception as e:
         logging.error(f"❌ Nest Auth Error: {e}")
         return f"Nest error: Authentication failed: {e}"
@@ -1621,7 +1621,7 @@ async def get_nest_thermostats() -> str:
         r = await globals.http_client.get(url, headers=headers, timeout=15)
         if r.status_code == 403:
             return ("Nest error: Access forbidden. This usually means the Nest SDM API is not enabled in your Google Cloud Project, "
-                    "or you need to run `python generate_google_token.py` to authenticate with the Nest scopes enabled.")
+                    "or you need to run `python scripts/generate_google_token.py` to authenticate with the Nest scopes enabled.")
         if r.status_code != 200:
             return f"Nest error: API returned HTTP {r.status_code}: {r.text}"
             

@@ -15,8 +15,5 @@ services:
     volumes:
       # Persist app-managed JSON config and runtime state on the host
       - ./config:/app/config
-      # Pass authentication tokens and OAuth secrets into the container
-      - ./token.json:/app/token.json
-      - ./nest_token.json:/app/nest_token.json
-      - ./credentials.json:/app/credentials.json
-      - ./nest_credentials.json:/app/nest_credentials.json
+      - ./data:/app/data
+      - ./secrets:/app/secrets

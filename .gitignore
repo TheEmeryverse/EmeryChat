@@ -1,8 +1,6 @@
 .env
-token.json
-credentials.json
-nest_token.json
-nest_credentials.json
+secrets/
+backups/
 script.py
 .DS_Store
 
@@ -13,8 +11,8 @@ __pycache__/
 
 # Personal Memory & Log files
 test_memory_temp.md
-camera_log.md
-camera_log.md.bak
+data/logs/
+data/memory/
 test_camera_log.md
 config/
 

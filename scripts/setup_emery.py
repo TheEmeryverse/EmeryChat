@@ -8,15 +8,17 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_DIR = BASE_DIR / "config"
-ENV_PATH = BASE_DIR / ".env"
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_DIR = SCRIPT_DIR.parent
+BACKUPS_DIR = REPO_DIR / "backups"
+CONFIG_DIR = REPO_DIR / "config"
+ENV_PATH = REPO_DIR / ".env"
 USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
 INTEGRATIONS_CONFIG_PATH = CONFIG_DIR / "integrations.json"
 NEWS_FEEDS_CONFIG_PATH = CONFIG_DIR / "news_feeds.json"
 WEATHER_LOCATIONS_PATH = CONFIG_DIR / "weather_locations.json"
 CUSTOM_JOBS_PATH = CONFIG_DIR / "custom_jobs.json"
-CAMERA_LOG_PATH = BASE_DIR / "camera_log.md"
+CAMERA_LOG_PATH = REPO_DIR / "data" / "logs" / "camera_log.md"
 
 
 DEFAULT_ENV = {
@@ -70,10 +72,10 @@ DEFAULT_ENV = {
     "REOLINK_PASSWORD": "",
     "GIPHY_API_KEY": "YOUR_GIPHY_API_KEY",
     "TENOR_API_KEY": "YOUR_TENOR_API_KEY",
-    "MEMORY_STORE_PATH": "memory_store.json",
-    "CAMERA_LOG_FILE_PATH": "camera_log.md",
-    "GOOGLE_TOKEN_PATH": "token.json",
-    "NEST_TOKEN_PATH": "nest_token.json",
+    "MEMORY_STORE_PATH": "data/memory/memory_store.json",
+    "CAMERA_LOG_FILE_PATH": "data/logs/camera_log.md",
+    "GOOGLE_TOKEN_PATH": "secrets/token.json",
+    "NEST_TOKEN_PATH": "secrets/nest_token.json",
     "TOOL_LOOP": "15",
     "MAX_HISTORY_LEN": "200",
     "CHAT_DEBOUNCE_DELAY": "4.0",
@@ -527,7 +529,10 @@ def print_section(title, subtitle=None):
 
 def backup_if_needed(path: Path):
     if path.exists():
-        backup_path = path.with_suffix(path.suffix + ".bak") if path.suffix else Path(str(path) + ".bak")
+        relative_path = path.relative_to(REPO_DIR)
+        backup_name = relative_path.name + ".bak"
+        backup_path = BACKUPS_DIR / relative_path.parent / backup_name
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, backup_path)
 
 
@@ -1028,9 +1033,9 @@ def print_next_steps(env_data):
 
     if parse_bool(env_data["ENABLE_CALENDAR"]) or parse_bool(env_data["ENABLE_NEST"]):
         print("\nGoogle integrations next step:")
-        print("- Place credentials.json in the repo root")
-        print("- For Nest, optionally place nest_credentials.json too")
-        print("- Run: python generate_google_token.py")
+        print("- Place credentials.json in secrets/credentials.json")
+        print("- For Nest, optionally place secrets/nest_credentials.json too")
+        print("- Run: python scripts/generate_google_token.py")
 
     print("\nYou can now start EmeryChat with:")
     print("python main.py")
