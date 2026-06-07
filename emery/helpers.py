@@ -1,6 +1,7 @@
 import re
 import logging
 import io
+import html
 import markdown
 from datetime import datetime, timedelta
 import pytz
@@ -64,6 +65,12 @@ def clean_thinking_tags(text: str) -> str:
     
     return text.strip()
 
+
+def telegram_escape(text) -> str:
+    """Escapes dynamic text before interpolating it into Telegram HTML."""
+    return html.escape("" if text is None else str(text), quote=False)
+
+
 def emery_format(text): 
     try:
         # Strip thinking blocks from the text to prevent them from leaking into formatted outputs (like custom jobs)
@@ -86,7 +93,7 @@ def emery_format(text):
         return parsed_html
     except Exception as e:
         logging.error(f"❌ Formatting failed: {e}")
-        return text.replace("**", "<b>").replace("**", "</b>")
+        return telegram_escape(text).replace("**", "")
 
 
 async def transcribe_audio(audio_bytes): # Sends User's voice message to Open WebUI for transcription

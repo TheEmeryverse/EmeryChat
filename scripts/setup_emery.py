@@ -57,6 +57,7 @@ DEFAULT_ENV = {
     "ENABLE_SCHEDULER": "true",
     "ENABLE_HEARTBEAT": "true",
     "ENABLE_MEMORY": "true",
+    "ALLOW_UNRESTRICTED_TELEGRAM_ACCESS": "false",
     "NASA_API_KEY": "YOUR_NASA_API_KEY",
     "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
     "FRED_API_KEY": "YOUR_FRED_API_KEY",
@@ -65,6 +66,7 @@ DEFAULT_ENV = {
     "OVERSEER_KEY": "YOUR_OVERSEER_KEY",
     "OVERSEER_USER_ID": "1",
     "SEARXNG_URL": "http://localhost:8080/search",
+    "ALLOW_PRIVATE_WEB_FETCH": "false",
     "NOAA_EMAIL": "example@example.com",
     "PORTAINER_URL": "",
     "PORTAINER_API_KEY": "",
@@ -572,6 +574,7 @@ def maybe_quote(value: str) -> str:
 def build_env_content(env_data):
     lines = [
         "TELEGRAM_TOKEN=" + maybe_quote(env_data["TELEGRAM_TOKEN"]),
+        "ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=" + env_value(env_data["ALLOW_UNRESTRICTED_TELEGRAM_ACCESS"]),
         "",
         "# Model information",
         "MODEL_NAME=" + maybe_quote(env_data["MODEL_NAME"]),
@@ -614,6 +617,7 @@ def build_env_content(env_data):
         "OVERSEER_KEY=" + maybe_quote(env_data["OVERSEER_KEY"]),
         "OVERSEER_USER_ID=" + env_value(env_data["OVERSEER_USER_ID"]),
         "SEARXNG_URL=" + maybe_quote(env_data["SEARXNG_URL"]),
+        "ALLOW_PRIVATE_WEB_FETCH=" + env_value(env_data["ALLOW_PRIVATE_WEB_FETCH"]),
         "NOAA_EMAIL=" + maybe_quote(env_data["NOAA_EMAIL"]),
         "PORTAINER_URL=" + maybe_quote(env_data["PORTAINER_URL"]),
         "PORTAINER_API_KEY=" + maybe_quote(env_data["PORTAINER_API_KEY"]),
@@ -805,7 +809,9 @@ def ask_users(users_seed):
     primary["profession"] = prompt_text("Primary user profession", primary.get("profession"))
     primary["id"] = prompt_int("Primary Telegram user ID (optional)", primary.get("id") or None, allow_blank=True) or 0
 
-    users_seed["allowed_user_ids"] = prompt_csv_ids("Allowed Telegram user IDs, comma-separated (optional)", users_seed.get("allowed_user_ids", []))
+    users_seed["allowed_user_ids"] = prompt_csv_ids("Allowed Telegram user IDs, comma-separated (required unless unrestricted access is enabled)", users_seed.get("allowed_user_ids", []))
+    if not users_seed["allowed_user_ids"]:
+        print("No allowed user IDs configured. The bot will ignore Telegram users unless ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true is set in .env.")
 
     if prompt_yes_no("Configure a secondary user / family mode", users_seed.get("secondary_user", {}).get("id", 0) != 0):
         print_section("Secondary User Profile")
@@ -933,6 +939,9 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
 
     if parse_bool(env_seed["ENABLE_SEARCH"]):
         env_seed["SEARXNG_URL"] = prompt_text("SearXNG URL", env_seed.get("SEARXNG_URL"), required=True, validator=validate_url_prompt)
+
+    if parse_bool(env_seed["ENABLE_WEB_SCRAPING"]):
+        env_seed["ALLOW_PRIVATE_WEB_FETCH"] = bool_to_env(prompt_yes_no("Allow web fetches to private/local network addresses", parse_bool(env_seed.get("ALLOW_PRIVATE_WEB_FETCH"), False)))
 
     if parse_bool(env_seed["ENABLE_VOICE"]):
         env_seed["OPEN_WEBUI_KEY"] = prompt_text("Open WebUI / STT auth key", env_seed.get("OPEN_WEBUI_KEY"))

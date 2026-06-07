@@ -6,8 +6,10 @@ import base64
 import json
 import subprocess
 import requests
+import ipaddress
+import socket
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, urlparse
 from datetime import datetime, time, timedelta
 import pytz
 import feedparser
@@ -29,10 +31,10 @@ from emery.config import (
     NEST_PROJECT_ID, REOLINK_SILENT_ALERTS, SECURITY_TOPIC_ID, REOLINK_HOST,
     REOLINK_USER, REOLINK_PASSWORD, REOLINK_CAMERAS, REOLINK_CAMERA_DESCRIPTIONS,
     TELEGRAM_GROUP_CHAT_ID, ENABLE_REOLINK_THREADING, REOLINK_THREAD_WINDOW_MINUTES,
-    ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY
+    ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY, ALLOW_PRIVATE_WEB_FETCH
 )
 import emery.globals as globals
-from emery.helpers import compress_image_bytes, get_image_description, query_fast_model
+from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
 from emery.logging_utils import safe_preview
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -804,6 +806,59 @@ async def web_search(query): # Searches the internet
         logging.error(f"Search error: {e}")
         return "Search failed."
 
+
+def _is_private_or_local_ip(ip_text: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return True
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_host_ips(hostname: str) -> list[str]:
+    resolved = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    return sorted({entry[4][0] for entry in resolved})
+
+
+async def _validate_fetch_url(url: str) -> tuple[bool, str]:
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False, "Only http and https URLs can be fetched."
+    if not parsed.hostname:
+        return False, "URL must include a hostname."
+    if parsed.username or parsed.password:
+        return False, "URLs with embedded credentials are not allowed."
+
+    if ALLOW_PRIVATE_WEB_FETCH:
+        return True, ""
+
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False, "Localhost URLs are blocked."
+
+    try:
+        ipaddress.ip_address(host)
+        ips = [host]
+    except ValueError:
+        try:
+            ips = await asyncio.to_thread(_resolve_host_ips, host)
+        except Exception as exc:
+            return False, f"Unable to resolve hostname: {exc}"
+
+    blocked_ips = [ip for ip in ips if _is_private_or_local_ip(ip)]
+    if blocked_ips:
+        return False, "Private, loopback, link-local, multicast, or reserved network addresses are blocked."
+
+    return True, ""
+
+
 async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches website content
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -812,8 +867,29 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
     }
     try:
         import httpx
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
-            response = await client.get(url, headers=headers)
+        current_url = str(url or "").strip()
+        ok, validation_error = await _validate_fetch_url(current_url)
+        if not ok:
+            return {"success": False, "error": f"Blocked URL: {validation_error}"}
+
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
+            response = None
+            for _redirect_count in range(5):
+                response = await client.get(current_url, headers=headers)
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    break
+
+                location = response.headers.get("location")
+                if not location:
+                    return {"success": False, "error": "Redirect response did not include a Location header."}
+
+                current_url = urljoin(str(response.url), location)
+                ok, validation_error = await _validate_fetch_url(current_url)
+                if not ok:
+                    return {"success": False, "error": f"Blocked redirect URL: {validation_error}"}
+            else:
+                return {"success": False, "error": "Too many redirects while fetching URL."}
+
             if response.status_code != 200:
                 return {
                     "success": False, 
@@ -843,12 +919,12 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
                 }
 
             if len(cleaned_text) > 1500:
-                logging.debug(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {url}...")
+                logging.debug(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {current_url}...")
                 summary_prompt = (
                     f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "
                     f"Keep it objective, concise, and structured under 600 words.\n\n"
                     f"Title: {title}\n"
-                    f"URL: {url}\n\n"
+                    f"URL: {current_url}\n\n"
                     f"Content:\n{cleaned_text}"
                 )
                 try:
@@ -864,7 +940,7 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
             return {
                 "success": True,
                 "title": title,
-                "url": url,
+                "url": current_url,
                 "content": cleaned_text
             }
     except Exception as e:
@@ -2158,7 +2234,10 @@ async def get_reolink_snapshot(
             concise_report = "No active activity detected."
         
         if target_chat_id:
-            telegram_caption = f"📸 <b>Live: {matched_camera_name.upper()}</b>\n\n🛡️ <i>{concise_report}</i>"
+            telegram_caption = (
+                f"📸 <b>Live: {telegram_escape(matched_camera_name.upper())}</b>\n\n"
+                f"🛡️ <i>{telegram_escape(concise_report)}</i>"
+            )
             sent_photo_msg = await globals.application_bot.send_photo(
                 chat_id=target_chat_id,
                 photo=compressed_bytes,

@@ -29,7 +29,6 @@ config/
 # Local Tests Folder
 tests
 
-
 # Backups
 *.bak
 

@@ -8,23 +8,10 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 # Copy the script and requirements
 COPY main.py .
 COPY emery/ ./emery/
+COPY requirements.txt .
 
-# Install all dependencies including python-dotenv
-RUN pip install --no-cache-dir \
-    "python-telegram-bot[job-queue]" \
-    httpx \
-    requests \
-    beautifulsoup4 \
-    Pillow \
-    feedparser \
-    psutil \
-    pytz \
-    tghtml \
-    markdown \
-    python-dotenv \
-    google-api-python-client \
-    google-auth-httplib2 \
-    google-auth-oauthlib
+# Install runtime dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Command to run the bot
 CMD ["python", "main.py"]

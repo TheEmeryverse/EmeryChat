@@ -257,7 +257,7 @@ async def run_custom_job(context):
         
     logging.info(f"📅 SCHEDULER: Running custom job '{description}' ({job_id})")
     from emery.engine import emery_engine
-    from emery.helpers import emery_format
+    from emery.helpers import emery_format, telegram_escape
     
     try:
         active_user_id = globals.current_user_id.get() or user_id
@@ -298,7 +298,7 @@ async def run_custom_job(context):
         sent_ok = await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
-            text=f"🛡️ <b>EMERYCHAT JOB: {description}</b>\n\n{mention_prefix}{emery_format(res_text)}",
+            text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
             message_thread_id=message_thread_id
         )
         if not sent_ok:

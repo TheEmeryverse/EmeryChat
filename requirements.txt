@@ -1,0 +1,14 @@
+python-telegram-bot[job-queue]
+httpx
+requests
+beautifulsoup4
+Pillow
+feedparser
+psutil
+pytz
+tghtml
+markdown
+python-dotenv
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

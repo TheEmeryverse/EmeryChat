@@ -14,10 +14,13 @@ from emery.bot import (
     handle_wipe_command,
     handle_message,
     handle_reaction,
-    bot_post_init
+    bot_post_init,
+    validate_telegram_access_policy
 )
 
 if __name__ == '__main__':
+    validate_telegram_access_policy()
+
     t_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
     
     application = (

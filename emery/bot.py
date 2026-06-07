@@ -13,12 +13,13 @@ from emery.config import (
     MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
     HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END, ALLOWED_USER_IDS,
-    TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET
+    TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
+    ALLOW_UNRESTRICTED_TELEGRAM_ACCESS
 )
 import emery.globals as globals
 from emery.helpers import (
     emery_format, transcribe_audio, compress_image_bytes,
-    get_image_description, clean_thinking_tags
+    get_image_description, clean_thinking_tags, telegram_escape
 )
 from emery.logging_utils import safe_preview
 from emery.memory import wipe_memory
@@ -33,8 +34,28 @@ def is_user_allowed(update: Update) -> bool:
         return False
         
     if not ALLOWED_USER_IDS:
-        return True  # Open by default if not set
+        return bool(ALLOW_UNRESTRICTED_TELEGRAM_ACCESS)
     return user.id in ALLOWED_USER_IDS
+
+
+def validate_telegram_access_policy() -> None:
+    """Logs the effective Telegram access posture at startup."""
+    if ALLOWED_USER_IDS:
+        logging.info("🔐 TELEGRAM ACCESS: allowlist enabled for %s user(s).", len(ALLOWED_USER_IDS))
+        return
+
+    if ALLOW_UNRESTRICTED_TELEGRAM_ACCESS:
+        logging.warning(
+            "⚠️ TELEGRAM ACCESS: unrestricted Telegram access is explicitly enabled. "
+            "Anyone who can message this bot can use enabled tools."
+        )
+        return
+
+    logging.critical(
+        "🚫 TELEGRAM ACCESS: no allowed_user_ids are configured and unrestricted access is disabled. "
+        "The bot will start but ignore all Telegram users until config/users.json includes allowed user IDs "
+        "or ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true is set."
+    )
 
 
 async def validate_telegram_routing(application) -> bool:
@@ -362,7 +383,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
 
-            thinking_msg = f"{header}<blockquote expandable><i>{chunk}</i></blockquote>"
+            thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
             await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     sent_msgs = []

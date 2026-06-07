@@ -159,14 +159,13 @@ Install Python 3.10+ and `ffmpeg`, then:
 ```bash
 python -m venv venv
 source venv/bin/activate
-pip install "python-telegram-bot[job-queue]" httpx requests Pillow feedparser psutil pytz tghtml markdown python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4
+pip install -r requirements.txt
 python scripts/setup_emery.py
 python main.py
 ```
 
 Notes:
 
-- There is currently no `requirements.txt`; the command above mirrors the project dependencies used by the app and container.
 - `ffmpeg` is required for voice output conversion.
 
 ### 5. Run with Docker Compose
@@ -330,6 +329,8 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | `MODEL_ID` | Primary model name |
 | `OLLAMA_URL` | Main model chat endpoint |
 
+Telegram access is fail-closed by default. Add your Telegram user ID to `config/users.json` through the setup wizard, or explicitly set `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true` if you want anyone who can message the bot to use it.
+
 ### Strongly recommended
 
 | Variable | Default | Purpose |
@@ -348,6 +349,7 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS` | `false` | Allows Telegram users not listed in `config/users.json` |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
@@ -388,7 +390,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_NEWS` | RSS/news |
 | `ENABLE_NASA`, `NASA_API_KEY` | NASA APOD |
 | `ENABLE_SEARCH`, `SEARXNG_URL` | Web search |
-| `ENABLE_WEB_SCRAPING` | Web content fetch |
+| `ENABLE_WEB_SCRAPING`, `ALLOW_PRIVATE_WEB_FETCH` | Web content fetch |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |
@@ -400,8 +402,13 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 ### The bot starts but does not reply
 
 - Make sure you sent it a message in DM first.
-- If user whitelisting is enabled, confirm your Telegram user ID is listed in `config/users.json`.
+- Confirm your Telegram user ID is listed in `config/users.json`, or explicitly set `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true`.
 - In a group chat, remember it only replies when mentioned, replied to, or commanded.
+
+### Web fetch refuses a URL
+
+- By default, `fetch_web_content` blocks localhost, private LAN, link-local, multicast, and reserved IP ranges, including redirects to those ranges.
+- Set `ALLOW_PRIVATE_WEB_FETCH=true` only if you intentionally want the model to fetch local or LAN URLs.
 
 ### Docker created folders instead of files
 
