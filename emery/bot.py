@@ -24,6 +24,7 @@ from emery.helpers import (
 from emery.logging_utils import safe_preview
 from emery.memory import wipe_memory
 from emery.engine import emery_engine
+from emery.telegram_delivery import send_split_html_message
 from emery.tools import get_voice_audio
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -437,56 +438,18 @@ async def send_safe_large_message(update: Update, text: str, reply_to_message_id
     Splits extremely long final responses at natural line breaks 
     to prevent Telegram's 4096 character limit crash.
     """
-    MAX_LIMIT = 4000
-    reply_params = None
-    if reply_to_message_id:
-        reply_params = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
-
-    sent_msgs = []
     chat_id = update.effective_chat.id
     thread_id = normalize_message_thread_id(
         chat_id,
         update.message.message_thread_id if update.message else None,
     )
-    
-    if len(text) <= MAX_LIMIT:
-        sent_msg = await globals.application_bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_parameters=reply_params,
-            message_thread_id=thread_id
-        )
-        return [sent_msg]
-
-    while len(text) > 0:
-        if len(text) <= MAX_LIMIT:
-            sent_msg = await globals.application_bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                reply_parameters=reply_params,
-                message_thread_id=thread_id
-            )
-            sent_msgs.append(sent_msg)
-            break
-            
-        split_index = text.rfind('\n', 0, MAX_LIMIT)
-        if split_index == -1 or split_index < 3000:
-            split_index = MAX_LIMIT
-            
-        chunk = text[:split_index]
-        sent_msg = await globals.application_bot.send_message(
-            chat_id=chat_id,
-            text=chunk,
-            parse_mode="HTML",
-            reply_parameters=reply_params,
-            message_thread_id=thread_id
-        )
-        sent_msgs.append(sent_msg)
-        text = text[split_index:].strip()
-        
-    return sent_msgs
+    return await send_split_html_message(
+        globals.application_bot,
+        chat_id,
+        text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=thread_id,
+    )
 
 
 
@@ -501,52 +464,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_message_id: int = None, message_thread_id: int = None):
     """Sends a safe split message directly to a chat, replying to a specific message ID."""
-    MAX_LIMIT = 4000
-    message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
-    reply_params = None
-    if reply_to_message_id:
-        reply_params = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
-        
-    sent_msgs = []
-    
-    if len(text) <= MAX_LIMIT:
-        sent_msg = await globals.application_bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_parameters=reply_params,
-            message_thread_id=message_thread_id
-        )
-        return [sent_msg]
-
-    while len(text) > 0:
-        if len(text) <= MAX_LIMIT:
-            sent_msg = await globals.application_bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                reply_parameters=reply_params,
-                message_thread_id=message_thread_id
-            )
-            sent_msgs.append(sent_msg)
-            break
-            
-        split_index = text.rfind('\n', 0, MAX_LIMIT)
-        if split_index == -1 or split_index < 3000:
-            split_index = MAX_LIMIT
-            
-        chunk = text[:split_index]
-        sent_msg = await globals.application_bot.send_message(
-            chat_id=chat_id,
-            text=chunk,
-            parse_mode="HTML",
-            reply_parameters=reply_params,
-            message_thread_id=message_thread_id
-        )
-        sent_msgs.append(sent_msg)
-        text = text[split_index:].strip()
-        
-    return sent_msgs
+    return await send_split_html_message(
+        globals.application_bot,
+        chat_id,
+        text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for message reaction changes (MessageReactionUpdated)."""
