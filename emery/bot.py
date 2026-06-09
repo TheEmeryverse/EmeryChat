@@ -351,13 +351,15 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     start_tag = "<" + "think" + ">"
     end_tag = "</" + "think" + ">"
     pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-    think_match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+    thinking_blocks = [
+        match.strip()
+        for match in re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
+        if match.strip()
+    ]
 
     clean_response = response_text
-    thinking_content = ""
 
-    if think_match:
-        thinking_content = think_match.group(1).strip()
+    if thinking_blocks:
         clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     # --- SILENT HANDSHAKE DETECTION ---
@@ -373,18 +375,25 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Display the thinking block if one exists
-    if think_match and thinking_content:
+    if thinking_blocks:
         CHUNK_SIZE = 3900
-        chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
+        total_blocks = len(thinking_blocks)
 
-        for idx, chunk in enumerate(chunks):
-            if len(chunks) > 1:
-                header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
-            else:
-                header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+        for block_idx, thinking_content in enumerate(thinking_blocks, start=1):
+            chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
 
-            thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
-            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
+            for idx, chunk in enumerate(chunks):
+                if total_blocks > 1 and len(chunks) > 1:
+                    header = f"🧠 <b>Emery's Thought Process (Turn {block_idx}/{total_blocks}, Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+                elif total_blocks > 1:
+                    header = f"🧠 <b>Emery's Thought Process (Turn {block_idx}/{total_blocks})</b> (Expand to read):\n"
+                elif len(chunks) > 1:
+                    header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+                else:
+                    header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
+
+                thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
+                await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---

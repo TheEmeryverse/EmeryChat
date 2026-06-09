@@ -830,6 +830,29 @@ tools_schema.append({
     }
 })
 
+
+def _strip_id_prefix(text: str) -> str:
+    return re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', text or '', flags=re.IGNORECASE)
+
+
+def _extract_thinking_blocks(content: str) -> tuple[list[str], str]:
+    if not content:
+        return [], ""
+
+    normalized = normalize_gemma_thinking(content)
+    pattern = re.compile(r'<[tT]hink>(.*?)</[tT]hink>', re.DOTALL)
+    thoughts = [match.strip() for match in pattern.findall(normalized) if match.strip()]
+    cleaned = pattern.sub('', normalized).strip()
+    return thoughts, cleaned
+
+
+def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
+    thought = (thought or "").strip()
+    if not thought:
+        return ""
+    return f"Turn {loop_count + 1} - {phase}\n\n{thought}"
+
+
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
@@ -914,6 +937,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         
     system_msg = {"role": "system", "content": await get_current_system_prompt(user_query, sender_user_id)}
     voice_sent_via_tool = False
+    thinking_turns = []
     
     ollama_history = []
     for msg in history_buffer:
@@ -1001,8 +1025,18 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
  
             res = r.json()
             msg = res.get('message', {})
-            
+            raw_content = msg.get('content', "")
+            content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
+            reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
+            if reasoning:
+                reasoning = _strip_id_prefix(reasoning)
+                thinking_turns.append(_format_thinking_turn(loop_count, "reasoning", reasoning))
+            for thought in content_thoughts:
+                thinking_turns.append(_format_thinking_turn(loop_count, "inline thought", thought))
+
             if msg.get("tool_calls"):
+                if cleaned_msg_content != raw_content:
+                    msg["content"] = cleaned_msg_content
                 history_buffer.append(msg)
                 ollama_history.append(msg)
                 for tc in msg['tool_calls']:
@@ -1055,24 +1089,23 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                     ollama_history.append(tool_response)
                 continue
             
-            content = msg.get('content', "")
+            content = cleaned_msg_content
             # Strip hallucinated [ID: ...] prefixes that the model imitated from history formatting
             content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
             content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
-            
-            # Normalize Gemma 4 reasoning tags into standard <think> tags
-            content = normalize_gemma_thinking(content)
 
-            reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
-            if reasoning:
-                reasoning = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', reasoning, flags=re.IGNORECASE)
-            
-            logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {len(reasoning)} chars reasoning" if reasoning else ""))
+            thinking_char_count = sum(len(turn) for turn in thinking_turns if turn)
+            logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))
 
-            if reasoning:
+            thinking_blocks = [turn for turn in thinking_turns if turn]
+            if thinking_blocks:
                 start_think_tag = "<" + "think" + ">"
                 end_think_tag = "</" + "think" + ">"
-                final_text = f"{start_think_tag}\n{reasoning}\n{end_think_tag}\n{content}"
+                thinking_payload = "\n".join(
+                    f"{start_think_tag}\n{turn}\n{end_think_tag}"
+                    for turn in thinking_blocks
+                )
+                final_text = f"{thinking_payload}\n{content}"
             else:
                 final_text = content
 
