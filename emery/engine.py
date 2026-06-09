@@ -3,7 +3,7 @@ import re
 
 from telegram.error import BadRequest
 
-from emery.config import OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, OLLAMA_NUM_CTX
+from emery.config import OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, OLLAMA_NUM_CTX, OLLAMA_NUM_GPU
 from emery import tool_registry
 import emery.globals as globals
 from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
@@ -192,7 +192,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                 "num_ctx": ctx_size,
                 "temperature": 0.8,
                 "top_p": 0.9,
-                # "num_gpu": 0,
+                "num_gpu": OLLAMA_NUM_GPU,
                 "num_thread": 16
             }
         }
