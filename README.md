@@ -112,10 +112,20 @@ At minimum, EmeryChat needs:
 Typical local setup:
 
 ```bash
+ollama pull gpt-oss:20b
 ollama pull qwen3.6:35b-a3b
 ollama pull gemma4:e4b
+ollama pull lfm2.5:8b
 ollama pull nomic-embed-text
 ```
+
+Recommended local model roles:
+
+- `gpt-oss:20b`: excellent primary model, especially strong at tool calling and routine orchestration.
+- `qwen3.6:35b-a3b`: capable larger primary model option for richer conversational turns.
+- `gemma4:e4b`: good vision model and great fast text model for delegated cleanup, summarization, and lightweight extraction.
+- `lfm2.5:8b`: excellent fast text model for coprocessor work when you want speed with strong instruction following.
+- `nomic-embed-text`: embedding model for semantic memory retrieval.
 
 By default the app expects Ollama-compatible chat endpoints such as:
 
@@ -299,6 +309,13 @@ Routing behavior:
 - Kokoro-compatible text-to-speech
 - Image generation through Gemini
 - Fast-model delegation for summarization and image tasks
+
+### Scheduled jobs and reminders
+
+- One-off and recurring jobs are stored in `config/custom_jobs.json`.
+- The saved `prompt` is the instruction that runs when the job fires.
+- New scheduled jobs also preserve `source_request`, the original user message that created the job, so reminder delivery can recover the user's actual wording even if the saved prompt or description is terse.
+- Reminder jobs are delivered through a structured execution prompt that includes the saved prompt, description, and original source request, then asks the model to send the reminder directly without setup chatter or follow-up questions.
 
 ## Reolink Behavior
 

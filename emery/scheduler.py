@@ -193,6 +193,52 @@ def parse_duration_to_seconds(val: str) -> int:
             return num * 86400
     raise ValueError(f"Invalid duration format: '{val}'. Use e.g. '1h', '30m', '10s', '1d', or a number of seconds.")
 
+
+def build_reminder_execution_prompt(
+    prompt: str | None,
+    description: str | None,
+    source_request: str | None,
+    user_name: str,
+    target_user_id: int | None,
+) -> str:
+    """Build a structured execution prompt so reminder jobs retain their concrete details."""
+    base_prompt = (prompt or "").strip()
+    details = (description or "").strip()
+    original_request = (source_request or "").strip()
+
+    shared_directive = (
+        "Deliver the reminder directly and concisely as a message to the intended recipient. "
+        "Use the saved prompt, job description, and original user scheduling request below as authoritative context. "
+        "If any stored field is vague, use the original user scheduling request to recover the intended reminder content. "
+        "Do not ask follow-up questions. Do not say you are unsure what the reminder means. "
+        "Do not say 'I have set a reminder'. Do not add conversational filler."
+    )
+
+    if target_user_id == -1:
+        audience_directive = "Address both intended users naturally."
+    else:
+        audience_directive = f"Address the recipient by name as '{user_name}'."
+
+    return (
+        "Reminder job to deliver now.\n\n"
+        f"Saved reminder prompt:\n{base_prompt}\n\n"
+        f"Job description:\n{details}\n\n"
+        f"Original user scheduling request:\n{original_request or '[Not captured]'}\n\n"
+        f"[SYSTEM DIRECTIVE: {shared_directive} {audience_directive}]"
+    )
+
+
+def get_latest_user_request(chat_id: int | None) -> str | None:
+    """Capture the user message that caused a scheduled job to be created."""
+    if chat_id is None:
+        return None
+
+    for message in reversed(globals.chat_histories.get(chat_id, [])):
+        if message.get("role") == "user":
+            content = (message.get("content") or "").strip()
+            return content or None
+    return None
+
 def load_jobs_from_file() -> list:
     """Loads scheduled jobs from the custom_jobs.json file."""
     current_path = Path(JOBS_FILE_PATH)
@@ -326,6 +372,7 @@ async def run_custom_job(context):
         
     prompt = job_data.get("prompt")
     description = job_data.get("description")
+    source_request = job_data.get("source_request")
     chat_id = job_data.get("chat_id")
     message_thread_id = job_data.get("message_thread_id")
     origin_chat_id = job_data.get("origin_chat_id", chat_id)
@@ -435,20 +482,13 @@ async def run_custom_job(context):
             
         exec_prompt = prompt
         if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
-            if target_user_id == -1:
-                exec_prompt = (
-                    f"{prompt}\n\n"
-                    f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely. "
-                    f"Address both users (e.g. '{USER_NAME} and {USER_2_NAME}, time to head out'). "
-                    f"Do not write conversational filler or say 'I have set a reminder'.]"
-                )
-            else:
-                exec_prompt = (
-                    f"{prompt}\n\n"
-                    f"[SYSTEM DIRECTIVE: Deliver this reminder directly and concisely to the user, "
-                    f"addressing them by name (e.g. '{user_name}, check the chicken's temperature.'). "
-                    f"Do not write conversational filler or say 'I have set a reminder'.]"
-                )
+            exec_prompt = build_reminder_execution_prompt(
+                prompt=prompt,
+                description=description,
+                source_request=source_request,
+                user_name=user_name,
+                target_user_id=target_user_id,
+            )
             
         # Run the engine with the job prompt
         res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
@@ -650,8 +690,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         description = f"Reminder: {prompt[:30]}..." if len(prompt) > 30 else f"Reminder: {prompt}"
 
     if route_to_routines is None:
-        # Default to False for DMs (chat_id > 0), True for Groups (chat_id < 0)
-        route_to_routines = False if chat_id > 0 else True
+        route_to_routines = False
 
     stype = schedule_type.lower().strip()
     if stype not in ("daily", "interval", "once", "weekly", "monthly", "yearly"):
@@ -747,6 +786,8 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         origin_message_thread_id=origin_message_thread_id,
     )
 
+    source_request = get_latest_user_request(chat_id)
+
     job_data = {
         "id": job_id,
         "schedule_type": stype,
@@ -762,6 +803,7 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "user_id": creator_user_id,
         "target_user_id": target_user_id,
         "target_user_name": target_name,
+        "source_request": source_request,
         "created_at": datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     }
     

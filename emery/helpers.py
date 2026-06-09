@@ -459,8 +459,13 @@ async def get_current_system_prompt(user_query="", user_id=None): # Injects the 
             "\n- For one-off reminders with a date but no time (for example, 'remind us on June 7'), ask the user what time before calling `add_scheduled_job`."
             "\n- In group chats, personal reminder wording like 'remind me' or 'remind my' should target the asker; shared wording like 'remind us', 'remind everyone', or 'remind both of us' should target 'us' or 'both'."
             "\n- Treat recurring personal reminders as reminders, not routines. Use routine routing for recurring briefings, monitoring, checks, and automation."
+            "\n- Set `route_to_routines=true` only for shared group routines or automation that should post to the routines topic; leave it false for personal reminders."
             "\n- Use `list_scheduled_jobs` when the user asks what is scheduled or refers to existing routines/reminders."
             "\n- Use `remove_scheduled_job` ONLY when the user clearly asks to cancel, delete, stop, or remove a scheduled job."
+            "\n- When creating a reminder job, the `prompt` you store for `add_scheduled_job` must contain the actual reminder content to be delivered later, not a vague meta-instruction."
+            "\n- Good reminder prompt example: 'Remind Hudson to buy celery, carrots, and soda.'"
+            "\n- Bad reminder prompt example: 'Send reminder about groceries to Hudson.'"
+            "\n- Use `description` as a short label, but keep all actionable details inside the stored `prompt`."
         )
 
     coprocessor_instruction = (
