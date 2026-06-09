@@ -147,17 +147,9 @@ cp example.env .env
 python scripts/setup_emery.py
 ```
 
-If you have an older personal `.env` from the pre-migration architecture, you can seed the wizard from it:
-
-```bash
-python scripts/setup_emery.py --import-env /path/to/your/old.env
-```
-
-The setup wizard will use that file as defaults, ask you to confirm/update values, then write the new `.env` and JSON config files.
-
 Important:
 
-- `.env` is now intentionally slim. It should hold secrets, URLs, and top-level toggles.
+- `.env` should hold secrets, URLs, and top-level toggles.
 - EmeryChat auto-generates a persistent `config/` directory on startup for structured app-owned JSON.
 - `scripts/setup_emery.py` stores file backups under `backups/` when it overwrites `.env` or app-managed JSON files.
 - Users should not need to create or manually edit those JSON files in normal use.
