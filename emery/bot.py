@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.error import TimedOut
 
 from emery.config import (
-    MODEL_ID, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
+    MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
     HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END, ALLOWED_USER_IDS,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
@@ -377,23 +377,17 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Display the thinking block if one exists
     if thinking_blocks:
         CHUNK_SIZE = 3900
-        total_blocks = len(thinking_blocks)
+        thinking_content = "\n\n".join(thinking_blocks)
+        chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
 
-        for block_idx, thinking_content in enumerate(thinking_blocks, start=1):
-            chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
+        for idx, chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                header = f"🧠 <b>{telegram_escape(MODEL_NAME)}'s Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
+            else:
+                header = f"🧠 <b>{telegram_escape(MODEL_NAME)}'s Thought Process</b> (Expand to read):\n"
 
-            for idx, chunk in enumerate(chunks):
-                if total_blocks > 1 and len(chunks) > 1:
-                    header = f"🧠 <b>Emery's Thought Process (Turn {block_idx}/{total_blocks}, Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
-                elif total_blocks > 1:
-                    header = f"🧠 <b>Emery's Thought Process (Turn {block_idx}/{total_blocks})</b> (Expand to read):\n"
-                elif len(chunks) > 1:
-                    header = f"🧠 <b>Emery's Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
-                else:
-                    header = f"🧠 <b>Emery's Thought Process</b> (Expand to read):\n"
-
-                thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
-                await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
+            thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
+            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---

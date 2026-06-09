@@ -850,7 +850,11 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     thought = (thought or "").strip()
     if not thought:
         return ""
-    return f"Turn {loop_count + 1} - {phase}\n\n{thought}"
+    return f"Turn {loop_count + 1}\n{phase}\n\n{thought}"
+
+
+def _format_tool_timeline_entry(fn: str) -> str:
+    return f"{MODEL_NAME} used {fn}"
 
 
 TOOL_STATUS_MESSAGES = {
@@ -937,7 +941,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
         
     system_msg = {"role": "system", "content": await get_current_system_prompt(user_query, sender_user_id)}
     voice_sent_via_tool = False
-    thinking_turns = []
+    thinking_timeline = []
     
     ollama_history = []
     for msg in history_buffer:
@@ -1030,9 +1034,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
             if reasoning:
                 reasoning = _strip_id_prefix(reasoning)
-                thinking_turns.append(_format_thinking_turn(loop_count, "reasoning", reasoning))
+                thinking_timeline.append(_format_thinking_turn(loop_count, "Reasoning", reasoning))
             for thought in content_thoughts:
-                thinking_turns.append(_format_thinking_turn(loop_count, "inline thought", thought))
+                thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
 
             if msg.get("tool_calls"):
                 if cleaned_msg_content != raw_content:
@@ -1072,6 +1076,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
                                 )
                     
                     logging.info(f"🔧 TOOL: {fn} | Args: {format_logging_payload(args)}")
+                    thinking_timeline.append(_format_tool_timeline_entry(fn))
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
@@ -1094,18 +1099,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
             content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
 
-            thinking_char_count = sum(len(turn) for turn in thinking_turns if turn)
+            thinking_char_count = sum(len(entry) for entry in thinking_timeline if entry)
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))
 
-            thinking_blocks = [turn for turn in thinking_turns if turn]
-            if thinking_blocks:
+            thinking_payload = "\n\n".join(entry for entry in thinking_timeline if entry)
+            if thinking_payload:
                 start_think_tag = "<" + "think" + ">"
                 end_think_tag = "</" + "think" + ">"
-                thinking_payload = "\n".join(
-                    f"{start_think_tag}\n{turn}\n{end_think_tag}"
-                    for turn in thinking_blocks
-                )
-                final_text = f"{thinking_payload}\n{content}"
+                final_text = f"{start_think_tag}\n{thinking_payload}\n{end_think_tag}\n{content}"
             else:
                 final_text = content
 
