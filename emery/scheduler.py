@@ -45,6 +45,14 @@ def _looks_like_reminder(prompt: str, description: str) -> bool:
     return bool(re.search(r"\b(remind|reminder|remember to|don't forget|dont forget)\b", text))
 
 
+def _looks_like_routine(prompt: str, description: str) -> bool:
+    text = _combined_job_text(prompt, description)
+    return bool(
+        re.search(r"\b(routine|briefing|digest|report|dashboard|monitor|monitoring|check|status|summary)\b", text)
+        or re.search(r"\b(weather|news|market|security|camera|system|stats)\b.*\b(briefing|check|summary|report)\b", text)
+    )
+
+
 def _mentions_shared_target(prompt: str, description: str) -> bool:
     text = _combined_job_text(prompt, description)
     return bool(
@@ -144,7 +152,7 @@ def _determine_delivery_scope(
     if origin_chat_id > 0:
         return "personal"
 
-    if schedule_type in RECURRING_SCHEDULE_TYPES and route_to_routines:
+    if schedule_type in RECURRING_SCHEDULE_TYPES and (route_to_routines or _looks_like_routine(prompt, description)):
         return "routine"
 
     return "shared"

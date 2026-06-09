@@ -1,6 +1,5 @@
 import logging
 import re
-import importlib
 
 from telegram.error import BadRequest
 
@@ -11,7 +10,6 @@ from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, c
 from emery.logging_utils import format_logging_payload
 from emery.telegram_utils import normalize_message_thread_id
 
-tool_registry = importlib.reload(tool_registry)
 AVAILABLE_TOOLS = tool_registry.AVAILABLE_TOOLS
 tools_schema = tool_registry.tools_schema
 
