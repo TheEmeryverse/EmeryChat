@@ -252,6 +252,13 @@ Supported schedules:
 - `monthly` like `1 12:00`
 - `yearly` like `12-19 08:30`
 
+Routing behavior:
+
+- Personal reminders such as "remind me tomorrow at 8am" are sent as a DM to the asker, including recurring personal reminders.
+- Shared reminders such as "remind us on June 7 at 9am" are sent to the configured group chat topic.
+- True routines and automation, such as recurring briefings, monitoring, and scheduled checks, are sent to the routines topic.
+- One-off reminders with a date but no time ask for a time before scheduling.
+
 ### Information and research
 
 - Web search via SearXNG
@@ -312,8 +319,8 @@ Relevant config:
 If your Telegram group uses Topics/Forums, EmeryChat can route messages by purpose:
 
 - `telegram.security_topic_id` for Reolink alerts
-- `telegram.routines_topic_id` for scheduled jobs and recurring briefings
-- `telegram.chat_topic_id` for normal conversation, reminders, and heartbeat messages
+- `telegram.routines_topic_id` for routines, recurring briefings, monitoring, and scheduled checks
+- `telegram.chat_topic_id` for normal conversation, shared one-off reminders, and heartbeat messages
 
 This is optional. In a DM or a non-topic group, the bot still works.
 

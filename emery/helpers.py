@@ -456,6 +456,9 @@ async def get_current_system_prompt(user_query="", user_id=None): # Injects the 
             "\n- You have scheduling tools: `add_scheduled_job`, `list_scheduled_jobs`, and `remove_scheduled_job`."
             "\n- Use `add_scheduled_job` ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future."
             "\n- Do NOT create scheduled jobs proactively just because something seems useful."
+            "\n- For one-off reminders with a date but no time (for example, 'remind us on June 7'), ask the user what time before calling `add_scheduled_job`."
+            "\n- In group chats, personal reminder wording like 'remind me' or 'remind my' should target the asker; shared wording like 'remind us', 'remind everyone', or 'remind both of us' should target 'us' or 'both'."
+            "\n- Treat recurring personal reminders as reminders, not routines. Use routine routing for recurring briefings, monitoring, checks, and automation."
             "\n- Use `list_scheduled_jobs` when the user asks what is scheduled or refers to existing routines/reminders."
             "\n- Use `remove_scheduled_job` ONLY when the user clearly asks to cancel, delete, stop, or remove a scheduled job."
         )

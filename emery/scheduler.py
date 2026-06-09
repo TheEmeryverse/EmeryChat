@@ -27,6 +27,148 @@ WEEKDAYS = {
 }
 
 LEGACY_JOBS_FILE_PATH = str(Path(JOBS_FILE_PATH).resolve().parent.parent / "custom_jobs.json")
+RECURRING_SCHEDULE_TYPES = {"daily", "weekly", "monthly", "yearly", "interval"}
+SHARED_TARGET_ALIASES = {"both", "us", "family", "everyone", "all", "we", "our"}
+CREATOR_TARGET_ALIASES = {"me", "myself", "my"}
+SECONDARY_TARGET_ALIASES = {"wife", "spouse", "partner", "her", "husband", "him"}
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _combined_job_text(prompt: str, description: str) -> str:
+    return _normalize_text(f"{description or ''} {prompt or ''}")
+
+
+def _looks_like_reminder(prompt: str, description: str) -> bool:
+    text = _combined_job_text(prompt, description)
+    return bool(re.search(r"\b(remind|reminder|remember to|don't forget|dont forget)\b", text))
+
+
+def _mentions_shared_target(prompt: str, description: str) -> bool:
+    text = _combined_job_text(prompt, description)
+    return bool(
+        re.search(r"\bremind\s+(us|everyone|everybody|all|both|the family)\b", text)
+        or re.search(r"\b(for|to)\s+(us|everyone|everybody|all|both of us|the family)\b", text)
+    )
+
+
+def _mentions_creator_target(prompt: str, description: str) -> bool:
+    text = _combined_job_text(prompt, description)
+    return bool(
+        re.search(r"\bremind\s+(me|myself)\b", text)
+        or re.search(r"\b(my|me|myself)\b", text)
+    )
+
+
+def _has_explicit_single_user_target(target_user: str, prompt: str, description: str) -> bool:
+    from emery.config import USER_NAME, USER_2_NAME
+
+    if target_user:
+        clean_name = _normalize_text(target_user)
+        return clean_name not in SHARED_TARGET_ALIASES
+
+    text = _combined_job_text(prompt, description)
+    if _mentions_creator_target(prompt, description):
+        return True
+    if USER_NAME and re.search(rf"\bremind\s+{re.escape(USER_NAME.lower())}\b", text):
+        return True
+    if USER_2_NAME and re.search(rf"\bremind\s+{re.escape(USER_2_NAME.lower())}\b", text):
+        return True
+    return False
+
+
+def _is_duration_value(value: str) -> bool:
+    clean = str(value or "").strip().lower()
+    return bool(re.match(r"^\d+(?:[hmsd])?$", clean))
+
+
+def _missing_once_time_message(schedule_value: str) -> str:
+    value = str(schedule_value or "").strip()
+    label = value or "that date"
+    return f"What time on {label} should I remind you?"
+
+
+def _resolve_target_user(target_user: str, creator_user_id: int | None, prompt: str, description: str) -> tuple[int | None, str]:
+    from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME, get_user_profile
+
+    target_user_id = creator_user_id
+    target_name = get_user_profile(creator_user_id)["name"] if creator_user_id else "User"
+
+    if target_user:
+        clean_name = _normalize_text(target_user)
+        if clean_name in SHARED_TARGET_ALIASES:
+            return -1, "both"
+        if clean_name in CREATOR_TARGET_ALIASES:
+            return creator_user_id, target_name
+        if clean_name == USER_NAME.lower():
+            return PRIMARY_USER_ID, USER_NAME
+        if SECONDARY_USER_ID != 0 and clean_name in {USER_2_NAME.lower(), *SECONDARY_TARGET_ALIASES}:
+            return SECONDARY_USER_ID, USER_2_NAME
+        return target_user_id, target_name
+
+    text = _combined_job_text(prompt, description)
+    if USER_NAME and re.search(rf"\bremind\s+{re.escape(USER_NAME.lower())}\b", text):
+        return PRIMARY_USER_ID, USER_NAME
+    if SECONDARY_USER_ID != 0 and USER_2_NAME and re.search(rf"\bremind\s+{re.escape(USER_2_NAME.lower())}\b", text):
+        return SECONDARY_USER_ID, USER_2_NAME
+
+    if _mentions_shared_target(prompt, description):
+        return -1, "both"
+
+    if _mentions_creator_target(prompt, description):
+        return creator_user_id, target_name
+
+    return target_user_id, target_name
+
+
+def _determine_delivery_scope(
+    *,
+    schedule_type: str,
+    route_to_routines: bool,
+    origin_chat_id: int,
+    target_user_id: int | None,
+    explicit_single_user_target: bool,
+    prompt: str,
+    description: str,
+) -> str:
+    if target_user_id == -1:
+        return "shared"
+
+    if explicit_single_user_target:
+        return "personal"
+
+    if _looks_like_reminder(prompt, description):
+        return "personal"
+
+    if origin_chat_id > 0:
+        return "personal"
+
+    if schedule_type in RECURRING_SCHEDULE_TYPES and route_to_routines:
+        return "routine"
+
+    return "shared"
+
+
+def _resolve_delivery_destination(
+    *,
+    delivery_scope: str,
+    target_user_id: int | None,
+    origin_chat_id: int,
+    origin_message_thread_id: int | None,
+) -> tuple[int | None, int | None]:
+    if delivery_scope == "personal":
+        return target_user_id or origin_chat_id, None
+
+    if delivery_scope == "routine":
+        chat_id = TELEGRAM_GROUP_CHAT_ID if TELEGRAM_GROUP_CHAT_ID is not None else origin_chat_id
+        thread_id = ROUTINES_TOPIC_ID if ROUTINES_TOPIC_ID is not None else origin_message_thread_id
+        return chat_id, thread_id
+
+    chat_id = TELEGRAM_GROUP_CHAT_ID if TELEGRAM_GROUP_CHAT_ID is not None else origin_chat_id
+    thread_id = CHAT_TOPIC_ID if CHAT_TOPIC_ID is not None else origin_message_thread_id
+    return chat_id, thread_id
 
 
 def parse_duration_to_seconds(val: str) -> int:
@@ -186,38 +328,48 @@ async def run_custom_job(context):
     description = job_data.get("description")
     chat_id = job_data.get("chat_id")
     message_thread_id = job_data.get("message_thread_id")
+    origin_chat_id = job_data.get("origin_chat_id", chat_id)
+    origin_message_thread_id = job_data.get("origin_message_thread_id", message_thread_id)
+    delivery_scope = job_data.get("delivery_scope")
     schedule_type = job_data.get("schedule_type")
     route_to_routines = job_data.get("route_to_routines", True)
     
-    # Check if it is an automated daily or repeating routine
-    is_routine = schedule_type in ("daily", "weekly", "monthly", "yearly", "interval")
-    
-    if is_routine and route_to_routines:
-        # Automated routine jobs must go to the designated group and topic
-        if TELEGRAM_GROUP_CHAT_ID is not None:
-            chat_id = TELEGRAM_GROUP_CHAT_ID
-        else:
-            logging.warning(
-                "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
-                "but telegram.group_chat_id is not configured. Falling back to stored chat_id=%s.",
-                description,
-                job_id,
-                chat_id,
-            )
-        if ROUTINES_TOPIC_ID is not None:
-            message_thread_id = ROUTINES_TOPIC_ID
-        else:
-            logging.warning(
-                "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
-                "but telegram.routines_topic_id is not configured. Using thread_id=%s.",
-                description,
-                job_id,
-                message_thread_id,
+    if delivery_scope:
+        chat_id = chat_id or origin_chat_id
+        if chat_id is None:
+            chat_id, message_thread_id = _resolve_delivery_destination(
+                delivery_scope=delivery_scope,
+                target_user_id=target_user_id,
+                origin_chat_id=origin_chat_id,
+                origin_message_thread_id=origin_message_thread_id,
             )
     else:
-        # One-off reminders: fallback to CHAT_TOPIC_ID if they have no thread ID
-        if message_thread_id is None and CHAT_TOPIC_ID is not None:
-            message_thread_id = CHAT_TOPIC_ID
+        # Legacy persisted jobs did not store delivery_scope. Preserve their old routing behavior.
+        is_routine = schedule_type in RECURRING_SCHEDULE_TYPES
+        if is_routine and route_to_routines:
+            if TELEGRAM_GROUP_CHAT_ID is not None:
+                chat_id = TELEGRAM_GROUP_CHAT_ID
+            else:
+                logging.warning(
+                    "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
+                    "but telegram.group_chat_id is not configured. Falling back to stored chat_id=%s.",
+                    description,
+                    job_id,
+                    chat_id,
+                )
+            if ROUTINES_TOPIC_ID is not None:
+                message_thread_id = ROUTINES_TOPIC_ID
+            else:
+                logging.warning(
+                    "⚠️ SCHEDULER: Job '%s' (%s) is marked route_to_routines=True, "
+                    "but telegram.routines_topic_id is not configured. Using thread_id=%s.",
+                    description,
+                    job_id,
+                    message_thread_id,
+                )
+        else:
+            if message_thread_id is None and CHAT_TOPIC_ID is not None:
+                message_thread_id = CHAT_TOPIC_ID
 
     if not chat_id:
         chat_id = globals.TARGET_CHAT_ID.get()
@@ -233,13 +385,16 @@ async def run_custom_job(context):
 
     logging.info(
         "📅 SCHEDULER: Resolved destination for job '%s' (%s) -> chat_id=%s thread_id=%s "
-        "[schedule_type=%s route_to_routines=%s]",
+        "[schedule_type=%s route_to_routines=%s delivery_scope=%s origin_chat_id=%s origin_thread_id=%s]",
         description,
         job_id,
         chat_id,
         message_thread_id,
         schedule_type,
         route_to_routines,
+        delivery_scope or "legacy",
+        origin_chat_id,
+        origin_message_thread_id,
     )
         
     if schedule_type == "yearly":
@@ -269,11 +424,14 @@ async def run_custom_job(context):
         if target_user_id == -1:
             from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME
             if SECONDARY_USER_ID != 0:
-                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a> & <a href=\"tg://user?id={SECONDARY_USER_ID}\">{USER_2_NAME}</a>: "
+                mention_prefix = (
+                    f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{telegram_escape(USER_NAME)}</a> & "
+                    f"<a href=\"tg://user?id={SECONDARY_USER_ID}\">{telegram_escape(USER_2_NAME)}</a>: "
+                )
             else:
-                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{USER_NAME}</a>: "
+                mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{telegram_escape(USER_NAME)}</a>: "
         elif target_user_id and target_user_id != 0:
-            mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{target_user_name}</a>: "
+            mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{telegram_escape(target_user_name)}</a>: "
             
         exec_prompt = prompt
         if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
@@ -301,6 +459,28 @@ async def run_custom_job(context):
             text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
             message_thread_id=message_thread_id
         )
+        if (
+            not sent_ok
+            and delivery_scope == "personal"
+            and origin_chat_id
+            and origin_chat_id != chat_id
+        ):
+            fallback_thread_id = normalize_message_thread_id(origin_chat_id, origin_message_thread_id)
+            logging.warning(
+                "⚠️ SCHEDULER: Personal reminder '%s' (%s) failed in DM chat_id=%s. "
+                "Falling back to origin chat_id=%s thread_id=%s.",
+                description,
+                job_id,
+                chat_id,
+                origin_chat_id,
+                fallback_thread_id,
+            )
+            sent_ok = await send_safe_job_message(
+                context.bot,
+                chat_id=origin_chat_id,
+                text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
+                message_thread_id=fallback_thread_id,
+            )
         if not sent_ok:
             logging.warning(
                 "⚠️ SCHEDULER: Job '%s' (%s) executed, but delivery to chat_id=%s thread_id=%s failed.",
@@ -457,12 +637,14 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     - schedule_value: The scheduling specification. E.g. '08:30' for daily, '30m' or '3600' for interval, or '2026-05-26 15:30:00' / '15m' for once.
     - prompt: The text prompt the bot executes when the job runs.
     - description: A short, user-friendly label/description of the job.
-    - target_user: Optional name of the user this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both').
-    - route_to_routines: Optional boolean. If True, the routine is routed to the global routines topic. If False, it goes to the origin chat.
+    - target_user: Optional name or alias this job/reminder is targeted at (e.g. 'Alice', 'Bob', 'me', 'us', or 'both').
+    - route_to_routines: Optional boolean. Use True for true routines/automation such as briefings, checks, and monitoring.
     """
     chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Error: No active chat session to associate with this job. Run this command from within a chat."
+    origin_chat_id = chat_id
+    origin_message_thread_id = globals.CURRENT_THREAD_ID.get()
         
     if not description:
         description = f"Reminder: {prompt[:30]}..." if len(prompt) > 30 else f"Reminder: {prompt}"
@@ -471,7 +653,6 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         # Default to False for DMs (chat_id > 0), True for Groups (chat_id < 0)
         route_to_routines = False if chat_id > 0 else True
 
-        
     stype = schedule_type.lower().strip()
     if stype not in ("daily", "interval", "once", "weekly", "monthly", "yearly"):
         return f"Error: Invalid schedule_type '{schedule_type}'. Must be 'daily', 'interval', 'once', 'weekly', 'monthly', or 'yearly'."
@@ -489,10 +670,15 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         elif stype == "interval":
             parse_duration_to_seconds(schedule_value)
         elif stype == "once":
-            if "-" in schedule_value or ":" in schedule_value:
+            clean_schedule_value = str(schedule_value or "").strip()
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", clean_schedule_value):
+                return _missing_once_time_message(clean_schedule_value)
+            if "-" in clean_schedule_value or ":" in clean_schedule_value:
                 datetime.strptime(schedule_value, "%Y-%m-%d %H:%M:%S")
             else:
-                parse_duration_to_seconds(schedule_value)
+                if not _is_duration_value(clean_schedule_value):
+                    return _missing_once_time_message(clean_schedule_value)
+                parse_duration_to_seconds(clean_schedule_value)
         elif stype == "weekly":
             parts = schedule_value.split()
             if len(parts) != 2:
@@ -543,21 +729,23 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
     creator_user_id = globals.current_user_id.get()
     
     # Resolve target user
-    from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME, get_user_profile
-    target_user_id = creator_user_id
-    target_name = get_user_profile(creator_user_id)["name"]
-    
-    if target_user:
-        clean_name = target_user.strip().lower()
-        if clean_name in ("both", "us", "family", "everyone", "all"):
-            target_user_id = -1
-            target_name = "both"
-        elif clean_name in (USER_NAME.lower(), "me", "myself"):
-            target_user_id = PRIMARY_USER_ID
-            target_name = USER_NAME
-        elif SECONDARY_USER_ID != 0 and clean_name in (USER_2_NAME.lower(), "wife", "spouse", "her"):
-            target_user_id = SECONDARY_USER_ID
-            target_name = USER_2_NAME
+    target_user_id, target_name = _resolve_target_user(target_user, creator_user_id, prompt, description)
+    explicit_single_user_target = _has_explicit_single_user_target(target_user, prompt, description)
+    delivery_scope = _determine_delivery_scope(
+        schedule_type=stype,
+        route_to_routines=route_to_routines,
+        origin_chat_id=origin_chat_id,
+        target_user_id=target_user_id,
+        explicit_single_user_target=explicit_single_user_target,
+        prompt=prompt,
+        description=description,
+    )
+    delivery_chat_id, delivery_thread_id = _resolve_delivery_destination(
+        delivery_scope=delivery_scope,
+        target_user_id=target_user_id,
+        origin_chat_id=origin_chat_id,
+        origin_message_thread_id=origin_message_thread_id,
+    )
 
     job_data = {
         "id": job_id,
@@ -565,8 +753,11 @@ async def add_scheduled_job(schedule_type: str, schedule_value: str, prompt: str
         "schedule_value": schedule_value,
         "prompt": prompt,
         "description": description,
-        "chat_id": chat_id,
-        "message_thread_id": globals.CURRENT_THREAD_ID.get(),
+        "chat_id": delivery_chat_id,
+        "message_thread_id": delivery_thread_id,
+        "origin_chat_id": origin_chat_id,
+        "origin_message_thread_id": origin_message_thread_id,
+        "delivery_scope": delivery_scope,
         "route_to_routines": route_to_routines,
         "user_id": creator_user_id,
         "target_user_id": target_user_id,
@@ -641,7 +832,11 @@ def update_jobs_with_chat_id(chat_id: int):
     jobs = load_jobs_from_file()
     updated = False
     for job_data in jobs:
-        if job_data.get("chat_id") is None:
+        if job_data.get("delivery_scope") and job_data.get("origin_chat_id") is None:
+            job_data["origin_chat_id"] = chat_id
+            logging.info(f"📅 SCHEDULER: Associated scoped job '{job_data['id']}' origin with chat {chat_id}")
+            updated = True
+        elif job_data.get("delivery_scope") is None and job_data.get("chat_id") is None:
             job_data["chat_id"] = chat_id
             logging.info(f"📅 SCHEDULER: Associated job '{job_data['id']}' with chat {chat_id}")
             # Reschedule it so it uses the updated chat_id in memory

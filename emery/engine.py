@@ -666,18 +666,18 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "add_scheduled_job",
-                "description": "Create a scheduled reminder, recurring routine, or future automated check. Use ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future. Do NOT create jobs proactively just because it seems helpful.",
+                "description": "Create a scheduled reminder, recurring routine, or future automated check. Use ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future. Do NOT create jobs proactively just because it seems helpful. For one-off reminders with a calendar date but no time, ask the user what time before calling this tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "schedule_type": {
                             "type": "string",
                             "enum": ["daily", "interval", "once", "weekly", "monthly", "yearly"],
-                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), 'once' (one-off localized date-time or relative delay), 'weekly' (e.g. Monday 08:30), 'monthly' (e.g. 1 12:00), or 'yearly' (e.g. 12-19 08:30)."
+                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), 'once' (one-off localized date-time or relative delay), 'weekly' (e.g. Monday 08:30), 'monthly' (e.g. 1 12:00), or 'yearly' (e.g. 12-19 08:30). Personal recurring reminders should still use the recurring schedule type; the scheduler will route them privately when target_user/wording indicates a personal reminder."
                         },
                         "schedule_value": {
                             "type": "string",
-                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' or relative delay (e.g. '15m'). 'weekly' requires '<day_name> <HH:MM>' (e.g. 'Monday 08:30'). 'monthly' requires '<day_of_month> <HH:MM>' (e.g. '1 12:00'). 'yearly' requires '<MM-DD> <HH:MM>' (e.g. '12-19 08:30')."
+                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' or relative delay (e.g. '15m'); do not pass date-only values like '2026-06-07' or 'June 7'. 'weekly' requires '<day_name> <HH:MM>' (e.g. 'Monday 08:30'). 'monthly' requires '<day_of_month> <HH:MM>' (e.g. '1 12:00'). 'yearly' requires '<MM-DD> <HH:MM>' (e.g. '12-19 08:30')."
                         },
                         "prompt": {
                             "type": "string",
@@ -689,11 +689,11 @@ if is_enabled("ENABLE_SCHEDULER"):
                         },
                         "target_user": {
                             "type": "string",
-                            "description": "Optional name or alias of the family member this job/reminder is targeted at (e.g. 'Alice', 'Bob', or 'both'). If specified, the bot will run the job under that user's context and explicitly tag them in the chat notification."
+                            "description": "Optional name or alias of the family member this job/reminder is targeted at (e.g. 'Alice', 'Bob', 'me', 'us', or 'both'). In group chats, personal wording like 'remind me' routes to the asker's DM. Shared wording like 'remind us' routes to the configured group chat topic."
                         },
                         "route_to_routines": {
                             "type": "boolean",
-                            "description": "Optional. If true (default for group chats), the scheduled repeating routine is routed to the designated routines topic. If false (default for DMs), it is sent to the original chat/topic where it was scheduled."
+                            "description": "Optional. True routines/automation such as recurring briefings, checks, and monitoring should set this true so they route to the routines topic. Personal reminders and shared reminders do not need this; the scheduler chooses DM or group chat-topic routing from target_user and wording."
                         }
                     },
                     "required": ["schedule_type", "schedule_value", "prompt", "description"]
