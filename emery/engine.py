@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -7,7 +8,7 @@ from telegram.error import BadRequest
 from emery.config import MAIN_MODEL_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, THINK
 from emery import tool_registry
 import emery.globals as globals
-from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
+from emery.helpers import get_current_system_prompt, get_stable_system_prompt, normalize_gemma_thinking, clean_thinking_tags
 from emery.logging_utils import format_logging_payload
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -57,6 +58,28 @@ def _normalize_tool_arguments(arguments):
     return arguments or {}
 
 
+def _stable_json(data) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _hash_prompt_part(messages: list[dict], chat_template_kwargs: dict | None) -> str:
+    hash_payload = {
+        "messages": messages,
+        "chat_template_kwargs": chat_template_kwargs or {},
+    }
+    return hashlib.sha256(_stable_json(hash_payload).encode("utf-8")).hexdigest()[:16]
+
+
+def _approx_prompt_chars(messages: list[dict]) -> int:
+    return len(_stable_json(messages))
+
+
+def _truncate_tool_content(content: str, max_len: int = 500) -> str:
+    if len(content) <= max_len:
+        return content
+    return content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
+
+
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
@@ -104,23 +127,8 @@ TOOL_STATUS_MESSAGES = {
 }
 
 
-def prune_past_tool_responses(history_buffer, max_len=500):
-    """
-    Truncates tool responses from past turns to save context window tokens and reduce
-    prefill response latency for local LLMs, while keeping the API structure intact.
-    """
-    for msg in history_buffer:
-        if msg.get("role") == "tool" and msg.get("content"):
-            content = msg["content"]
-            if len(content) > max_len:
-                msg["content"] = content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
-
-
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
-    # Prune past tool responses to prevent context bloat and speed up local inference prefill
-    prune_past_tool_responses(history_buffer)
-
     url = MAIN_MODEL_URL
     # Find the latest user query and sender info from the history buffer
     user_query = ""
@@ -136,7 +144,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     else:
         sender_user_id = globals.current_user_id.get()
         
-    system_msg = {"role": "system", "content": await get_current_system_prompt(user_query, sender_user_id)}
+    chat_template_kwargs = {"enable_thinking": bool(THINK)}
+    stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
+    dynamic_suffix = [
+        {
+            "role": "user",
+            "content": await get_current_system_prompt(user_query, sender_user_id),
+        }
+    ]
     voice_sent_via_tool = False
     thinking_timeline = []
     
@@ -195,7 +210,22 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         ollama_history.append(clean_msg)
     
     for loop_count in range(TOOL_LOOP):
-        full_context = [system_msg] + ollama_history
+        full_context = stable_prefix + dynamic_suffix + ollama_history
+        stable_prefix_hash = _hash_prompt_part(stable_prefix, chat_template_kwargs)
+        prompt_chars = _approx_prompt_chars(full_context)
+        logging.info(
+            "🧩 PROMPT CACHE: stable_prefix_hash=%s stable_messages=%d dynamic_messages=%d history_messages=%d total_messages=%d approx_chars=%d history_trimmed=%s model=%s url=%s thinking=%s",
+            stable_prefix_hash,
+            len(stable_prefix),
+            len(dynamic_suffix),
+            len(ollama_history),
+            len(full_context),
+            prompt_chars,
+            False,
+            model_to_use,
+            url,
+            THINK,
+        )
         
         payload = {
             "model": model_to_use,
@@ -205,10 +235,8 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
             "temperature": 0.8,
             "top_p": 0.95,
             "top_k": 20,
+            "chat_template_kwargs": chat_template_kwargs,
         }
-
-        if THINK:
-            payload["chat_template_kwargs"] = {"enable_thinking": True}
         
         if allow_tools and tools_schema:
             payload["tools"] = tools_schema
@@ -284,7 +312,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                     
                     tool_response = {
                         "role": "tool",
-                        "content": str(result),
+                        "content": _truncate_tool_content(str(result)),
                         "name": fn
                     }
                     if "id" in tc:

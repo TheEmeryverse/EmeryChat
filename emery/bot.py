@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.error import TimedOut
 
 from emery.config import (
-    MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
+    MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
     HEARTBEAT_SILENT_RETRY_SECONDS, HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS,
     HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
@@ -200,7 +200,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_jobs_with_chat_id(chat_id)
     
     if chat_id not in globals.chat_histories: 
-         globals.chat_histories[chat_id] = deque(maxlen=MAX_HISTORY_LEN)
+         globals.chat_histories[chat_id] = deque()
     
     # Clear any stale custom reply targets for this turn
     globals.chat_reply_targets.pop(chat_id, None)
@@ -517,7 +517,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             emojis.append("✨") # Use sparkle emoji as placeholder for custom emojis
             
     if chat_id not in globals.chat_histories:
-        globals.chat_histories[chat_id] = deque(maxlen=MAX_HISTORY_LEN)
+        globals.chat_histories[chat_id] = deque()
         
     found_msg = None
     for msg in globals.chat_histories[chat_id]:
@@ -526,10 +526,12 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             break
             
     if found_msg:
-        if "reactions" not in found_msg:
-            found_msg["reactions"] = {}
-        found_msg["reactions"][actor_key] = emojis
         logging.debug(f"🎭 REACTION: {actor_key} reaction on {message_id} -> {emojis}")
+        globals.chat_histories[chat_id].append({
+            "role": "user",
+            "content": f"[Reaction update: {actor_key} reacted to message ID {message_id} with {', '.join(emojis) if emojis else 'no reaction'}]",
+            "timestamp": datetime.now(USER_TIMEZONE),
+        })
         
     # Trigger response evaluation if the user added/changed their reaction
     if not is_bot:
@@ -599,9 +601,6 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     finally:
         typing_stop.set()
         await typing_task
-        
-    if trigger_msg in globals.chat_histories[chat_id]:
-        globals.chat_histories[chat_id].remove(trigger_msg)
         
     start_tag = "<" + "think" + ">"
     end_tag = "</" + "think" + ">"
@@ -889,9 +888,6 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
     except Exception as e:
         logging.error(f"Error executing heartbeat engine: {e}")
         response_text = "DONE"
-        
-    if trigger_msg in globals.chat_histories[chat_id]:
-        globals.chat_histories[chat_id].remove(trigger_msg)
         
     start_tag = "<" + "think" + ">"
     end_tag = "</" + "think" + ">"

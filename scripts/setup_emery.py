@@ -80,7 +80,6 @@ DEFAULT_ENV = {
     "GOOGLE_TOKEN_PATH": "secrets/google/token.json",
     "NEST_TOKEN_PATH": "secrets/google/nest_token.json",
     "TOOL_LOOP": "15",
-    "MAX_HISTORY_LEN": "200",
     "CHAT_DEBOUNCE_DELAY": "4.0",
     "MEMORY_THRESHOLD": "4000",
     "HEARTBEAT_INTERVAL_SECONDS": "3600",
@@ -637,7 +636,6 @@ def build_env_content(env_data):
         "",
         "# Runtime tuning",
         "TOOL_LOOP=" + env_value(env_data["TOOL_LOOP"]),
-        "MAX_HISTORY_LEN=" + env_value(env_data["MAX_HISTORY_LEN"]),
         "CHAT_DEBOUNCE_DELAY=" + env_value(env_data["CHAT_DEBOUNCE_DELAY"]),
         "MEMORY_THRESHOLD=" + env_value(env_data["MEMORY_THRESHOLD"]),
         "HEARTBEAT_INTERVAL_SECONDS=" + env_value(env_data["HEARTBEAT_INTERVAL_SECONDS"]),
@@ -1015,7 +1013,6 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
 def ask_runtime(env_seed):
     print_section("Runtime Tuning")
     env_seed["CHAT_DEBOUNCE_DELAY"] = str(prompt_float("Chat debounce delay seconds", parse_float(env_seed.get("CHAT_DEBOUNCE_DELAY"), 4.0)))
-    env_seed["MAX_HISTORY_LEN"] = str(prompt_int("Max in-memory history length", parse_int(env_seed.get("MAX_HISTORY_LEN"), 200)))
     env_seed["TOOL_LOOP"] = str(prompt_int("Max tool loop count", parse_int(env_seed.get("TOOL_LOOP"), 15)))
     env_seed["MEMORY_THRESHOLD"] = str(prompt_int("Memory threshold characters", parse_int(env_seed.get("MEMORY_THRESHOLD"), 4000)))
     env_seed["HEARTBEAT_INTERVAL_SECONDS"] = str(prompt_int("Heartbeat check interval seconds", parse_int(env_seed.get("HEARTBEAT_INTERVAL_SECONDS"), 3600)))

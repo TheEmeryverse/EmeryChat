@@ -369,9 +369,10 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
-| `MAX_HISTORY_LEN` | `200` | In-memory chat history length |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
+
+Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. Prompt-cache diagnostics log the stable prefix hash and approximate prompt size for each main-model request.
 
 ### Scheduler and heartbeat
 

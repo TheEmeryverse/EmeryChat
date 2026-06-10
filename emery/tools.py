@@ -2396,8 +2396,7 @@ async def trigger_webhook_alert(camera_name: str):
     from emery.globals import chat_histories
     if alert_chat_id not in chat_histories:
         from collections import deque
-        from emery.config import MAX_HISTORY_LEN
-        chat_histories[alert_chat_id] = deque(maxlen=MAX_HISTORY_LEN)
+        chat_histories[alert_chat_id] = deque()
         
     now_dt = datetime.now(USER_TIMEZONE)
     now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
