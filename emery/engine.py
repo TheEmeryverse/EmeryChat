@@ -99,7 +99,7 @@ def prune_past_tool_responses(history_buffer, max_len=500):
 
 
 # --- THE UNIFIED ENGINE ---
-async def emery_engine(history_buffer, model_to_use=MODEL_ID):
+async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     # Prune past tool responses to prevent context bloat and speed up local inference prefill
     prune_past_tool_responses(history_buffer)
 
@@ -197,7 +197,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             }
         }
         
-        if tools_schema:
+        if allow_tools and tools_schema:
             payload["tools"] = tools_schema
  
         try:
@@ -220,7 +220,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID):
             for thought in content_thoughts:
                 thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
 
-            if msg.get("tool_calls"):
+            if allow_tools and msg.get("tool_calls"):
                 if cleaned_msg_content != raw_content:
                     msg["content"] = cleaned_msg_content
                 history_buffer.append(msg)

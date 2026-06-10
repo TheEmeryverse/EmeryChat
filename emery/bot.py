@@ -2,7 +2,7 @@ import re
 import logging
 import asyncio
 import base64
-from datetime import datetime
+from datetime import datetime, time
 from collections import deque
 
 from telegram import Update, ReplyParameters
@@ -12,7 +12,9 @@ from telegram.error import TimedOut
 from emery.config import (
     MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY, MAX_HISTORY_LEN,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
-    HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END, ALLOWED_USER_IDS,
+    HEARTBEAT_SILENT_RETRY_SECONDS, HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS,
+    HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
+    ALLOWED_USER_IDS, ENABLE_WEATHER,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
     ALLOW_UNRESTRICTED_TELEGRAM_ACCESS
 )
@@ -22,11 +24,30 @@ from emery.helpers import (
     get_image_description, clean_thinking_tags, telegram_escape
 )
 from emery.logging_utils import safe_preview
-from emery.memory import wipe_memory
+from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.engine import emery_engine
 from emery.telegram_delivery import send_split_html_message
-from emery.tools import get_voice_audio
+from emery.tools import get_noaa_weather_alerts, get_voice_audio
 from emery.telegram_utils import normalize_message_thread_id
+
+
+_heartbeat_last_evaluation = {}
+_heartbeat_last_proactive = {}
+_heartbeat_daily_proactive_counts = {}
+
+_HEARTBEAT_HOOK_RE = re.compile(
+    r"\b("
+    r"follow up|circle back|later|tomorrow|next week|next month|remind|remember|"
+    r"need to|should|decide|decision|plan|project|stuck|worried|stress|"
+    r"frustrated|excited|appointment|meeting|deadline|waiting|promised|you said"
+    r")\b|[?？]",
+    re.IGNORECASE,
+)
+
+_HEARTBEAT_EXCLUDED_CONTEXT_RE = re.compile(
+    r"\b(security|camera|reolink|motion alert|snapshot|news|headline|reuters|fox news)\b",
+    re.IGNORECASE,
+)
 
 def is_user_allowed(update: Update) -> bool:
     """Checks if the user interacting with the bot is whitelisted in TELEGRAM_ALLOWED_USERS."""
@@ -607,6 +628,178 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     except Exception as e:
         logging.error(f"Failed to send reaction reply: {e}")
 
+def _is_heartbeat_sleep_window(now: datetime) -> bool:
+    start_h, start_m = map(int, HEARTBEAT_SLEEP_START.split(':'))
+    end_h, end_m = map(int, HEARTBEAT_SLEEP_END.split(':'))
+    start_time = time(start_h, start_m)
+    end_time = time(end_h, end_m)
+    curr_time = now.time()
+
+    if start_time <= end_time:
+        return start_time <= curr_time <= end_time
+    return curr_time >= start_time or curr_time <= end_time
+
+
+def _heartbeat_daily_count(chat_id: int, now: datetime) -> int:
+    date_key = now.date().isoformat()
+    state = _heartbeat_daily_proactive_counts.get(chat_id)
+    if not state or state.get("date") != date_key:
+        state = {"date": date_key, "count": 0}
+        _heartbeat_daily_proactive_counts[chat_id] = state
+    return state["count"]
+
+
+def _record_heartbeat_proactive(chat_id: int, now: datetime) -> None:
+    _heartbeat_last_proactive[chat_id] = now
+    date_key = now.date().isoformat()
+    state = _heartbeat_daily_proactive_counts.get(chat_id)
+    if not state or state.get("date") != date_key:
+        state = {"date": date_key, "count": 0}
+        _heartbeat_daily_proactive_counts[chat_id] = state
+    state["count"] += 1
+
+
+def _seconds_since(now: datetime, past: datetime) -> float:
+    return max((now - past).total_seconds(), 0)
+
+
+def _heartbeat_suppression_reason(chat_id: int, now: datetime) -> str:
+    if HEARTBEAT_DAILY_PROACTIVE_LIMIT > 0 and _heartbeat_daily_count(chat_id, now) >= HEARTBEAT_DAILY_PROACTIVE_LIMIT:
+        return f"daily proactive limit reached ({HEARTBEAT_DAILY_PROACTIVE_LIMIT})"
+
+    last_proactive = _heartbeat_last_proactive.get(chat_id)
+    if last_proactive and _seconds_since(now, last_proactive) < HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS:
+        return "proactive message cooldown active"
+
+    last_evaluation = _heartbeat_last_evaluation.get(chat_id)
+    if last_evaluation and _seconds_since(now, last_evaluation) < HEARTBEAT_SILENT_RETRY_SECONDS:
+        return "silent retry cooldown active"
+
+    return ""
+
+
+def _last_chat_activity(history) -> datetime | None:
+    for msg in reversed(history):
+        if msg.get("is_heartbeat_trigger") or msg.get("is_reaction_trigger"):
+            continue
+        if msg.get("role") not in {"user", "assistant"}:
+            continue
+        timestamp = msg.get("timestamp")
+        if timestamp:
+            return timestamp
+    return None
+
+
+def _last_user_id_from_history(history) -> int | None:
+    for msg in reversed(history):
+        if msg.get("role") == "user" and not msg.get("is_heartbeat_trigger") and msg.get("user_id"):
+            return msg.get("user_id")
+    return globals.current_user_id.get()
+
+
+def _clean_heartbeat_text(text: str, max_len: int = 220) -> str:
+    text = clean_thinking_tags(str(text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0].rstrip() + "..."
+    return text
+
+
+def _is_excluded_heartbeat_context(text: str) -> bool:
+    return bool(_HEARTBEAT_EXCLUDED_CONTEXT_RE.search(text or ""))
+
+
+def _extract_heartbeat_hooks(history, max_hooks: int = 5) -> list[str]:
+    hooks = []
+    seen = set()
+    for msg in reversed(list(history)[-30:]):
+        if msg.get("is_heartbeat_trigger") or msg.get("is_reaction_trigger"):
+            continue
+        if msg.get("role") not in {"user", "assistant"}:
+            continue
+
+        content = _clean_heartbeat_text(msg.get("content"))
+        if not content or _is_excluded_heartbeat_context(content):
+            continue
+        if not _HEARTBEAT_HOOK_RE.search(content):
+            continue
+
+        sender = msg.get("sender_name") or ("Assistant" if msg.get("role") == "assistant" else "User")
+        hook = f"- {sender}: {content}"
+        hook_key = hook.lower()
+        if hook_key in seen:
+            continue
+        hooks.append(hook)
+        seen.add(hook_key)
+        if len(hooks) >= max_hooks:
+            break
+
+    hooks.reverse()
+    return hooks
+
+
+def _filter_heartbeat_memory(memory_text: str, max_lines: int = 12) -> str:
+    lines = []
+    for raw_line in str(memory_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or _is_excluded_heartbeat_context(line):
+            continue
+        lines.append(line)
+        if len(lines) >= max_lines:
+            break
+    return "\n".join(lines)
+
+
+def _format_heartbeat_duration(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+async def build_heartbeat_context_packet(chat_id: int, now: datetime, silence_seconds: float) -> str:
+    history = globals.chat_histories.get(chat_id, [])
+    hooks = _extract_heartbeat_hooks(history)
+
+    user_id = _last_user_id_from_history(history)
+    memory_context = ""
+    if user_id:
+        try:
+            memory_query = (
+                "heartbeat check-in: unresolved follow-ups, recent projects, household plans, "
+                "important personal context, and natural reasons to circle back"
+            )
+            memory_context = _filter_heartbeat_memory(await retrieve_relevant_memories(memory_query, user_id))
+        except Exception as e:
+            logging.warning("⚠️ HEARTBEAT: Unable to retrieve memory context: %s", e)
+
+    weather_alerts = ""
+    if ENABLE_WEATHER:
+        try:
+            weather_alerts = await get_noaa_weather_alerts()
+        except Exception as e:
+            logging.warning("⚠️ HEARTBEAT: Unable to retrieve weather alerts: %s", e)
+
+    daily_count = _heartbeat_daily_count(chat_id, now)
+    packet = [
+        "Heartbeat context:",
+        f"- Silence duration: {_format_heartbeat_duration(silence_seconds)}",
+        f"- Proactive messages sent today: {daily_count} / {HEARTBEAT_DAILY_PROACTIVE_LIMIT}",
+        "",
+        "Recent conversation hooks:",
+        "\n".join(hooks) if hooks else "None found.",
+        "",
+        "Relevant memory/history:",
+        memory_context if memory_context else "None found.",
+        "",
+        "Weather alerts:",
+        weather_alerts if weather_alerts else "None.",
+    ]
+    return "\n".join(packet)
+
+
 async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     """Callback for Telegram JobQueue that runs periodically to check if the bot should spontaneously send a message."""
     if not ENABLE_HEARTBEAT:
@@ -627,40 +820,28 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
     
     # Check if current time falls within user's sleep window
     try:
-        from datetime import time
-        start_h, start_m = map(int, HEARTBEAT_SLEEP_START.split(':'))
-        end_h, end_m = map(int, HEARTBEAT_SLEEP_END.split(':'))
-        start_time = time(start_h, start_m)
-        end_time = time(end_h, end_m)
-        curr_time = now.time()
-        
-        is_asleep = False
-        if start_time <= end_time:
-            if start_time <= curr_time <= end_time:
-                is_asleep = True
-        else:
-            if curr_time >= start_time or curr_time <= end_time:
-                is_asleep = True
-                
-        if is_asleep:
+        if _is_heartbeat_sleep_window(now):
             logging.debug(f"💓 HEARTBEAT: Suppressed check-in (inside sleep window: {HEARTBEAT_SLEEP_START}-{HEARTBEAT_SLEEP_END})")
             return
     except Exception as e:
         logging.error(f"❌ HEARTBEAT: Error checking sleep window range: {e}")
         
-    last_msg = history[-1]
-    last_time = last_msg.get("timestamp")
-    
+    last_time = _last_chat_activity(history)
     if not last_time:
-        last_msg["timestamp"] = now
         return
         
     elapsed = (now - last_time).total_seconds()
     if elapsed > HEARTBEAT_SILENCE_THRESHOLD_SECONDS:
-        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} silent for {elapsed:.1f}s, evaluating check-in...")
-        await handle_heartbeat_trigger(group_chat_id)
+        suppression_reason = _heartbeat_suppression_reason(group_chat_id, now)
+        if suppression_reason:
+            logging.debug("💓 HEARTBEAT: Suppressed check-in (%s).", suppression_reason)
+            return
 
-async def handle_heartbeat_trigger(chat_id: int):
+        logging.info(f"💓 HEARTBEAT: Chat {group_chat_id} silent for {elapsed:.1f}s, evaluating check-in...")
+        _heartbeat_last_evaluation[group_chat_id] = now
+        await handle_heartbeat_trigger(group_chat_id, elapsed)
+
+async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
     """Triggers the model to potentially circle back or check in on a silent chat."""
     globals.TARGET_CHAT_ID.set(chat_id)
     
@@ -676,13 +857,22 @@ async def handle_heartbeat_trigger(chat_id: int):
                 break
                 
     globals.CURRENT_THREAD_ID.set(message_thread_id)
+
+    now = datetime.now(USER_TIMEZONE)
+    if silence_seconds is None:
+        last_time = _last_chat_activity(globals.chat_histories.get(chat_id, []))
+        silence_seconds = _seconds_since(now, last_time) if last_time else 0
+
+    context_packet = await build_heartbeat_context_packet(chat_id, now, silence_seconds)
     
     trigger_content = (
         f"[System Trigger (Heartbeat)]: It has been several hours since the last message in this chat. "
-        f"Review the conversation history. You should be extremely conservative about initiating contact. "
-        f"Only send a message if there is an important outstanding question, a topic you promised to follow up on, "
-        f"or a highly natural reason to check in. If the conversation has reached a natural pause, or if a human "
-        f"would typically let it rest, you MUST reply with exactly 'DONE' to remain completely silent. Do not send conversational filler."
+        f"Review the conversation history and the private context below. Be selective and human-like. "
+        f"Send one short, natural message only if there is a timely, personally relevant, or socially natural reason to check in. "
+        f"Good reasons include an unresolved thread, a prior promise to follow up, a relevant remembered topic, or an active weather alert. "
+        f"Do not summarize the private context, mention the trigger, or perform additional lookups. "
+        f"If the message would be generic filler, or if the conversation has reached a natural pause, "
+        f"you MUST reply with exactly 'DONE' to remain completely silent.\n\n{context_packet}"
     )
     
     trigger_msg = {
@@ -695,7 +885,7 @@ async def handle_heartbeat_trigger(chat_id: int):
     globals.chat_histories[chat_id].append(trigger_msg)
     
     try:
-        response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id])
+        response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id], allow_tools=False)
     except Exception as e:
         logging.error(f"Error executing heartbeat engine: {e}")
         response_text = "DONE"
@@ -711,17 +901,12 @@ async def handle_heartbeat_trigger(chat_id: int):
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
         logging.debug(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
-        if globals.chat_histories[chat_id]:
-            globals.chat_histories[chat_id][-1]["timestamp"] = datetime.now(USER_TIMEZONE)
+        return
+
+    if not clean_response:
+        logging.debug(f"🤫 HEARTBEAT: Chat {chat_id} produced an empty response; remaining silent.")
         return
         
-    globals.chat_histories[chat_id].append({
-        "role": "assistant",
-        "content": response_text,
-        "message_thread_id": message_thread_id,
-        "timestamp": datetime.now(USER_TIMEZONE)
-    })
-    
     reply_to_id = None
     for msg in reversed(globals.chat_histories[chat_id]):
         if msg.get("message_id"):
@@ -731,9 +916,15 @@ async def handle_heartbeat_trigger(chat_id: int):
     try:
         sent_msgs = await send_safe_large_message_as_reply(chat_id, clean_response, reply_to_id, message_thread_id)
         if sent_msgs:
-            last_entry = globals.chat_histories[chat_id][-1]
-            last_entry["message_ids"] = [m.message_id for m in sent_msgs]
-            last_entry["message_id"] = sent_msgs[-1].message_id
+            _record_heartbeat_proactive(chat_id, datetime.now(USER_TIMEZONE))
+            globals.chat_histories[chat_id].append({
+                "role": "assistant",
+                "content": response_text,
+                "message_thread_id": message_thread_id,
+                "timestamp": datetime.now(USER_TIMEZONE),
+                "message_ids": [m.message_id for m in sent_msgs],
+                "message_id": sent_msgs[-1].message_id,
+            })
     except Exception as e:
         logging.error(f"Failed to send heartbeat message: {e}")
 

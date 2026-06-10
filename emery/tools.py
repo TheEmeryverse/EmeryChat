@@ -671,6 +671,27 @@ async def _get_noaa_alert_summary(forecast_zone: str):
     return alert_lines
 
 
+async def get_noaa_weather_alerts(location: str = None):
+    """Return active NOAA alerts only, with no ordinary forecast content."""
+    try:
+        resolved_location, error = await _resolve_weather_location(location)
+        if error:
+            logging.debug("⚠️ WEATHER ALERTS: %s", error)
+            return ""
+
+        lat = float(resolved_location["lat"])
+        lon = float(resolved_location["lon"])
+        point_meta = await _get_noaa_point_metadata(lat, lon)
+        alerts = await _get_noaa_alert_summary(point_meta.get("forecast_zone", ""))
+        if not alerts:
+            return ""
+
+        return f"Active weather alerts for {resolved_location['label']}:\n" + "\n".join(alerts)
+    except Exception as e:
+        logging.warning("⚠️ WEATHER ALERTS: Unable to fetch alert-only summary: %s", e)
+        return ""
+
+
 def _format_noaa_forecast(location_label: str, periods: list, timeframe: str, alerts: list):
     title = f"Weather Forecast for {location_label}:"
     if timeframe == "hourly":

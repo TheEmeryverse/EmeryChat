@@ -381,6 +381,9 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `ENABLE_HEARTBEAT` | `true` | Enables inactivity check-ins |
 | `HEARTBEAT_INTERVAL_SECONDS` | `3600` | Heartbeat polling interval |
 | `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Silence before check-in |
+| `HEARTBEAT_SILENT_RETRY_SECONDS` | `3600` | Cooldown after a silent heartbeat evaluation |
+| `HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS` | `14400` | Cooldown after a proactive heartbeat message |
+| `HEARTBEAT_DAILY_PROACTIVE_LIMIT` | `2` | Max proactive heartbeat messages per day |
 | `HEARTBEAT_SLEEP_START` | `21:30` | Quiet-hours start |
 | `HEARTBEAT_SLEEP_END` | `03:30` | Quiet-hours end |
 

@@ -86,6 +86,9 @@ DEFAULT_ENV = {
     "MEMORY_THRESHOLD": "4000",
     "HEARTBEAT_INTERVAL_SECONDS": "3600",
     "HEARTBEAT_SILENCE_THRESHOLD_SECONDS": "14400",
+    "HEARTBEAT_SILENT_RETRY_SECONDS": "3600",
+    "HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS": "14400",
+    "HEARTBEAT_DAILY_PROACTIVE_LIMIT": "2",
     "HEARTBEAT_SLEEP_START": "21:30",
     "HEARTBEAT_SLEEP_END": "03:30",
     "NOAA_LAT": "",
@@ -641,6 +644,9 @@ def build_env_content(env_data):
         "MEMORY_THRESHOLD=" + env_value(env_data["MEMORY_THRESHOLD"]),
         "HEARTBEAT_INTERVAL_SECONDS=" + env_value(env_data["HEARTBEAT_INTERVAL_SECONDS"]),
         "HEARTBEAT_SILENCE_THRESHOLD_SECONDS=" + env_value(env_data["HEARTBEAT_SILENCE_THRESHOLD_SECONDS"]),
+        "HEARTBEAT_SILENT_RETRY_SECONDS=" + env_value(env_data["HEARTBEAT_SILENT_RETRY_SECONDS"]),
+        "HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS=" + env_value(env_data["HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS"]),
+        "HEARTBEAT_DAILY_PROACTIVE_LIMIT=" + env_value(env_data["HEARTBEAT_DAILY_PROACTIVE_LIMIT"]),
         "HEARTBEAT_SLEEP_START=" + maybe_quote(env_data["HEARTBEAT_SLEEP_START"]),
         "HEARTBEAT_SLEEP_END=" + maybe_quote(env_data["HEARTBEAT_SLEEP_END"]),
         "",
@@ -1015,6 +1021,9 @@ def ask_runtime(env_seed):
     env_seed["MEMORY_THRESHOLD"] = str(prompt_int("Memory threshold characters", parse_int(env_seed.get("MEMORY_THRESHOLD"), 4000)))
     env_seed["HEARTBEAT_INTERVAL_SECONDS"] = str(prompt_int("Heartbeat check interval seconds", parse_int(env_seed.get("HEARTBEAT_INTERVAL_SECONDS"), 3600)))
     env_seed["HEARTBEAT_SILENCE_THRESHOLD_SECONDS"] = str(prompt_int("Heartbeat silence threshold seconds", parse_int(env_seed.get("HEARTBEAT_SILENCE_THRESHOLD_SECONDS"), 14400)))
+    env_seed["HEARTBEAT_SILENT_RETRY_SECONDS"] = str(prompt_int("Heartbeat silent retry cooldown seconds", parse_int(env_seed.get("HEARTBEAT_SILENT_RETRY_SECONDS"), 3600)))
+    env_seed["HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS"] = str(prompt_int("Heartbeat proactive message cooldown seconds", parse_int(env_seed.get("HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS"), 14400)))
+    env_seed["HEARTBEAT_DAILY_PROACTIVE_LIMIT"] = str(prompt_int("Heartbeat daily proactive message limit", parse_int(env_seed.get("HEARTBEAT_DAILY_PROACTIVE_LIMIT"), 2)))
     env_seed["HEARTBEAT_SLEEP_START"] = prompt_text("Heartbeat quiet-hours start", env_seed.get("HEARTBEAT_SLEEP_START"))
     env_seed["HEARTBEAT_SLEEP_END"] = prompt_text("Heartbeat quiet-hours end", env_seed.get("HEARTBEAT_SLEEP_END"))
     return env_seed
