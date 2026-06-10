@@ -21,7 +21,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 
 from emery.config import (
-    MODEL_NAME, OLLAMA_URL, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
+    MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, SEARXNG_URL, NASA_API_KEY, GEMINI_API_KEY,
     IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,

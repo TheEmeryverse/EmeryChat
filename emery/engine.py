@@ -1,9 +1,10 @@
+import json
 import logging
 import re
 
 from telegram.error import BadRequest
 
-from emery.config import OLLAMA_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, OLLAMA_NUM_CTX, OLLAMA_NUM_GPU
+from emery.config import MAIN_MODEL_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, THINK
 from emery import tool_registry
 import emery.globals as globals
 from emery.helpers import get_current_system_prompt, normalize_gemma_thinking, clean_thinking_tags
@@ -37,6 +38,23 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
 
 def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
+
+
+def _extract_response_message(response_json: dict) -> dict:
+    choices = response_json.get("choices")
+    if isinstance(choices, list) and choices:
+        return choices[0].get("message") or {}
+    return response_json.get("message", {})
+
+
+def _normalize_tool_arguments(arguments):
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            logging.warning("⚠️ ENGINE: Tool arguments were not valid JSON: %r", arguments[:200])
+            return {}
+    return arguments or {}
 
 
 TOOL_STATUS_MESSAGES = {
@@ -103,10 +121,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     # Prune past tool responses to prevent context bloat and speed up local inference prefill
     prune_past_tool_responses(history_buffer)
 
-    url = OLLAMA_URL
-    ctx_size = OLLAMA_NUM_CTX
-
-    
+    url = MAIN_MODEL_URL
     # Find the latest user query and sender info from the history buffer
     user_query = ""
     sender_user_id = None
@@ -186,16 +201,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
             "model": model_to_use,
             "messages": full_context,
             "stream": False,
-            "keep_alive": -1,
-            "think": True,
-            "options": {
-                "num_ctx": ctx_size,
-                "temperature": 0.8,
-                "top_p": 0.9,
-                "num_gpu": OLLAMA_NUM_GPU,
-                "num_thread": 16
-            }
+            "max_tokens": 8192,
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "top_k": 20,
         }
+
+        if THINK:
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
         
         if allow_tools and tools_schema:
             payload["tools"] = tools_schema
@@ -206,14 +219,14 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                 r = await globals.http_client.post(url, json=payload, timeout=900)
             
             if r.status_code != 200:
-                logging.error(f"❌ ENGINE: Ollama returned {r.status_code} — {r.text[:200]}")
-                return "Ollama connection error.", False
+                logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
+                return "Main model connection error.", False
  
             res = r.json()
-            msg = res.get('message', {})
-            raw_content = msg.get('content', "")
+            msg = _extract_response_message(res)
+            raw_content = msg.get('content') or ""
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
-            reasoning = msg.get('thinking', "") or msg.get('reasoning', "")
+            reasoning = msg.get('reasoning_content', "") or msg.get('thinking', "") or msg.get('reasoning', "")
             if reasoning:
                 reasoning = _strip_id_prefix(reasoning)
                 thinking_timeline.append(_format_thinking_turn(loop_count, "Reasoning", reasoning))
@@ -221,13 +234,18 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                 thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
 
             if allow_tools and msg.get("tool_calls"):
+                assistant_tool_msg = {
+                    "role": msg.get("role", "assistant"),
+                    "content": cleaned_msg_content if cleaned_msg_content != raw_content else msg.get("content"),
+                    "tool_calls": msg["tool_calls"],
+                }
                 if cleaned_msg_content != raw_content:
-                    msg["content"] = cleaned_msg_content
-                history_buffer.append(msg)
-                ollama_history.append(msg)
-                for tc in msg['tool_calls']:
+                    assistant_tool_msg["content"] = cleaned_msg_content
+                history_buffer.append(assistant_tool_msg)
+                ollama_history.append(assistant_tool_msg)
+                for tc in assistant_tool_msg['tool_calls']:
                     fn = tc['function']['name']
-                    args = tc['function'].get('arguments', {})
+                    args = _normalize_tool_arguments(tc['function'].get('arguments', {}))
                     
                     if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
                         status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")

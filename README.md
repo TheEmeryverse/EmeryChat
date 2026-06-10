@@ -127,9 +127,9 @@ Recommended local model roles:
 - `lfm2.5:8b`: excellent fast text model for coprocessor work when you want speed with strong instruction following.
 - `nomic-embed-text`: embedding model for semantic memory retrieval.
 
-By default the app expects Ollama-compatible chat endpoints such as:
+By default the app expects a primary OpenAI-compatible chat-completions endpoint and Ollama-compatible secondary endpoints such as:
 
-- `OLLAMA_URL=http://localhost:11434/api/chat`
+- `MAIN_MODEL_URL=http://127.0.0.1:8081/v1/chat/completions`
 - `FAST_OLLAMA_URL=http://localhost:11434/api/chat`
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
 - `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
@@ -343,7 +343,7 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | --- | --- |
 | `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
 | `MODEL_ID` | Primary model name |
-| `OLLAMA_URL` | Main model chat endpoint |
+| `MAIN_MODEL_URL` | Main model chat endpoint |
 
 Telegram access is fail-closed by default. Add your Telegram user ID to `config/users.json` through the setup wizard, or explicitly set `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true` if you want anyone who can message the bot to use it.
 
