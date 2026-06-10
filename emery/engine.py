@@ -8,7 +8,7 @@ from telegram.error import BadRequest
 from emery.config import MAIN_MODEL_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, THINK
 from emery import tool_registry
 import emery.globals as globals
-from emery.helpers import get_current_system_prompt, get_stable_system_prompt, normalize_gemma_thinking, clean_thinking_tags
+from emery.helpers import get_stable_system_prompt, normalize_gemma_thinking, clean_thinking_tags
 from emery.logging_utils import format_logging_payload
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -68,6 +68,10 @@ def _hash_prompt_part(messages: list[dict], chat_template_kwargs: dict | None) -
         "chat_template_kwargs": chat_template_kwargs or {},
     }
     return hashlib.sha256(_stable_json(hash_payload).encode("utf-8")).hexdigest()[:16]
+
+
+def _hash_stable_data(data) -> str:
+    return hashlib.sha256(_stable_json(data).encode("utf-8")).hexdigest()[:16]
 
 
 def _approx_prompt_chars(messages: list[dict]) -> int:
@@ -146,12 +150,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         
     chat_template_kwargs = {"enable_thinking": bool(THINK)}
     stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
-    dynamic_suffix = [
-        {
-            "role": "user",
-            "content": await get_current_system_prompt(user_query, sender_user_id),
-        }
-    ]
     voice_sent_via_tool = False
     thinking_timeline = []
     
@@ -210,17 +208,31 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         ollama_history.append(clean_msg)
     
     for loop_count in range(TOOL_LOOP):
-        full_context = stable_prefix + dynamic_suffix + ollama_history
+        full_context = stable_prefix + ollama_history
         stable_prefix_hash = _hash_prompt_part(stable_prefix, chat_template_kwargs)
+        tool_schema_hash = _hash_stable_data(tools_schema if allow_tools and tools_schema else [])
+        request_static_hash = _hash_stable_data({
+            "model": model_to_use,
+            "url": url,
+            "chat_template_kwargs": chat_template_kwargs,
+            "tools": tools_schema if allow_tools and tools_schema else [],
+        })
         prompt_chars = _approx_prompt_chars(full_context)
+        first_roles = ",".join(msg.get("role", "?") for msg in full_context[:5])
+        last_roles = ",".join(msg.get("role", "?") for msg in full_context[-5:])
         logging.info(
-            "🧩 PROMPT CACHE: stable_prefix_hash=%s stable_messages=%d dynamic_messages=%d history_messages=%d total_messages=%d approx_chars=%d history_trimmed=%s model=%s url=%s thinking=%s",
+            "🧩 PROMPT CACHE: stable_prefix_hash=%s tool_schema_hash=%s request_static_hash=%s tools_count=%d stable_messages=%d dynamic_messages=%d history_messages=%d total_messages=%d approx_chars=%d first_roles=%s last_roles=%s history_trimmed=%s model=%s url=%s thinking=%s",
             stable_prefix_hash,
+            tool_schema_hash,
+            request_static_hash,
+            len(tools_schema) if allow_tools and tools_schema else 0,
             len(stable_prefix),
-            len(dynamic_suffix),
+            0,
             len(ollama_history),
             len(full_context),
             prompt_chars,
+            first_roles,
+            last_roles,
             False,
             model_to_use,
             url,

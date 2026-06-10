@@ -21,7 +21,7 @@ from emery.config import (
 import emery.globals as globals
 from emery.helpers import (
     emery_format, transcribe_audio, compress_image_bytes,
-    get_image_description, clean_thinking_tags, telegram_escape
+    get_image_description, clean_thinking_tags, telegram_escape, get_current_system_prompt
 )
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
@@ -271,10 +271,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preview = safe_preview(replied_text, max_len=80)
         reply_info = f" (Replying to message ID {reply_to_id}: '{preview}')"
 
+    runtime_context = await get_current_system_prompt(content_text, update.effective_user.id)
+    history_content = f"{runtime_context}\n\n# New User Message\n{content}{reply_info}"
+
     logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {safe_preview(content_text, max_len=120)}{reply_info}")
     globals.chat_histories[chat_id].append({
         "role": "user", 
-        "content": content + reply_info,
+        "content": history_content,
         "message_id": update.message.message_id,
         "user_id": update.effective_user.id,
         "sender_name": sender_name,
