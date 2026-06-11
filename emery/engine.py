@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 
 from telegram.error import BadRequest
 
@@ -82,6 +83,52 @@ def _truncate_tool_content(content: str, max_len: int = 500) -> str:
     if len(content) <= max_len:
         return content
     return content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
+
+
+def _first_number(mapping: dict, *keys):
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, (int, float)):
+            return value
+    return None
+
+
+def _format_perf_rate(tokens, millis) -> str:
+    if not tokens or not millis:
+        return "n/a"
+    seconds = millis / 1000
+    if seconds <= 0:
+        return "n/a"
+    return f"{tokens / seconds:.2f} t/s"
+
+
+def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
+    usage = response_json.get("usage") or {}
+    timings = response_json.get("timings") or response_json.get("timing") or {}
+
+    prompt_tokens = _first_number(usage, "prompt_tokens", "prompt_n")
+    completion_tokens = _first_number(usage, "completion_tokens", "completion_n", "predicted_n")
+    total_tokens = _first_number(usage, "total_tokens")
+
+    llama_prompt_n = _first_number(timings, "prompt_n", "prompt_tokens")
+    llama_prompt_ms = _first_number(timings, "prompt_ms", "prompt_time_ms")
+    llama_predicted_n = _first_number(timings, "predicted_n", "completion_n", "predicted_tokens")
+    llama_predicted_ms = _first_number(timings, "predicted_ms", "predicted_time_ms", "completion_ms")
+
+    logging.info(
+        "⚡ MAIN MODEL PERF: wall=%.2fs usage_prompt=%s usage_completion=%s usage_total=%s llama_prompt_n=%s llama_prompt_ms=%s llama_prompt_rate=%s llama_predicted_n=%s llama_predicted_ms=%s llama_predicted_rate=%s timings_present=%s",
+        wall_seconds,
+        prompt_tokens if prompt_tokens is not None else "n/a",
+        completion_tokens if completion_tokens is not None else "n/a",
+        total_tokens if total_tokens is not None else "n/a",
+        llama_prompt_n if llama_prompt_n is not None else "n/a",
+        f"{llama_prompt_ms:.2f}" if llama_prompt_ms is not None else "n/a",
+        _format_perf_rate(llama_prompt_n, llama_prompt_ms),
+        llama_predicted_n if llama_predicted_n is not None else "n/a",
+        f"{llama_predicted_ms:.2f}" if llama_predicted_ms is not None else "n/a",
+        _format_perf_rate(llama_predicted_n, llama_predicted_ms),
+        bool(timings),
+    )
 
 
 TOOL_STATUS_MESSAGES = {
@@ -256,13 +303,16 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
             async with globals.main_model_lock:
+                request_started = time.perf_counter()
                 r = await globals.http_client.post(url, json=payload, timeout=900)
+                request_wall_seconds = time.perf_counter() - request_started
             
             if r.status_code != 200:
                 logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
                 return "Main model connection error.", False
  
             res = r.json()
+            _log_main_model_perf(res, request_wall_seconds)
             msg = _extract_response_message(res)
             raw_content = msg.get('content') or ""
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
