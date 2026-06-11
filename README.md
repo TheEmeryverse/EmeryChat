@@ -134,6 +134,68 @@ By default the app expects a primary OpenAI-compatible chat-completions endpoint
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
 - `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
 
+#### llama.cpp main-model backend
+
+The main model path is optimized for a local `llama-server` OpenAI-compatible endpoint. EmeryChat keeps the reusable prompt prefix stable and keeps chat history append-only so llama.cpp can restore prompt-cache checkpoints instead of reprocessing the full prompt each turn.
+
+For Qwen3.6 GGUF models on llama.cpp, use prompt caching and full SWA cache support. A known-good baseline:
+
+```bash
+./build/bin/llama-server \
+  -m /path/to/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --host 0.0.0.0 \
+  --port 8081 \
+  --device Vulkan1 \
+  --split-mode none \
+  --ctx-size 65536 \
+  --parallel 1 \
+  --gpu-layers 999 \
+  --cpu-moe \
+  --no-mmap \
+  --kv-offload \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --batch-size 1024 \
+  --ubatch-size 256 \
+  --flash-attn auto \
+  --swa-full \
+  --cache-prompt \
+  --cache-reuse 64 \
+  --ctx-checkpoints 256 \
+  --checkpoint-min-step 32 \
+  --cache-ram -1 \
+  --cache-idle-slots
+```
+
+Keep these details intact:
+
+- Use the OpenAI-compatible endpoint: `http://127.0.0.1:8081/v1/chat/completions`.
+- Set `MODEL_ID=local` unless your llama.cpp server expects a different model name.
+- Keep `--swa-full` for Qwen3.6/SWA models; without it, llama.cpp may invalidate checkpoints and force full prompt reprocessing.
+- Keep `--cache-prompt`, `--cache-reuse`, `--ctx-checkpoints`, and `--checkpoint-min-step` enabled for prompt reuse.
+- Do not wrap or split long flags accidentally; for example, `--ctx-checkpoints` and `--cache-idle-slots` must remain single flags.
+
+Healthy llama.cpp logs should show checkpoint restoration and a small suffix eval after the first turn:
+
+```text
+restored context checkpoint ...
+prompt eval time = ... / small-number-of-tokens
+```
+
+Avoid repeated logs like:
+
+```text
+forcing full prompt re-processing due to lack of cache data
+```
+
+EmeryChat logs prompt-cache diagnostics for each main-model request:
+
+```text
+PROMPT CACHE: stable_prefix_hash=... tool_schema_hash=... request_static_hash=... dynamic_messages=0 ...
+```
+
+During normal operation, `stable_prefix_hash`, `tool_schema_hash`, and `request_static_hash` should stay constant. `dynamic_messages=0` means dynamic context is appended inside the newest history event rather than inserted before reusable history.
+
 Optional services:
 
 - STT endpoint for voice transcription
@@ -372,7 +434,7 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
 
-Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. Prompt-cache diagnostics log the stable prefix hash and approximate prompt size for each main-model request.
+Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. This applies to normal chat turns, reaction-triggered evaluations, heartbeat evaluations, and scheduled jobs. Use `/clear` only when you intentionally want to reset the in-memory prompt context for that chat.
 
 ### Scheduler and heartbeat
 

@@ -613,6 +613,11 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
         logging.debug("🤫 REACTION: Suppressed response (model chose silence)")
+        globals.chat_histories[chat_id].append({
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": datetime.now(USER_TIMEZONE)
+        })
         return
         
     globals.chat_histories[chat_id].append({
@@ -900,10 +905,22 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
         logging.debug(f"🤫 HEARTBEAT: Chat {chat_id} remains silent.")
+        globals.chat_histories[chat_id].append({
+            "role": "assistant",
+            "content": response_text,
+            "message_thread_id": message_thread_id,
+            "timestamp": datetime.now(USER_TIMEZONE),
+        })
         return
 
     if not clean_response:
         logging.debug(f"🤫 HEARTBEAT: Chat {chat_id} produced an empty response; remaining silent.")
+        globals.chat_histories[chat_id].append({
+            "role": "assistant",
+            "content": response_text,
+            "message_thread_id": message_thread_id,
+            "timestamp": datetime.now(USER_TIMEZONE),
+        })
         return
         
     reply_to_id = None

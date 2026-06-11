@@ -467,8 +467,30 @@ async def run_custom_job(context):
                 target_user_id=target_user_id,
             )
             
-        # Run the engine with the job prompt
-        res_text, _ = await emery_engine(deque([{"role": "user", "content": exec_prompt}]))
+        if chat_id not in globals.chat_histories:
+            globals.chat_histories[chat_id] = deque()
+
+        from emery.helpers import get_current_system_prompt
+
+        runtime_context = await get_current_system_prompt(exec_prompt, active_user_id)
+        now_dt = datetime.now(USER_TIMEZONE)
+        scheduled_trigger = {
+            "role": "user",
+            "content": (
+                f"{runtime_context}\n\n"
+                "# Scheduled Job Trigger\n"
+                f"[{now_dt.strftime('%A, %B %d, %Y at %I:%M %p')}] "
+                f"Run scheduled job '{description}' ({job_id}): {exec_prompt}"
+            ),
+            "user_id": active_user_id,
+            "is_scheduled_job_trigger": True,
+            "message_thread_id": message_thread_id,
+            "timestamp": now_dt,
+        }
+        globals.chat_histories[chat_id].append(scheduled_trigger)
+
+        # Run the engine against append-only chat history so llama.cpp can reuse prompt checkpoints.
+        res_text, _ = await emery_engine(globals.chat_histories[chat_id])
         # Send formatted reply
         sent_ok = await send_safe_job_message(
             context.bot,
@@ -506,6 +528,12 @@ async def run_custom_job(context):
                 chat_id,
                 message_thread_id,
             )
+        globals.chat_histories[chat_id].append({
+            "role": "assistant",
+            "content": res_text,
+            "message_thread_id": message_thread_id,
+            "timestamp": datetime.now(USER_TIMEZONE),
+        })
     except Exception as e:
         logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
         
