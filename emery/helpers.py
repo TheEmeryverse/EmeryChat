@@ -4,16 +4,17 @@ import io
 import html
 import markdown
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 import pytz
 from tghtml import TgHTML
 from PIL import Image
 
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
-    VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_OLLAMA_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
+    VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
-    OLLAMA_FAST_NUM_CTX, OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
+    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
     get_user_profile
 )
 import emery.globals as globals
@@ -110,44 +111,44 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     Queries the fast text coprocessor model on a secondary endpoint.
     Used to offload non-vision processing tasks from the main model.
     """
-    url = FAST_OLLAMA_URL
-    if not url.endswith("/api/chat"):
-        url = url.rstrip("/")
-        if not url.endswith("/api"):
-            url += "/api"
-        url += "/chat"
-
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    parsed_url = urlparse((FAST_MODEL_URL or "").strip())
+    normalized_path = parsed_url.path.rstrip("/")
+    if not normalized_path.endswith("/chat/completions"):
+        logging.error("❌ FAST MODEL: FAST_MODEL_URL must point at an OpenAI-compatible /chat/completions endpoint. Got: %s", FAST_MODEL_URL)
+        return ""
+
+    url = FAST_MODEL_URL.rstrip("/")
     payload = {
         "model": FAST_MODEL_ID,
         "messages": messages,
-        "stream": False,
-        "keep_alive": -1,
-        "think": True,
-        "options": {
-            "num_ctx": OLLAMA_FAST_NUM_CTX
-        }
+        "chat_template_kwargs": {"enable_thinking": True},
     }
-    
+
     try:
-        logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID}...")
+        logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID} via openai-compatible...")
         async with globals.fast_model_lock:
             r = await globals.http_client.post(url, json=payload, timeout=300)
         if r.status_code != 200:
             logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {safe_preview(r.text, max_len=240)}")
             return ""
-            
+
         data = r.json()
-        content = data.get('message', {}).get('content', "").strip()
-        
-        # Clean think tags if the model uses reasoning
-        content = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', content, flags=re.DOTALL).strip()
-        content = re.sub(r'</?[tT]hink>', '', content).strip()
-        
+        message = ((data.get("choices") or [{}])[0]).get("message", {})
+        content = message.get("content", "")
+
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+
+        content = clean_thinking_tags(normalize_gemma_thinking((content or "").strip()))
         return content
     except Exception as e:
         logging.error(f"❌ FAST MODEL: Crash querying {FAST_MODEL_ID}: {e}", exc_info=True)

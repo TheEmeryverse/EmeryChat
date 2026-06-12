@@ -30,10 +30,9 @@ DEFAULT_ENV = {
     "VISION_MODEL_ID": "gemma4:e4b",
     "EMBEDDING_MODEL_ID": "nomic-embed-text",
     "MAIN_MODEL_URL": "http://127.0.0.1:8081/v1/chat/completions",
-    "FAST_OLLAMA_URL": "http://localhost:11434/api/chat",
+    "FAST_MODEL_URL": "http://127.0.0.1:8082/v1/chat/completions",
     "VISION_OLLAMA_URL": "http://localhost:11434/api/chat",
     "EMBEDDING_OLLAMA_URL": "http://localhost:11434/api/embed",
-    "OLLAMA_FAST_NUM_CTX": "8192",
     "OLLAMA_VISION_NUM_CTX": "65536",
     "OPEN_WEBUI_KEY": "YOUR_OPEN_WEBUI_KEY",
     "STT_URL": "http://localhost:3000/api/v1/audio/transcriptions",
@@ -584,10 +583,9 @@ def build_env_content(env_data):
         "VISION_MODEL_ID=" + maybe_quote(env_data["VISION_MODEL_ID"]),
         "EMBEDDING_MODEL_ID=" + maybe_quote(env_data["EMBEDDING_MODEL_ID"]),
         "MAIN_MODEL_URL=" + maybe_quote(env_data["MAIN_MODEL_URL"]),
-        "FAST_OLLAMA_URL=" + maybe_quote(env_data["FAST_OLLAMA_URL"]),
+        "FAST_MODEL_URL=" + maybe_quote(env_data["FAST_MODEL_URL"]),
         "VISION_OLLAMA_URL=" + maybe_quote(env_data["VISION_OLLAMA_URL"]),
         "EMBEDDING_OLLAMA_URL=" + maybe_quote(env_data["EMBEDDING_OLLAMA_URL"]),
-        "OLLAMA_FAST_NUM_CTX=" + env_value(env_data["OLLAMA_FAST_NUM_CTX"]),
         "OLLAMA_VISION_NUM_CTX=" + env_value(env_data["OLLAMA_VISION_NUM_CTX"]),
         "",
         "OPEN_WEBUI_KEY=" + maybe_quote(env_data["OPEN_WEBUI_KEY"]),
@@ -661,6 +659,7 @@ def derive_seed(args):
     if args.import_env:
         env_seed.update(load_dotenv_like(Path(args.import_env).expanduser()))
     env_seed["MAIN_MODEL_URL"] = env_seed.get("MAIN_MODEL_URL") or env_seed.get("OLLAMA_URL", DEFAULT_ENV["MAIN_MODEL_URL"])
+    env_seed["FAST_MODEL_URL"] = env_seed.get("FAST_MODEL_URL", DEFAULT_ENV["FAST_MODEL_URL"])
 
     if args.fresh:
         users_seed = clone_default(DEFAULT_USERS)
@@ -778,10 +777,10 @@ def ask_core(env_seed):
     use_fast = prompt_yes_no("Configure a separate fast text coprocessor model", True)
     if use_fast:
         env_seed["FAST_MODEL_ID"] = prompt_text("Fast model ID", env_seed.get("FAST_MODEL_ID"), required=True)
-        env_seed["FAST_OLLAMA_URL"] = prompt_text("Fast model URL", env_seed.get("FAST_OLLAMA_URL"), required=True, validator=validate_url_prompt)
+        env_seed["FAST_MODEL_URL"] = prompt_text("Fast model URL", env_seed.get("FAST_MODEL_URL"), required=True, validator=validate_url_prompt)
     else:
         env_seed["FAST_MODEL_ID"] = DEFAULT_ENV["FAST_MODEL_ID"]
-        env_seed["FAST_OLLAMA_URL"] = DEFAULT_ENV["FAST_OLLAMA_URL"]
+        env_seed["FAST_MODEL_URL"] = DEFAULT_ENV["FAST_MODEL_URL"]
 
     use_vision = prompt_yes_no("Configure a separate vision model", True)
     if use_vision:
@@ -789,7 +788,7 @@ def ask_core(env_seed):
         env_seed["VISION_OLLAMA_URL"] = prompt_text("Vision model URL", env_seed.get("VISION_OLLAMA_URL"), required=True, validator=validate_url_prompt)
     else:
         env_seed["VISION_MODEL_ID"] = env_seed.get("FAST_MODEL_ID", env_seed.get("MODEL_ID", DEFAULT_ENV["MODEL_ID"]))
-        env_seed["VISION_OLLAMA_URL"] = env_seed.get("FAST_OLLAMA_URL", DEFAULT_ENV["VISION_OLLAMA_URL"])
+        env_seed["VISION_OLLAMA_URL"] = DEFAULT_ENV["VISION_OLLAMA_URL"]
 
     use_embeddings = prompt_yes_no("Configure a separate embedding model", True)
     if use_embeddings:
@@ -797,7 +796,7 @@ def ask_core(env_seed):
         env_seed["EMBEDDING_OLLAMA_URL"] = prompt_text("Embedding model URL", env_seed.get("EMBEDDING_OLLAMA_URL"), required=True, validator=validate_url_prompt)
     else:
         env_seed["EMBEDDING_MODEL_ID"] = env_seed.get("FAST_MODEL_ID", DEFAULT_ENV["FAST_MODEL_ID"])
-        env_seed["EMBEDDING_OLLAMA_URL"] = env_seed.get("FAST_OLLAMA_URL", DEFAULT_ENV["FAST_OLLAMA_URL"])
+        env_seed["EMBEDDING_OLLAMA_URL"] = DEFAULT_ENV["EMBEDDING_OLLAMA_URL"]
     return env_seed
 
 

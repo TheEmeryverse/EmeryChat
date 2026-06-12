@@ -127,12 +127,14 @@ Recommended local model roles:
 - `lfm2.5:8b`: excellent fast text model for coprocessor work when you want speed with strong instruction following.
 - `nomic-embed-text`: embedding model for semantic memory retrieval.
 
-By default the app expects a primary OpenAI-compatible chat-completions endpoint and Ollama-compatible secondary endpoints such as:
+By default the app expects a primary OpenAI-compatible chat-completions endpoint plus configurable secondary endpoints. A common local split is:
 
 - `MAIN_MODEL_URL=http://127.0.0.1:8081/v1/chat/completions`
-- `FAST_OLLAMA_URL=http://localhost:11434/api/chat`
+- `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
 - `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
+
+The fast text coprocessor uses an OpenAI-compatible chat-completions endpoint. For a local llama.cpp server, point it at `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`.
 
 #### llama.cpp main-model backend
 
@@ -414,7 +416,7 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FAST_MODEL_ID` | `gemma4:e4b` | Fast text coprocessor model |
-| `FAST_OLLAMA_URL` | `http://localhost:11434/api/chat` | Fast text coprocessor endpoint |
+| `FAST_MODEL_URL` | `http://127.0.0.1:8082/v1/chat/completions` | Fast text coprocessor endpoint |
 | `VISION_MODEL_ID` | `gemma4:e4b` | Vision/multimodal model |
 | `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
@@ -430,7 +432,6 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS` | `false` | Allows Telegram users not listed in `config/users.json` |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
-| `OLLAMA_FAST_NUM_CTX` | `8192` | Context window for the fast coprocessor model |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
 
