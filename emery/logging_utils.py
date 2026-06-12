@@ -54,3 +54,59 @@ def format_logging_payload(value, max_len: int = 240) -> str:
     except TypeError:
         text = str(sanitize_for_logging(value))
     return safe_preview(text, max_len=max_len)
+
+
+def first_number(mapping: dict, *keys):
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, (int, float)):
+            return value
+    return None
+
+
+def format_perf_rate(tokens, millis) -> str:
+    if not tokens or not millis:
+        return "n/a"
+    seconds = millis / 1000
+    if seconds <= 0:
+        return "n/a"
+    return f"{tokens / seconds:.2f} t/s"
+
+
+def format_token_count(value) -> str:
+    if value is None:
+        return "n/a"
+    if value >= 1000:
+        return f"{value / 1000:.2f}k"
+    return str(int(value))
+
+
+def format_duration_ms(value) -> str:
+    if value is None:
+        return "n/a"
+    if value >= 1000:
+        return f"{value / 1000:.2f}s"
+    return f"{value:.0f}ms"
+
+
+def format_llama_perf_line(label: str, response_json: dict, wall_seconds: float) -> str:
+    usage = response_json.get("usage") or {}
+    timings = response_json.get("timings") or response_json.get("timing") or {}
+
+    prompt_tokens = first_number(usage, "prompt_tokens", "prompt_n")
+    completion_tokens = first_number(usage, "completion_tokens", "completion_n", "predicted_n")
+    total_tokens = first_number(usage, "total_tokens")
+    cached_tokens = first_number(usage.get("prompt_tokens_details") or {}, "cached_tokens")
+
+    llama_prompt_n = first_number(timings, "prompt_n", "prompt_tokens")
+    llama_prompt_ms = first_number(timings, "prompt_ms", "prompt_time_ms")
+    llama_predicted_n = first_number(timings, "predicted_n", "completion_n", "predicted_tokens")
+    llama_predicted_ms = first_number(timings, "predicted_ms", "predicted_time_ms", "completion_ms")
+
+    cache_fragment = f" | cache {format_token_count(cached_tokens)}" if cached_tokens is not None else ""
+    return (
+        f"⚡ {label}: in {format_token_count(prompt_tokens)} | out {format_token_count(completion_tokens)} | "
+        f"total {format_token_count(total_tokens)} | wall {wall_seconds:.2f}s{cache_fragment} | "
+        f"prefill {format_perf_rate(llama_prompt_n, llama_prompt_ms)} ({format_token_count(llama_prompt_n)}, {format_duration_ms(llama_prompt_ms)}) | "
+        f"decode {format_perf_rate(llama_predicted_n, llama_predicted_ms)} ({format_token_count(llama_predicted_n)}, {format_duration_ms(llama_predicted_ms)})"
+    )

@@ -10,7 +10,7 @@ from emery.config import MAIN_MODEL_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, THINK
 from emery import tool_registry
 import emery.globals as globals
 from emery.helpers import get_stable_system_prompt, normalize_gemma_thinking, clean_thinking_tags
-from emery.logging_utils import format_logging_payload
+from emery.logging_utils import format_logging_payload, format_llama_perf_line
 from emery.telegram_utils import normalize_message_thread_id
 
 AVAILABLE_TOOLS = tool_registry.AVAILABLE_TOOLS
@@ -85,50 +85,8 @@ def _truncate_tool_content(content: str, max_len: int = 500) -> str:
     return content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
 
 
-def _first_number(mapping: dict, *keys):
-    for key in keys:
-        value = mapping.get(key)
-        if isinstance(value, (int, float)):
-            return value
-    return None
-
-
-def _format_perf_rate(tokens, millis) -> str:
-    if not tokens or not millis:
-        return "n/a"
-    seconds = millis / 1000
-    if seconds <= 0:
-        return "n/a"
-    return f"{tokens / seconds:.2f} t/s"
-
-
 def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
-    usage = response_json.get("usage") or {}
-    timings = response_json.get("timings") or response_json.get("timing") or {}
-
-    prompt_tokens = _first_number(usage, "prompt_tokens", "prompt_n")
-    completion_tokens = _first_number(usage, "completion_tokens", "completion_n", "predicted_n")
-    total_tokens = _first_number(usage, "total_tokens")
-
-    llama_prompt_n = _first_number(timings, "prompt_n", "prompt_tokens")
-    llama_prompt_ms = _first_number(timings, "prompt_ms", "prompt_time_ms")
-    llama_predicted_n = _first_number(timings, "predicted_n", "completion_n", "predicted_tokens")
-    llama_predicted_ms = _first_number(timings, "predicted_ms", "predicted_time_ms", "completion_ms")
-
-    logging.info(
-        "⚡ MAIN MODEL PERF: wall=%.2fs usage_prompt=%s usage_completion=%s usage_total=%s llama_prompt_n=%s llama_prompt_ms=%s llama_prompt_rate=%s llama_predicted_n=%s llama_predicted_ms=%s llama_predicted_rate=%s timings_present=%s",
-        wall_seconds,
-        prompt_tokens if prompt_tokens is not None else "n/a",
-        completion_tokens if completion_tokens is not None else "n/a",
-        total_tokens if total_tokens is not None else "n/a",
-        llama_prompt_n if llama_prompt_n is not None else "n/a",
-        f"{llama_prompt_ms:.2f}" if llama_prompt_ms is not None else "n/a",
-        _format_perf_rate(llama_prompt_n, llama_prompt_ms),
-        llama_predicted_n if llama_predicted_n is not None else "n/a",
-        f"{llama_predicted_ms:.2f}" if llama_predicted_ms is not None else "n/a",
-        _format_perf_rate(llama_predicted_n, llama_predicted_ms),
-        bool(timings),
-    )
+    logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
 
 TOOL_STATUS_MESSAGES = {

@@ -18,7 +18,7 @@ from emery.config import (
     get_user_profile
 )
 import emery.globals as globals
-from emery.logging_utils import safe_preview
+from emery.logging_utils import safe_preview, format_llama_perf_line
 
 def normalize_gemma_thinking(text: str) -> str:
     if not text:
@@ -65,6 +65,10 @@ def clean_thinking_tags(text: str) -> str:
     text = text.replace(r'\<|channel&gt;thought', '')
     
     return text.strip()
+
+
+def _log_fast_model_perf(response_json: dict, wall_seconds: float) -> None:
+    logging.info(format_llama_perf_line("FAST", response_json, wall_seconds))
 
 
 def telegram_escape(text) -> str:
@@ -131,13 +135,16 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
 
     try:
         logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID} via openai-compatible...")
+        request_started = datetime.now().timestamp()
         async with globals.fast_model_lock:
             r = await globals.http_client.post(url, json=payload, timeout=300)
+        wall_seconds = datetime.now().timestamp() - request_started
         if r.status_code != 200:
             logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {safe_preview(r.text, max_len=240)}")
             return ""
 
         data = r.json()
+        _log_fast_model_perf(data, wall_seconds)
         message = ((data.get("choices") or [{}])[0]).get("message", {})
         content = message.get("content", "")
 
