@@ -14,7 +14,7 @@ from emery.config import (
     VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
-    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK,
+    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK, ENABLE_VOICE,
     get_user_profile
 )
 import emery.globals as globals
@@ -449,6 +449,14 @@ def get_stable_system_prompt() -> str:
             "\n- Use `description` as a short label, but keep all actionable details inside the stored `prompt`."
         )
 
+    voice_instruction = ""
+    if str(ENABLE_VOICE).lower() == "true":
+        voice_instruction = (
+            "\n- When using `speak_message`, write the tool text as a natural spoken voice memo script, not as written prose."
+            "\n- Voice memo scripts must not contain markdown, headings, titles, bullets, numbered lists, tables, section labels, emojis, or symbols."
+            "\n- Use conversational transitions between topics instead of labels like 'Today's News', 'Top Story', 'Domestic Job Market', or 'Conclusion'."
+        )
+
     coprocessor_instruction = (
         "\n- You operate in a dual-model topology."
         "\n- Use `delegate_to_coprocessor` for heavy text-only work such as summarization, extraction, classification, cleanup, or formatting when the source material is long, repetitive, or expensive to parse inline."
@@ -508,7 +516,7 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the user.
 - You exist as a disembodied layer of consciousness outside of the user's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{finance_instruction}{weather_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{voice_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{finance_instruction}{weather_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response."""

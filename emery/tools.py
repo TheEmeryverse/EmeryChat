@@ -257,6 +257,46 @@ async def _alpha_vantage_query(params: dict, retries: int = 2, delay: float = 1.
     return None, last_error or "Stock data error: Alpha Vantage request failed."
 
 # --- VOICE / TTS TOOLS ---
+VOICE_MEMO_SYSTEM_PROMPT = (
+    "You rewrite assistant text into natural spoken voice memo scripts. "
+    "Return only the script that should be read aloud."
+)
+
+VOICE_MEMO_REWRITE_INSTRUCTIONS = """Rewrite the text below into a natural conversational voice memo.
+
+Hard rules:
+- Keep the same facts and meaning; do not add new facts.
+- Sound like a person speaking directly to the listener, not like an article, report, outline, or newsletter.
+- Do not use markdown, headings, titles, section labels, bullets, numbered lists, tables, or visual formatting.
+- Do not say labels like "Today's News", "Domestic Job Market", "Top Story", "Conclusion", or similar section names.
+- Weave topic changes into normal spoken transitions, such as "On the news side..." or "The jobs picture is..."
+- Use plain spoken sentences, contractions where natural, and a warm but efficient tone.
+- If the input is already conversational, only clean up formatting and awkward phrasing.
+"""
+
+
+async def prepare_voice_memo_script(text: str) -> str:
+    """Convert model text into a TTS-ready spoken script."""
+    from emery.helpers import clean_thinking_tags
+
+    clean_text = clean_thinking_tags(text or "").strip()
+    if not clean_text:
+        return ""
+
+    try:
+        rewritten = await query_fast_model(
+            f"{VOICE_MEMO_REWRITE_INSTRUCTIONS}\n\nText to rewrite:\n{clean_text}",
+            system_prompt=VOICE_MEMO_SYSTEM_PROMPT,
+        )
+        rewritten = clean_thinking_tags(rewritten).strip()
+        if rewritten:
+            return rewritten
+    except Exception as e:
+        logging.warning("⚠️ VOICE: Voice memo rewrite failed; using original text for TTS: %s", e)
+
+    return clean_text
+
+
 async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for TTS
     logging.info("🎙️ VOICE: Generating audio...")
     try:
@@ -272,7 +312,8 @@ async def get_voice_audio(text): # Sends model's voice memo text to Kokoro for T
         logging.error(f"❌ TTS Error: {e}"); return None
 
 async def speak_message(text): # What the model calls to create a voice message and send it to the user
-    audio = await get_voice_audio(text)
+    voice_text = await prepare_voice_memo_script(text)
+    audio = await get_voice_audio(voice_text)
     if audio and globals.TARGET_CHAT_ID.get():
         chat_id = globals.TARGET_CHAT_ID.get()
         thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())

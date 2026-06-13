@@ -298,8 +298,17 @@ if is_enabled("ENABLE_VOICE"):
         "type": "function", 
         "function": {
             "name": "speak_message", 
-            "description": "Convert text to speech and send as a voice memo to User. Use this when User explicitly asks to 'speak', 'say', or 'send a voice message'. Do NOT use emojis or symbols in tool call! ***ONLY USE IF THE MOST CURRENT MESSAGE EXPLICITLY ASKS FOR SPOKEN CONTENT OR A VOICE MEMO***", 
-            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+            "description": "Convert text to speech and send as a voice memo to User. Use this when User explicitly asks to 'speak', 'say', or 'send a voice message'. The text must be a natural spoken script, like a person talking directly to the listener. Do NOT write it like an article, newsletter, report, outline, or written briefing. Do NOT include markdown, headings, titles, bullets, numbered lists, section labels, emojis, or symbols in the tool call. Use conversational transitions instead of labels like 'Today's News' or 'Domestic Job Market'. ***ONLY USE IF THE MOST CURRENT MESSAGE EXPLICITLY ASKS FOR SPOKEN CONTENT OR A VOICE MEMO***", 
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The spoken voice memo script only. No markdown, headings, titles, bullets, numbered lists, section labels, emojis, or symbols."
+                    }
+                },
+                "required": ["text"]
+            }
         }
     })
 

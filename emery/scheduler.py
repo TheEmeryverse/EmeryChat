@@ -82,8 +82,10 @@ def build_scheduled_execution_prompt(prompt: str | None, description: str | None
     voice_directive = ""
     if voice_memo_requested:
         voice_directive = (
-            "\n- A voice memo was requested for this scheduled job. Write the text briefing normally; "
-            "the scheduler will generate and send the voice memo after your response. Do not call `speak_message`."
+            "\n- A voice memo was requested for this scheduled job. Write the briefing as natural spoken prose from the start: "
+            "no markdown, headings, titles, bullets, numbered lists, tables, or section labels. "
+            "Use conversational transitions between topics instead of labels like 'Today's News' or 'Domestic Job Market'. "
+            "The scheduler will generate and send the voice memo after your response. Do not call `speak_message`."
         )
 
     return (
@@ -404,27 +406,14 @@ async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id:
 
 async def _send_scheduled_voice_memo(bot, chat_id: int, text: str, message_thread_id: int = None) -> bool:
     """Generate and send a voice memo for scheduled jobs that explicitly request one."""
-    from emery.helpers import clean_thinking_tags, query_fast_model
-    from emery.tools import get_voice_audio
+    from emery.helpers import clean_thinking_tags
+    from emery.tools import get_voice_audio, prepare_voice_memo_script
 
     clean_text = clean_thinking_tags(text or "").strip()
     if not clean_text:
         return False
 
-    voice_text = clean_text
-    try:
-        voice_text = await query_fast_model(
-            (
-                "Convert this scheduled-job briefing into a natural spoken voice memo. "
-                "Keep the same facts, remove markdown, avoid reading section labels mechanically, "
-                "and keep it concise enough to listen to comfortably.\n\n"
-                f"{clean_text}"
-            ),
-            system_prompt="You rewrite assistant reports into concise spoken voice memos. Return only the voice memo script.",
-        )
-        voice_text = clean_thinking_tags(voice_text).strip() or clean_text
-    except Exception as e:
-        logging.warning("⚠️ SCHEDULER: Voice memo rewrite failed; using text response for TTS: %s", e)
+    voice_text = await prepare_voice_memo_script(clean_text)
 
     audio = await get_voice_audio(voice_text)
     if not audio:
