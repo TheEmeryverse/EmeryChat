@@ -41,6 +41,19 @@ def _combined_job_text(prompt: str, description: str) -> str:
     return _normalize_text(f"{description or ''} {prompt or ''}")
 
 
+def _strip_runtime_context_from_user_message(content: str) -> str | None:
+    """Recover the actual user request from a dynamic-context wrapped message."""
+    content = (content or "").strip()
+    if "# New User Message" not in content:
+        return content or None
+
+    newest = content.split("# New User Message", 1)[1].strip()
+    match = re.search(r"\]\s*[^:]+:\s*(.*)", newest, flags=re.DOTALL)
+    if match:
+        return match.group(1).strip() or None
+    return newest or None
+
+
 def _looks_like_reminder(prompt: str, description: str) -> bool:
     text = _combined_job_text(prompt, description)
     return bool(re.search(r"\b(remind|reminder|remember to|don't forget|dont forget)\b", text))
@@ -51,6 +64,38 @@ def _looks_like_routine(prompt: str, description: str) -> bool:
     return bool(
         re.search(r"\b(routine|briefing|digest|report|dashboard|monitor|monitoring|check|status|summary)\b", text)
         or re.search(r"\b(weather|news|market|security|camera|system|stats)\b.*\b(briefing|check|summary|report)\b", text)
+    )
+
+
+def _requests_voice_memo(prompt: str | None, description: str | None, source_request: str | None = None) -> bool:
+    text = _normalize_text(f"{description or ''} {prompt or ''} {source_request or ''}")
+    return bool(
+        re.search(r"\b(voice memo|voice message|spoken briefing|spoken adaptation|audio briefing)\b", text)
+        or re.search(r"\b(send|create|generate|record|speak)\b.{0,40}\b(voice|audio|spoken)\b", text)
+    )
+
+
+def build_scheduled_execution_prompt(prompt: str | None, description: str | None, *, voice_memo_requested: bool = False) -> str:
+    """Wrap routine prompts with guardrails that keep scheduled outputs fresh and single-pass."""
+    base_prompt = (prompt or "").strip()
+    job_label = (description or "Scheduled Job").strip()
+    voice_directive = ""
+    if voice_memo_requested:
+        voice_directive = (
+            "\n- A voice memo was requested for this scheduled job. Write the text briefing normally; "
+            "the scheduler will generate and send the voice memo after your response. Do not call `speak_message`."
+        )
+
+    return (
+        f"Scheduled job to run now: {job_label}\n\n"
+        f"{base_prompt}\n\n"
+        "[SCHEDULED JOB OUTPUT RULES]\n"
+        "- Produce exactly one polished final response for this run.\n"
+        "- Start with the greeting or opening sentence if you use one; do not place the intro at the end.\n"
+        "- Do not include drafts, alternate versions, meta commentary, or a second rewritten briefing.\n"
+        "- Avoid repeating the same story, section, or conclusion unless a brief callback is necessary.\n"
+        "- Use today's runtime context and tool results as authoritative; do not continue from prior scheduled-job outputs."
+        f"{voice_directive}"
     )
 
 
@@ -267,7 +312,7 @@ def get_latest_user_request(chat_id: int | None) -> str | None:
 
     for message in reversed(globals.chat_histories.get(chat_id, [])):
         if message.get("role") == "user":
-            content = (message.get("content") or "").strip()
+            content = _strip_runtime_context_from_user_message(message.get("content") or "")
             return content or None
     return None
 
@@ -355,6 +400,45 @@ async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id:
         message_thread_id=message_thread_id,
         log_prefix="SCHEDULER",
     )
+
+
+async def _send_scheduled_voice_memo(bot, chat_id: int, text: str, message_thread_id: int = None) -> bool:
+    """Generate and send a voice memo for scheduled jobs that explicitly request one."""
+    from emery.helpers import clean_thinking_tags, query_fast_model
+    from emery.tools import get_voice_audio
+
+    clean_text = clean_thinking_tags(text or "").strip()
+    if not clean_text:
+        return False
+
+    voice_text = clean_text
+    try:
+        voice_text = await query_fast_model(
+            (
+                "Convert this scheduled-job briefing into a natural spoken voice memo. "
+                "Keep the same facts, remove markdown, avoid reading section labels mechanically, "
+                "and keep it concise enough to listen to comfortably.\n\n"
+                f"{clean_text}"
+            ),
+            system_prompt="You rewrite assistant reports into concise spoken voice memos. Return only the voice memo script.",
+        )
+        voice_text = clean_thinking_tags(voice_text).strip() or clean_text
+    except Exception as e:
+        logging.warning("⚠️ SCHEDULER: Voice memo rewrite failed; using text response for TTS: %s", e)
+
+    audio = await get_voice_audio(voice_text)
+    if not audio:
+        logging.warning("⚠️ SCHEDULER: Voice memo TTS returned no audio for chat_id=%s", chat_id)
+        return False
+
+    await bot.send_voice(
+        chat_id=chat_id,
+        voice=audio,
+        caption="Voice memo",
+        message_thread_id=normalize_message_thread_id(chat_id, message_thread_id),
+    )
+    return True
+
 
 async def run_custom_job(context):
     """Callback triggered by APScheduler/JobQueue when a job fires."""
@@ -482,8 +566,15 @@ async def run_custom_job(context):
         elif target_user_id and target_user_id != 0:
             mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{telegram_escape(target_user_name)}</a>: "
             
-        exec_prompt = prompt
-        if schedule_type == "once" or "remind" in description.lower() or "remind" in prompt.lower():
+        voice_memo_requested = _requests_voice_memo(prompt, description, source_request)
+        exec_prompt = build_scheduled_execution_prompt(
+            prompt,
+            description,
+            voice_memo_requested=voice_memo_requested,
+        )
+        prompt_text = prompt or ""
+        description_text = description or ""
+        if schedule_type == "once" or "remind" in description_text.lower() or "remind" in prompt_text.lower():
             exec_prompt = build_reminder_execution_prompt(
                 prompt=prompt,
                 description=description,
@@ -512,11 +603,14 @@ async def run_custom_job(context):
             "message_thread_id": message_thread_id,
             "timestamp": now_dt,
         }
-        globals.chat_histories[chat_id].append(scheduled_trigger)
+        job_history = deque([scheduled_trigger])
 
-        # Run the engine against append-only chat history so llama.cpp can reuse prompt checkpoints.
-        res_text, _ = await emery_engine(globals.chat_histories[chat_id])
+        # Keep scheduled jobs isolated from prior chat turns so each run produces one fresh report.
+        res_text, voice_sent_via_tool = await emery_engine(job_history)
+        globals.chat_histories[chat_id].extend(job_history)
         # Send formatted reply
+        delivered_chat_id = chat_id
+        delivered_thread_id = message_thread_id
         sent_ok = await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
@@ -545,6 +639,9 @@ async def run_custom_job(context):
                 text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
                 message_thread_id=fallback_thread_id,
             )
+            if sent_ok:
+                delivered_chat_id = origin_chat_id
+                delivered_thread_id = fallback_thread_id
         if not sent_ok:
             logging.warning(
                 "⚠️ SCHEDULER: Job '%s' (%s) executed, but delivery to chat_id=%s thread_id=%s failed.",
@@ -553,6 +650,18 @@ async def run_custom_job(context):
                 chat_id,
                 message_thread_id,
             )
+        if voice_memo_requested and not voice_sent_via_tool:
+            try:
+                voice_ok = await _send_scheduled_voice_memo(
+                    context.bot,
+                    delivered_chat_id if sent_ok else (origin_chat_id or chat_id),
+                    res_text,
+                    delivered_thread_id if sent_ok else (origin_message_thread_id or message_thread_id),
+                )
+                if not voice_ok:
+                    logging.warning("⚠️ SCHEDULER: Job '%s' (%s) requested a voice memo, but none was sent.", description, job_id)
+            except Exception as e:
+                logging.error("❌ SCHEDULER: Failed to send voice memo for job %s: %s", job_id, e, exc_info=True)
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": res_text,
