@@ -1,15 +1,23 @@
 import hashlib
+import asyncio
 import json
 import logging
 import re
 import time
+from urllib.parse import urlparse
 
 from telegram.error import BadRequest
 
 from emery.config import MAIN_MODEL_URL, MODEL_ID, TOOL_LOOP, MODEL_NAME, THINK
 from emery import tool_registry
 import emery.globals as globals
-from emery.helpers import get_stable_system_prompt, normalize_gemma_thinking, clean_thinking_tags
+from emery.helpers import (
+    get_stable_system_prompt,
+    normalize_gemma_thinking,
+    clean_thinking_tags,
+    query_fast_model,
+    telegram_escape,
+)
 from emery.logging_utils import format_logging_payload, format_llama_perf_line
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -40,6 +48,434 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
 
 def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
+
+
+_SEARCH_SUMMARY_TIMEOUT_SECONDS = 8.0
+_MAX_SEARCH_STATUS_WORDS = 6
+_MAX_STATUS_FRAGMENT_CHARS = 72
+_SEARCH_FALLBACK_STOP_WORDS = {
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "is", "latest", "near",
+    "news", "of", "on", "or", "search", "source", "the", "to", "today", "tomorrow",
+    "update", "updates", "vs", "web", "with", "yesterday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+}
+_FETCH_BRAND_DOMAINS = {
+    "abcnews.go.com": "ABC News",
+    "apnews.com": "AP News",
+    "bbc.co.uk": "BBC.co.uk",
+    "bbc.com": "BBC.com",
+    "bloomberg.com": "Bloomberg",
+    "cnbc.com": "CNBC.com",
+    "cnn.com": "CNN.com",
+    "ft.com": "Financial Times",
+    "github.com": "GitHub",
+    "google.com": "Google",
+    "npr.org": "NPR.org",
+    "nytimes.com": "NYTimes.com",
+    "reuters.com": "Reuters",
+    "theguardian.com": "The Guardian",
+    "wsj.com": "WSJ.com",
+    "x.com": "X.com",
+    "youtube.com": "YouTube",
+}
+_MULTI_PART_PUBLIC_SUFFIXES = {
+    "co.uk", "com.au", "com.br", "com.mx", "com.sg", "com.tr", "co.jp", "co.nz",
+    "co.kr", "co.in", "com.cn", "com.hk", "com.tw", "com.sa", "com.ar",
+}
+
+
+def _clean_status_fragment(text: str, *, max_words: int = _MAX_SEARCH_STATUS_WORDS) -> str:
+    text = str(text or "").strip()
+    text = clean_thinking_tags(normalize_gemma_thinking(text))
+    text = text.splitlines()[0] if text else ""
+    text = re.sub(r"^[`\"'“”‘’\s]+|[`\"'“”‘’\s]+$", "", text)
+    text = re.sub(
+        r"^(?:model\s+is\s+)?(?:search(?:ing)?(?:\s+the\s+web)?\s+(?:for\s+)?|about\s+|query:\s*)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+", " ", text).strip(" .,:;!?-/")
+    if not text:
+        return ""
+
+    words = text.split()
+    text = " ".join(words[:max_words])
+    if len(text) > _MAX_STATUS_FRAGMENT_CHARS:
+        text = text[:_MAX_STATUS_FRAGMENT_CHARS].rsplit(" ", 1)[0].strip()
+    return text.strip(" .,:;!?-/")
+
+
+def _status_arg(args: dict, key: str, default: str = "") -> str:
+    if not isinstance(args, dict):
+        return default
+    value = args.get(key, default)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _status_label(text: str, *, max_words: int = _MAX_SEARCH_STATUS_WORDS) -> str:
+    return _clean_status_fragment(text, max_words=max_words)
+
+
+def _status_quote(text: str) -> str:
+    return telegram_escape(_status_label(text, max_words=8))
+
+
+def _format_stock_symbol(symbol: str) -> str:
+    symbol = str(symbol or "").strip().upper()
+    return telegram_escape(symbol) if symbol else ""
+
+
+def _format_country_list(countries: str) -> str:
+    country_list = [
+        part.strip().upper()
+        for part in str(countries or "").split(",")
+        if part.strip()
+    ]
+    return telegram_escape(",".join(country_list[:6]))
+
+
+def _format_fahrenheit(celsius) -> str:
+    try:
+        fahrenheit = (float(celsius) * 9 / 5) + 32
+    except (TypeError, ValueError):
+        return ""
+    rounded = round(fahrenheit, 1)
+    if rounded.is_integer():
+        return f"{int(rounded)}F"
+    return f"{rounded:g}F"
+
+
+def _with_indefinite_article(text: str) -> str:
+    text = str(text or "").strip()
+    if not text or re.match(r"^(?:a|an|the)\s+", text, flags=re.IGNORECASE):
+        return text
+    article = "an" if re.match(r"^[aeiou]", text, flags=re.IGNORECASE) else "a"
+    return f"{article} {text}"
+
+
+def _format_thermostat_mode(mode: str) -> str:
+    normalized = str(mode or "").strip().upper()
+    labels = {
+        "HEAT": "heat",
+        "COOL": "cool",
+        "HEATCOOL": "heat/cool",
+        "OFF": "off",
+    }
+    return labels.get(normalized, normalized.lower())
+
+
+def _fallback_search_summary(query: str) -> str:
+    text = str(query or "")
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\b\d{1,4}(?:[/-]\d{1,2}){1,2}\b", " ", text)
+    text = re.sub(r"\b(?:19|20)\d{2}\b", " ", text)
+    text = re.sub(r"[/|,;:?()\[\]{}]+", " ", text)
+
+    raw_tokens = re.findall(r"\$?[A-Za-z][A-Za-z0-9'&.-]*", text)
+    kept = [
+        token.strip(".-")
+        for token in raw_tokens
+        if token.strip(".-") and token.strip(".-").lower() not in _SEARCH_FALLBACK_STOP_WORDS
+    ]
+    if not kept:
+        kept = [token.strip(".-") for token in raw_tokens if token.strip(".-")]
+
+    return _clean_status_fragment(" ".join(kept), max_words=_MAX_SEARCH_STATUS_WORDS)
+
+
+async def _summarize_search_query_for_status(query: str) -> str:
+    fallback = _fallback_search_summary(query)
+    query = str(query or "").strip()
+    if not query:
+        return fallback
+
+    prompt = (
+        "Return only a 2 to 6 word plain-English noun phrase summarizing this web search query. "
+        "Do not include quotes, punctuation, or words like search/query/web. Preserve the main entity.\n\n"
+        f"Search query: {query}"
+    )
+    system_prompt = "You write very short tool-status labels."
+    try:
+        summary = await asyncio.wait_for(
+            query_fast_model(prompt, system_prompt=system_prompt),
+            timeout=_SEARCH_SUMMARY_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logging.debug("⚡ COPROCESSOR: Search status summary unavailable: %s", exc)
+        return fallback
+
+    summary = _clean_status_fragment(summary, max_words=_MAX_SEARCH_STATUS_WORDS)
+    return summary or fallback
+
+
+async def _summarize_text_for_status(text: str, instruction: str, fallback: str = "") -> str:
+    fallback = _status_label(fallback or text)
+    text = str(text or "").strip()
+    if not text:
+        return fallback
+
+    prompt = (
+        "Return only a 2 to 6 word plain-English status label. "
+        "No quotes, punctuation, preambles, or complete sentences.\n\n"
+        f"Instruction: {instruction}\n"
+        f"Text: {text[:2500]}"
+    )
+    system_prompt = "You write very short tool-status labels."
+    try:
+        summary = await asyncio.wait_for(
+            query_fast_model(prompt, system_prompt=system_prompt),
+            timeout=_SEARCH_SUMMARY_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logging.debug("⚡ COPROCESSOR: Tool status summary unavailable: %s", exc)
+        return fallback
+
+    summary = _clean_status_fragment(summary, max_words=_MAX_SEARCH_STATUS_WORDS)
+    return summary or fallback
+
+
+def _registered_domain(hostname: str) -> str:
+    host = str(hostname or "").strip().lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return ""
+
+    labels = [label for label in host.split(".") if label]
+    if len(labels) <= 2:
+        return host
+
+    suffix = ".".join(labels[-2:])
+    if suffix in _MULTI_PART_PUBLIC_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _format_generic_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    if domain in _FETCH_BRAND_DOMAINS:
+        return _FETCH_BRAND_DOMAINS[domain]
+
+    labels = domain.split(".")
+    base = labels[0]
+    suffix = ".".join(labels[1:])
+    if len(base) <= 4:
+        display_base = base.upper()
+    else:
+        display_base = "-".join(part.capitalize() for part in base.split("-") if part)
+    return f"{display_base}.{suffix}" if suffix else display_base
+
+
+def _website_name_from_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if re.match(r"^[a-z][a-z0-9+.-]*://", raw, flags=re.IGNORECASE) else f"//{raw}")
+    domain = _registered_domain(parsed.hostname or "")
+    return _format_generic_domain(domain)
+
+
+async def _format_tool_status_message(fn: str, args: dict) -> str:
+    args = args if isinstance(args, dict) else {}
+
+    if fn == "web_search":
+        summary = await _summarize_search_query_for_status(args.get("query", ""))
+        if summary:
+            return f"{MODEL_NAME} is searching for {telegram_escape(summary)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "fetch_web_content":
+        website = _website_name_from_url(args.get("url", ""))
+        if website:
+            return f"{MODEL_NAME} is fetching {telegram_escape(website)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "generate_image":
+        prompt = _status_arg(args, "prompt")
+        summary = await _summarize_text_for_status(
+            prompt,
+            "Summarize what image is being generated as a noun phrase.",
+        )
+        if summary:
+            return f"{MODEL_NAME} is painting {telegram_escape(_with_indefinite_article(summary))}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "speak_message":
+        text = _status_arg(args, "text")
+        summary = await _summarize_text_for_status(
+            text,
+            "Summarize what this voice memo is about as a noun phrase.",
+        )
+        if summary:
+            return f"{MODEL_NAME} is recording a voice memo about {telegram_escape(summary)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "delegate_to_coprocessor":
+        task_prompt = _status_arg(args, "task_prompt")
+        summary = await _summarize_text_for_status(
+            task_prompt,
+            "Summarize this coprocessor task as a short verb phrase.",
+        )
+        if summary:
+            summary = re.sub(r"^to\s+", "", summary, flags=re.IGNORECASE)
+            return f"{MODEL_NAME} is asking the coprocessor to {telegram_escape(summary)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_noaa_weather":
+        location = _status_arg(args, "location")
+        timeframe = _status_arg(args, "timeframe", "forecast").lower()
+        weather_type = "hourly weather" if timeframe == "hourly" else "weather"
+        if location:
+            return f"{MODEL_NAME} is checking {weather_type} for {_status_quote(location)}..."
+        return f"{MODEL_NAME} is checking {weather_type}..."
+
+    if fn == "set_weather_location_alias":
+        alias = _status_quote(_status_arg(args, "alias"))
+        location = _status_quote(_status_arg(args, "location"))
+        if alias and location:
+            return f"{MODEL_NAME} is saving weather location {alias} as {location}..."
+        if alias:
+            return f"{MODEL_NAME} is saving weather location {alias}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "remove_weather_location_alias":
+        alias = _status_quote(_status_arg(args, "alias"))
+        if alias:
+            return f"{MODEL_NAME} is removing weather location {alias}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "set_nest_thermostat_mode":
+        mode = _status_arg(args, "mode")
+        mode_label = _format_thermostat_mode(mode)
+        if mode_label == "off":
+            return f"{MODEL_NAME} is turning the thermostat off..."
+        if mode_label:
+            return f"{MODEL_NAME} is setting the thermostat to {telegram_escape(mode_label)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "set_nest_thermostat_temperature":
+        temp = _format_fahrenheit(args.get("temp_celsius"))
+        heat = _format_fahrenheit(args.get("heat_temp_celsius"))
+        cool = _format_fahrenheit(args.get("cool_temp_celsius"))
+        if heat and cool:
+            return f"{MODEL_NAME} is setting the thermostat range to {heat}-{cool}..."
+        if temp:
+            return f"{MODEL_NAME} is setting the thermostat to {temp}..."
+        if heat:
+            return f"{MODEL_NAME} is setting the thermostat heat to {heat}..."
+        if cool:
+            return f"{MODEL_NAME} is setting the thermostat cool to {cool}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "overseer_search_movie":
+        query = _status_quote(_status_arg(args, "query"))
+        if query:
+            return f"{MODEL_NAME} is searching movies for {query}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "overseer_search_tv":
+        query = _status_quote(_status_arg(args, "query"))
+        if query:
+            return f"{MODEL_NAME} is searching TV shows for {query}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "overseer_request_tv_season":
+        season = _status_arg(args, "season_number")
+        if season:
+            return f"{MODEL_NAME} is requesting TV season {telegram_escape(season)}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "search_fred_series":
+        query = _status_quote(_status_arg(args, "query"))
+        if query:
+            return f"{MODEL_NAME} is searching FRED for {query}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_fred_series_observations":
+        series_id = _format_stock_symbol(_status_arg(args, "series_id"))
+        if series_id:
+            return f"{MODEL_NAME} is pulling FRED series {series_id}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "search_imf_indicators":
+        query = _status_quote(_status_arg(args, "query"))
+        if query:
+            return f"{MODEL_NAME} is searching IMF for {query}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_imf_datamapper_series":
+        indicator = _format_stock_symbol(_status_arg(args, "indicator"))
+        countries = _format_country_list(_status_arg(args, "countries"))
+        if indicator and countries:
+            return f"{MODEL_NAME} is pulling IMF data for {indicator} in {countries}..."
+        if indicator:
+            return f"{MODEL_NAME} is pulling IMF data for {indicator}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_stock_snapshot":
+        symbol = _format_stock_symbol(_status_arg(args, "symbol"))
+        if symbol:
+            return f"{MODEL_NAME} is checking {symbol}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_stock_price_history":
+        symbol = _format_stock_symbol(_status_arg(args, "symbol"))
+        if symbol:
+            return f"{MODEL_NAME} is pulling {symbol} price history..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_global_macro_dashboard":
+        countries = _format_country_list(_status_arg(args, "countries"))
+        if countries:
+            return f"{MODEL_NAME} is assembling a global macro dashboard for {countries}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_reolink_snapshot":
+        camera = _status_quote(_status_arg(args, "camera_name"))
+        if camera:
+            return f"{MODEL_NAME} is checking the {camera} camera..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "get_camera_security_log":
+        camera = _status_quote(_status_arg(args, "camera_name"))
+        if camera:
+            return f"{MODEL_NAME} is reviewing the {camera} security log..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "list_portainer_containers":
+        environment = _status_quote(_status_arg(args, "environment_name"))
+        if environment:
+            return f"{MODEL_NAME} is listing containers in {environment}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "update_portainer_container":
+        environment = _status_quote(_status_arg(args, "environment_name"))
+        container = _status_quote(_status_arg(args, "container_name"))
+        if container and environment:
+            return f"{MODEL_NAME} is updating {container} in {environment}..."
+        if container:
+            return f"{MODEL_NAME} is updating {container}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "add_scheduled_job":
+        description = _status_quote(_status_arg(args, "description"))
+        if description:
+            return f"{MODEL_NAME} is scheduling {description}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    if fn == "remove_scheduled_job":
+        job_id = _status_quote(_status_arg(args, "job_id"))
+        if job_id:
+            return f"{MODEL_NAME} is removing scheduled job {job_id}..."
+        return TOOL_STATUS_MESSAGES[fn]
+
+    return TOOL_STATUS_MESSAGES.get(fn, f"{MODEL_NAME} is using {fn}...")
 
 
 def _extract_response_message(response_json: dict) -> dict:
@@ -296,10 +732,10 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                     args = _normalize_tool_arguments(tc['function'].get('arguments', {}))
                     
                     if fn not in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
-                        status_msg = TOOL_STATUS_MESSAGES.get(fn, f"Emery is using {fn}...")
                         chat_id = globals.TARGET_CHAT_ID.get()
                         thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
                         if chat_id is not None:
+                            status_msg = await _format_tool_status_message(fn, args)
                             try:
                                 await globals.application_bot.send_message(
                                     chat_id=chat_id,
