@@ -30,6 +30,7 @@ RECURRING_SCHEDULE_TYPES = {"daily", "weekly", "monthly", "yearly", "interval"}
 SHARED_TARGET_ALIASES = {"both", "us", "family", "everyone", "all", "we", "our"}
 CREATOR_TARGET_ALIASES = {"me", "myself", "my"}
 SECONDARY_TARGET_ALIASES = {"wife", "spouse", "partner", "her", "husband", "him"}
+SCHEDULE_TYPE_ORDER = ("once", "daily", "weekly", "monthly", "yearly", "interval")
 
 
 def _normalize_text(value: str) -> str:
@@ -199,6 +200,30 @@ def parse_duration_to_seconds(val: str) -> int:
         elif unit == 'd':
             return num * 86400
     raise ValueError(f"Invalid duration format: '{val}'. Use e.g. '1h', '30m', '10s', '1d', or a number of seconds.")
+
+
+def _format_schedule_type_counts(counts: dict[str, int]) -> str:
+    parts = [
+        f"{schedule_type}={counts[schedule_type]}"
+        for schedule_type in SCHEDULE_TYPE_ORDER
+        if counts.get(schedule_type)
+    ]
+    parts.extend(
+        f"{schedule_type}={count}"
+        for schedule_type, count in sorted(counts.items())
+        if schedule_type not in SCHEDULE_TYPE_ORDER and count
+    )
+    return ", ".join(parts) if parts else "none"
+
+
+def _log_job_scheduled(job_id: str, schedule_type: str, schedule_value: str, detail: str):
+    logging.info(
+        "📅 SCHEDULER: Scheduled %s job '%s' (%s) %s",
+        schedule_type,
+        job_id,
+        schedule_value,
+        detail,
+    )
 
 
 def build_reminder_execution_prompt(
@@ -550,7 +575,7 @@ def remove_job_from_queue(job_id: str):
                 j.schedule_removal()
             logging.info(f"📅 SCHEDULER: Cancelled job '{job_id}' in queue")
 
-def schedule_in_tg_queue(job_data: dict) -> bool:
+def schedule_in_tg_queue(job_data: dict, log_registration: bool = True) -> bool:
     """Registers the job in the active Telegram JobQueue based on its configuration."""
     if not globals.application or not globals.application.job_queue:
         logging.warning("⚠️ SCHEDULER: Telegram JobQueue is not initialized yet.")
@@ -574,7 +599,8 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled daily '{job_id}' at {sval}")
+            if log_registration:
+                _log_job_scheduled(job_id, stype, sval, f"at {sval}")
             return True
             
         elif stype == "interval":
@@ -586,7 +612,8 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled repeating '{job_id}' every {seconds}s")
+            if log_registration:
+                _log_job_scheduled(job_id, stype, sval, f"every {seconds}s")
             return True
             
         elif stype == "once":
@@ -611,7 +638,13 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled one-off '{job_id}' at {dt_localized.strftime('%Y-%m-%d %H:%M:%S')}")
+            if log_registration:
+                _log_job_scheduled(
+                    job_id,
+                    stype,
+                    sval,
+                    f"at {dt_localized.strftime('%Y-%m-%d %H:%M:%S')}",
+                )
             return True
             
         elif stype == "weekly":
@@ -628,7 +661,8 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled weekly '{job_id}' on {day_name}s at {time_str}")
+            if log_registration:
+                _log_job_scheduled(job_id, stype, sval, f"on {day_name}s at {time_str}")
             return True
             
         elif stype == "monthly":
@@ -645,7 +679,8 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled monthly '{job_id}' on day {day_of_month} at {time_str}")
+            if log_registration:
+                _log_job_scheduled(job_id, stype, sval, f"on day {day_of_month} at {time_str}")
             return True
             
         elif stype == "yearly":
@@ -662,7 +697,8 @@ def schedule_in_tg_queue(job_data: dict) -> bool:
                 data=job_data,
                 name=job_id
             )
-            logging.info(f"📅 SCHEDULER: Scheduled yearly '{job_id}' on {month}-{day} at {time_str}")
+            if log_registration:
+                _log_job_scheduled(job_id, stype, sval, f"on {month}-{day} at {time_str}")
             return True
             
     except Exception as e:
@@ -865,10 +901,21 @@ def load_and_register_all_jobs():
     """Loads all saved custom jobs from file and schedules them in the queue on boot."""
     jobs = load_jobs_from_file()
     count = 0
+    schedule_counts = {}
     for job_data in jobs:
-        if schedule_in_tg_queue(job_data):
+        if schedule_in_tg_queue(job_data, log_registration=False):
             count += 1
-    logging.info(f"📅 SCHEDULER: Loaded {count}/{len(jobs)} persistent jobs")
+            schedule_type = str(job_data.get("schedule_type") or "unknown").lower()
+            schedule_counts[schedule_type] = schedule_counts.get(schedule_type, 0) + 1
+    if jobs:
+        logging.info(
+            "📅 SCHEDULER: Loaded %s/%s persistent jobs | %s",
+            count,
+            len(jobs),
+            _format_schedule_type_counts(schedule_counts),
+        )
+    else:
+        logging.info("📅 SCHEDULER: No persistent jobs configured")
 
 def update_jobs_with_chat_id(chat_id: int):
     """

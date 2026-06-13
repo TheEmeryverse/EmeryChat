@@ -323,6 +323,7 @@ root_logger.addHandler(handler)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery")

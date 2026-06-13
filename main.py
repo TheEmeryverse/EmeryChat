@@ -18,7 +18,23 @@ from emery.bot import (
     validate_telegram_access_policy
 )
 
+
+EMERYCHAT_BANNER = r"""
+  _____ __  __ ______ _______   _______     ______ _    _       _______
+ |  ___|  \/  |  ____|  __ \ \ / / ____|   / /  __ \ |  | |   /\|__   __|
+ | |__ | \  / | |__  | |__) \ V / |       / /| |  | | |__| |  /  \  | |
+ |  __|| |\/| |  __| |  _  / > <| |      / / | |  | |  __  | / /\ \ | |
+ | |___| |  | | |____| | \ \/ . \ |____ / /  | |__| | |  | |/ ____ \| |
+ |_____|_|  |_|______|_|  \_/_/ \_\_____/_/   \____/|_|  |_/_/    \_\_|
+"""
+
+
+def log_startup_banner():
+    logging.info("%s", EMERYCHAT_BANNER)
+
+
 if __name__ == '__main__':
+    log_startup_banner()
     validate_telegram_access_policy()
 
     t_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
@@ -49,8 +65,13 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION | filters.Document.ALL, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))
 
+    scheduler_status = "enabled" if str(ENABLE_SCHEDULER).lower() == "true" else "disabled"
     logging.info(
-        f"🚀 EMERYCHAT ONLINE — model: {MODEL_ID} | fast: {FAST_MODEL_ID} | "
-        f"vision: {VISION_MODEL_ID} | embed: {EMBEDDING_MODEL_ID}"
+        "EMERYCHAT ONLINE | model=%s | fast=%s | vision=%s | embed=%s | scheduler=%s",
+        MODEL_ID,
+        FAST_MODEL_ID,
+        VISION_MODEL_ID,
+        EMBEDDING_MODEL_ID,
+        scheduler_status,
     )
     application.run_polling()
