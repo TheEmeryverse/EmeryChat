@@ -1,4 +1,3 @@
-import hashlib
 import asyncio
 import json
 import logging
@@ -495,26 +494,6 @@ def _normalize_tool_arguments(arguments):
     return arguments or {}
 
 
-def _stable_json(data) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _hash_prompt_part(messages: list[dict], chat_template_kwargs: dict | None) -> str:
-    hash_payload = {
-        "messages": messages,
-        "chat_template_kwargs": chat_template_kwargs or {},
-    }
-    return hashlib.sha256(_stable_json(hash_payload).encode("utf-8")).hexdigest()[:16]
-
-
-def _hash_stable_data(data) -> str:
-    return hashlib.sha256(_stable_json(data).encode("utf-8")).hexdigest()[:16]
-
-
-def _approx_prompt_chars(messages: list[dict]) -> int:
-    return len(_stable_json(messages))
-
-
 def _truncate_tool_content(content: str, max_len: int = 500) -> str:
     if len(content) <= max_len:
         return content
@@ -650,35 +629,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     
     for loop_count in range(TOOL_LOOP):
         full_context = stable_prefix + ollama_history
-        stable_prefix_hash = _hash_prompt_part(stable_prefix, chat_template_kwargs)
-        tool_schema_hash = _hash_stable_data(tools_schema if allow_tools and tools_schema else [])
-        request_static_hash = _hash_stable_data({
-            "model": model_to_use,
-            "url": url,
-            "chat_template_kwargs": chat_template_kwargs,
-            "tools": tools_schema if allow_tools and tools_schema else [],
-        })
-        prompt_chars = _approx_prompt_chars(full_context)
-        first_roles = ",".join(msg.get("role", "?") for msg in full_context[:5])
-        last_roles = ",".join(msg.get("role", "?") for msg in full_context[-5:])
-        logging.info(
-            "🧩 PROMPT CACHE: stable_prefix_hash=%s tool_schema_hash=%s request_static_hash=%s tools_count=%d stable_messages=%d dynamic_messages=%d history_messages=%d total_messages=%d approx_chars=%d first_roles=%s last_roles=%s history_trimmed=%s model=%s url=%s thinking=%s",
-            stable_prefix_hash,
-            tool_schema_hash,
-            request_static_hash,
-            len(tools_schema) if allow_tools and tools_schema else 0,
-            len(stable_prefix),
-            0,
-            len(ollama_history),
-            len(full_context),
-            prompt_chars,
-            first_roles,
-            last_roles,
-            False,
-            model_to_use,
-            url,
-            THINK,
-        )
         
         payload = {
             "model": model_to_use,
