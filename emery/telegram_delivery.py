@@ -313,3 +313,44 @@ async def try_send_split_html_message(
             exc_info=True,
         )
         return False
+
+
+async def try_send_rich_or_split_html_message(
+    bot,
+    chat_id: int,
+    markdown_text: str,
+    *,
+    fallback_html_text: str = None,
+    message_thread_id: int = None,
+    log_prefix: str = "TELEGRAM",
+) -> bool:
+    """Send rich Markdown with legacy HTML fallback and convert delivery errors to False."""
+    normalized_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
+    try:
+        await send_rich_or_split_html_message(
+            bot,
+            chat_id,
+            markdown_text,
+            fallback_html_text=fallback_html_text,
+            message_thread_id=normalized_thread_id,
+        )
+        return True
+    except BadRequest as e:
+        logging.warning(
+            "⚠️ %s: Telegram rejected rich/fallback message for chat_id=%s thread_id=%s: %s",
+            log_prefix,
+            chat_id,
+            normalized_thread_id,
+            e,
+        )
+        return False
+    except Exception as e:
+        logging.error(
+            "❌ %s: Unexpected error while sending rich/fallback message to chat_id=%s thread_id=%s: %s",
+            log_prefix,
+            chat_id,
+            normalized_thread_id,
+            e,
+            exc_info=True,
+        )
+        return False

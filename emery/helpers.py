@@ -486,7 +486,7 @@ def get_stable_system_prompt() -> str:
     telegram_rich_instruction = ""
     if ENABLE_TELEGRAM_RICH_MESSAGES:
         telegram_rich_instruction = (
-            "\n- Your final text replies are delivered to Telegram as rich Markdown when possible. "
+            "\n- Your model-authored text messages are delivered to Telegram as rich Markdown when possible. "
             "Use clean Markdown structure when it improves readability, including headings, bullet or numbered lists, links, block quotes, code blocks, and simple tables. "
             "Do not emit rich-message JSON or invent media blocks."
         )

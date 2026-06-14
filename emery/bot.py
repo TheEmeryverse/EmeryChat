@@ -431,10 +431,10 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             sent_msgs = [sent_msg] if sent_msg else []
         else:
-            sent_msgs = await send_final_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
     else:
         if clean_response:
-            sent_msgs = await send_final_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     # Save the assistant text to history
     assistant_entry = {
@@ -497,8 +497,8 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
     )
 
 
-async def send_final_text_message_as_reply(chat_id: int, markdown_text: str, reply_to_message_id: int = None, message_thread_id: int = None):
-    """Sends a normal final assistant reply using rich Markdown with legacy HTML fallback."""
+async def send_model_text_message_as_reply(chat_id: int, markdown_text: str, reply_to_message_id: int = None, message_thread_id: int = None):
+    """Sends model-authored assistant text using rich Markdown with legacy HTML fallback."""
     return await send_rich_or_split_html_message(
         globals.application_bot,
         chat_id,
@@ -639,7 +639,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     })
     
     try:
-        sent_msgs = await send_safe_large_message_as_reply(chat_id, clean_response, message_id)
+        sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=message_id)
         if sent_msgs:
             last_entry = globals.chat_histories[chat_id][-1]
             last_entry["message_ids"] = [m.message_id for m in sent_msgs]
@@ -942,7 +942,7 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
             break
             
     try:
-        sent_msgs = await send_safe_large_message_as_reply(chat_id, clean_response, reply_to_id, message_thread_id)
+        sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_id, message_thread_id)
         if sent_msgs:
             _record_heartbeat_proactive(chat_id, datetime.now(USER_TIMEZONE))
             globals.chat_histories[chat_id].append({

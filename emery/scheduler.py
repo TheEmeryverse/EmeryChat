@@ -12,7 +12,7 @@ from emery.config import (
     ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
 )
 import emery.globals as globals
-from emery.telegram_delivery import try_send_split_html_message
+from emery.telegram_delivery import try_send_rich_or_split_html_message, try_send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 
 WEEKDAYS = {
@@ -96,7 +96,8 @@ def build_scheduled_execution_prompt(prompt: str | None, description: str | None
         "- Start with the greeting or opening sentence if you use one; do not place the intro at the end.\n"
         "- Do not include drafts, alternate versions, meta commentary, or a second rewritten briefing.\n"
         "- Avoid repeating the same story, section, or conclusion unless a brief callback is necessary.\n"
-        "- Use today's runtime context and tool results as authoritative; do not continue from prior scheduled-job outputs."
+        "- Use today's runtime context and tool results as authoritative; do not continue from prior scheduled-job outputs.\n"
+        "- For long reports or briefings, use rich Markdown structure when useful: clear headings, bullets or numbered lists, block quotes, code blocks, and simple tables. Keep tables compact."
         f"{voice_directive}"
     )
 
@@ -393,8 +394,26 @@ def remove_job_from_store(job_id: str):
         save_jobs_to_file(updated_jobs)
         logging.info(f"📅 SCHEDULER: Removed job {job_id} from store")
 
-async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None):
+def _markdown_escape(text: str) -> str:
+    return str(text or "").replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _markdown_link(label: str, url: str) -> str:
+    return f"[{_markdown_escape(label)}]({url.replace(')', '%29')})"
+
+
+async def send_safe_job_message(bot, chat_id: int, text: str, message_thread_id: int = None, rich_markdown_text: str = None):
     """Splits large messages to fit Telegram's character limits."""
+    if rich_markdown_text is not None:
+        return await try_send_rich_or_split_html_message(
+            bot,
+            chat_id,
+            rich_markdown_text,
+            fallback_html_text=text,
+            message_thread_id=message_thread_id,
+            log_prefix="SCHEDULER",
+        )
+
     return await try_send_split_html_message(
         bot,
         chat_id,
@@ -534,7 +553,7 @@ async def run_custom_job(context):
         
     logging.info(f"📅 SCHEDULER: Running custom job '{description}' ({job_id})")
     from emery.engine import emery_engine
-    from emery.helpers import emery_format, telegram_escape
+    from emery.helpers import clean_thinking_tags, emery_format, telegram_escape
     
     try:
         active_user_id = globals.current_user_id.get() or user_id
@@ -543,6 +562,7 @@ async def run_custom_job(context):
         user_name = profile["name"]
         
         mention_prefix = ""
+        rich_mention_prefix = ""
         if target_user_id == -1:
             from emery.config import PRIMARY_USER_ID, SECONDARY_USER_ID, USER_NAME, USER_2_NAME
             if SECONDARY_USER_ID != 0:
@@ -550,10 +570,16 @@ async def run_custom_job(context):
                     f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{telegram_escape(USER_NAME)}</a> & "
                     f"<a href=\"tg://user?id={SECONDARY_USER_ID}\">{telegram_escape(USER_2_NAME)}</a>: "
                 )
+                rich_mention_prefix = (
+                    f"{_markdown_link(USER_NAME, f'tg://user?id={PRIMARY_USER_ID}')} & "
+                    f"{_markdown_link(USER_2_NAME, f'tg://user?id={SECONDARY_USER_ID}')}: "
+                )
             else:
                 mention_prefix = f"<a href=\"tg://user?id={PRIMARY_USER_ID}\">{telegram_escape(USER_NAME)}</a>: "
+                rich_mention_prefix = f"{_markdown_link(USER_NAME, f'tg://user?id={PRIMARY_USER_ID}')}: "
         elif target_user_id and target_user_id != 0:
             mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{telegram_escape(target_user_name)}</a>: "
+            rich_mention_prefix = f"{_markdown_link(target_user_name, f'tg://user?id={target_user_id}')}: "
             
         voice_memo_requested = _requests_voice_memo(prompt, description, source_request)
         exec_prompt = build_scheduled_execution_prompt(
@@ -597,14 +623,18 @@ async def run_custom_job(context):
         # Keep scheduled jobs isolated from prior chat turns so each run produces one fresh report.
         res_text, voice_sent_via_tool = await emery_engine(job_history)
         globals.chat_histories[chat_id].extend(job_history)
+        clean_res_text = clean_thinking_tags(res_text).strip()
+        job_html_text = f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}"
+        job_rich_text = f"# 🛡️ EMERYCHAT JOB: {_markdown_escape(description)}\n\n{rich_mention_prefix}{clean_res_text}"
         # Send formatted reply
         delivered_chat_id = chat_id
         delivered_thread_id = message_thread_id
         sent_ok = await send_safe_job_message(
             context.bot,
             chat_id=chat_id,
-            text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
-            message_thread_id=message_thread_id
+            text=job_html_text,
+            message_thread_id=message_thread_id,
+            rich_markdown_text=job_rich_text,
         )
         if (
             not sent_ok
@@ -625,8 +655,9 @@ async def run_custom_job(context):
             sent_ok = await send_safe_job_message(
                 context.bot,
                 chat_id=origin_chat_id,
-                text=f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}",
+                text=job_html_text,
                 message_thread_id=fallback_thread_id,
+                rich_markdown_text=job_rich_text,
             )
             if sent_ok:
                 delivered_chat_id = origin_chat_id
