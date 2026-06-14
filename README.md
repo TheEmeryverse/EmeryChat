@@ -431,6 +431,7 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | --- | --- | --- |
 | `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS` | `false` | Allows Telegram users not listed in `config/users.json` |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
+| `ENABLE_TELEGRAM_RICH_MESSAGES` | `true` | Sends normal final replies with Telegram Bot API rich Markdown and falls back to legacy HTML |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |

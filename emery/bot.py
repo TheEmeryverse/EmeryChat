@@ -26,7 +26,7 @@ from emery.helpers import (
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.engine import emery_engine
-from emery.telegram_delivery import send_split_html_message
+from emery.telegram_delivery import send_rich_or_split_html_message, send_split_html_message
 from emery.tools import get_noaa_weather_alerts, get_voice_audio
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -431,10 +431,10 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             sent_msgs = [sent_msg] if sent_msg else []
         else:
-            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            sent_msgs = await send_final_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
     else:
         if clean_response:
-            sent_msgs = await send_safe_large_message_as_reply(chat_id, emery_format(clean_response), reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            sent_msgs = await send_final_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
 
     # Save the assistant text to history
     assistant_entry = {
@@ -492,6 +492,18 @@ async def send_safe_large_message_as_reply(chat_id: int, text: str, reply_to_mes
         globals.application_bot,
         chat_id,
         text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
+
+
+async def send_final_text_message_as_reply(chat_id: int, markdown_text: str, reply_to_message_id: int = None, message_thread_id: int = None):
+    """Sends a normal final assistant reply using rich Markdown with legacy HTML fallback."""
+    return await send_rich_or_split_html_message(
+        globals.application_bot,
+        chat_id,
+        markdown_text,
+        fallback_html_text=emery_format(markdown_text),
         reply_to_message_id=reply_to_message_id,
         message_thread_id=message_thread_id,
     )

@@ -384,6 +384,7 @@ ENABLE_HEARTBEAT = _to_bool(os.getenv("ENABLE_HEARTBEAT"), True)
 ENABLE_NEST = _to_bool(os.getenv("ENABLE_NEST"))
 ENABLE_REOLINK = _to_bool(os.getenv("ENABLE_REOLINK"))
 ENABLE_SYSTEM_STATS = _to_bool(os.getenv("ENABLE_SYSTEM_STATS"))
+ENABLE_TELEGRAM_RICH_MESSAGES = _to_bool(os.getenv("ENABLE_TELEGRAM_RICH_MESSAGES"), True)
 
 PORTAINER_URL = os.getenv("PORTAINER_URL", "").rstrip("/")
 PORTAINER_API_KEY = os.getenv("PORTAINER_API_KEY", "")

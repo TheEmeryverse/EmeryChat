@@ -1,13 +1,16 @@
 import logging
 import re
+from types import SimpleNamespace
 
 from telegram import ReplyParameters
 from telegram.error import BadRequest
 
+from emery.config import ENABLE_TELEGRAM_RICH_MESSAGES, TELEGRAM_TOKEN
 from emery.telegram_utils import normalize_message_thread_id
 
 
 MAX_TELEGRAM_HTML_MESSAGE_LEN = 4000
+MAX_TELEGRAM_RICH_MESSAGE_BYTES = 32768
 MIN_TELEGRAM_SPLIT_LEN = 1000
 HTML_TAG_RE = re.compile(r"</?([a-zA-Z][\w:-]*)(?:\s[^<>]*)?>")
 VOID_HTML_TAGS = {"br", "hr", "img"}
@@ -93,6 +96,143 @@ def split_telegram_html(text: str, limit: int = MAX_TELEGRAM_HTML_MESSAGE_LEN) -
         open_tags = next_open_tags
 
     return chunks or [""]
+
+
+def build_telegram_rich_message_payload(
+    chat_id: int,
+    markdown_text: str,
+    *,
+    reply_to_message_id: int = None,
+    message_thread_id: int = None,
+) -> dict:
+    """Build the raw Bot API payload for sendRichMessage."""
+    payload = {
+        "chat_id": chat_id,
+        "rich_message": {
+            "markdown": str(markdown_text or ""),
+        },
+    }
+
+    normalized_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
+    if normalized_thread_id is not None:
+        payload["message_thread_id"] = normalized_thread_id
+
+    if reply_to_message_id:
+        payload["reply_parameters"] = {
+            "message_id": reply_to_message_id,
+            "allow_sending_without_reply": True,
+        }
+
+    return payload
+
+
+def _rich_message_within_limits(markdown_text: str) -> bool:
+    return len(str(markdown_text or "").encode("utf-8")) <= MAX_TELEGRAM_RICH_MESSAGE_BYTES
+
+
+async def _send_native_rich_message(bot, payload: dict):
+    method = getattr(bot, "send_rich_message", None) or getattr(bot, "sendRichMessage", None)
+    if not callable(method):
+        return None
+
+    reply_params = None
+    reply_payload = payload.get("reply_parameters")
+    if reply_payload:
+        reply_params = ReplyParameters(
+            message_id=reply_payload["message_id"],
+            allow_sending_without_reply=reply_payload.get("allow_sending_without_reply", True),
+        )
+
+    kwargs = {
+        "chat_id": payload["chat_id"],
+        "rich_message": payload["rich_message"],
+        "reply_parameters": reply_params,
+    }
+    if "message_thread_id" in payload:
+        kwargs["message_thread_id"] = payload["message_thread_id"]
+
+    try:
+        return await method(**kwargs)
+    except TypeError as e:
+        logging.debug("TELEGRAM RICH: native send_rich_message signature was incompatible: %s", e)
+        return None
+
+
+async def _send_raw_rich_message(payload: dict):
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "blank":
+        raise RuntimeError("TELEGRAM_TOKEN is not configured")
+
+    import emery.globals as globals
+
+    response = await globals.http_client.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendRichMessage",
+        json=payload,
+    )
+
+    try:
+        data = response.json()
+    except Exception as e:
+        raise RuntimeError(f"Telegram sendRichMessage returned non-JSON response: HTTP {response.status_code}") from e
+
+    if response.status_code >= 400 or not data.get("ok"):
+        raise BadRequest(data.get("description") or f"Telegram sendRichMessage failed with HTTP {response.status_code}")
+
+    result = data.get("result") or {}
+    return SimpleNamespace(message_id=result.get("message_id"), raw=result)
+
+
+async def send_rich_or_split_html_message(
+    bot,
+    chat_id: int,
+    markdown_text: str,
+    *,
+    fallback_html_text: str = None,
+    reply_to_message_id: int = None,
+    message_thread_id: int = None,
+):
+    """Send a final reply as Telegram rich Markdown, falling back to legacy split HTML."""
+    fallback_text = fallback_html_text if fallback_html_text is not None else str(markdown_text or "")
+    payload = build_telegram_rich_message_payload(
+        chat_id,
+        markdown_text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
+
+    if ENABLE_TELEGRAM_RICH_MESSAGES and _rich_message_within_limits(markdown_text):
+        try:
+            sent_msg = await _send_native_rich_message(bot, payload)
+            if sent_msg is None:
+                sent_msg = await _send_raw_rich_message(payload)
+            return [sent_msg]
+        except BadRequest as e:
+            logging.warning(
+                "TELEGRAM RICH: sendRichMessage rejected final reply for chat_id=%s thread_id=%s; falling back to HTML: %s",
+                chat_id,
+                payload.get("message_thread_id"),
+                e,
+            )
+        except Exception as e:
+            logging.warning(
+                "TELEGRAM RICH: sendRichMessage failed for chat_id=%s thread_id=%s; falling back to HTML: %s",
+                chat_id,
+                payload.get("message_thread_id"),
+                e,
+                exc_info=True,
+            )
+    elif ENABLE_TELEGRAM_RICH_MESSAGES:
+        logging.info(
+            "TELEGRAM RICH: final reply is over %s bytes; falling back to split HTML.",
+            MAX_TELEGRAM_RICH_MESSAGE_BYTES,
+        )
+
+    return await send_split_html_message(
+        bot,
+        chat_id,
+        fallback_text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
 
 
 async def send_split_html_message(
