@@ -504,6 +504,129 @@ def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
 
+def _build_ollama_history(history_buffer) -> list[dict]:
+    ollama_history = []
+    for msg in history_buffer:
+        clean_msg = {"role": msg["role"]}
+
+        # Preserve tool calling fields if present in history
+        if "tool_calls" in msg:
+            clean_msg["tool_calls"] = msg["tool_calls"]
+        if "tool_call_id" in msg:
+            clean_msg["tool_call_id"] = msg["tool_call_id"]
+        if "name" in msg:
+            clean_msg["name"] = msg["name"]
+
+        content = msg.get("content")
+        if content is not None:
+            if isinstance(content, list):
+                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+                content_str = " ".join(text_parts) if text_parts else "[Sent an image]"
+            elif isinstance(content, str):
+                if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
+                    content_str = "[Image base64 data removed]"
+                else:
+                    if msg.get("role") == "assistant":
+                        content_str = clean_thinking_tags(content)
+                    else:
+                        content_str = content
+            else:
+                content_str = str(content)
+
+            # Append message details (ID, Replies, Reactions) to the content for LLM awareness
+            msg_details = []
+            if msg.get("message_id"):
+                msg_details.append(f"ID: {msg['message_id']}")
+            if msg.get("reply_to_message_id"):
+                msg_details.append(f"Replying to: {msg['reply_to_message_id']}")
+
+            reactions = msg.get("reactions", {})
+            reaction_parts = []
+            if reactions.get("user"):
+                reaction_parts.append(f"User: {', '.join(reactions['user'])}")
+            if reactions.get("assistant"):
+                reaction_parts.append(f"Emery: {', '.join(reactions['assistant'])}")
+            if reaction_parts:
+                msg_details.append(f"Reactions: {', '.join(reaction_parts)}")
+
+            if msg_details:
+                prefix = f"[{' | '.join(msg_details)}] "
+                clean_msg["content"] = prefix + content_str
+            else:
+                clean_msg["content"] = content_str
+        else:
+            clean_msg["content"] = None if "tool_calls" in msg else ""
+
+        ollama_history.append(clean_msg)
+
+    return ollama_history
+
+
+def _build_main_model_payload(
+    *,
+    history_buffer,
+    model_to_use=MODEL_ID,
+    max_tokens: int = 8192,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+    top_k: int = 20,
+    allow_tools: bool = True,
+) -> tuple[dict, list[dict]]:
+    chat_template_kwargs = {"enable_thinking": bool(THINK)}
+    stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
+    ollama_history = _build_ollama_history(history_buffer)
+
+    payload = {
+        "model": model_to_use,
+        "messages": stable_prefix + ollama_history,
+        "stream": False,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "chat_template_kwargs": chat_template_kwargs,
+    }
+
+    if allow_tools and tools_schema:
+        payload["tools"] = tools_schema
+
+    return payload, ollama_history
+
+
+async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: str = "") -> bool:
+    if not history_buffer:
+        return False
+
+    payload, _ = _build_main_model_payload(
+        history_buffer=history_buffer,
+        model_to_use=model_to_use,
+        max_tokens=1,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=1,
+        allow_tools=True,
+    )
+
+    try:
+        label = f" ({reason})" if reason else ""
+        logging.info("🤖 ENGINE: Warming main model cache%s...", label)
+        async with globals.main_model_lock:
+            request_started = time.perf_counter()
+            r = await globals.http_client.post(MAIN_MODEL_URL, json=payload, timeout=900)
+            request_wall_seconds = time.perf_counter() - request_started
+
+        if r.status_code != 200:
+            logging.warning("⚠️ ENGINE: Cache warmup returned %s — %s", r.status_code, r.text[:200])
+            return False
+
+        _log_main_model_perf(r.json(), request_wall_seconds)
+        logging.info("🤖 ENGINE: Main model cache warmup complete%s.", label)
+        return True
+    except Exception as e:
+        logging.error("❌ ENGINE: Cache warmup failed: %s", e, exc_info=True)
+        return False
+
+
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
@@ -568,81 +691,16 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     else:
         sender_user_id = globals.current_user_id.get()
         
-    chat_template_kwargs = {"enable_thinking": bool(THINK)}
-    stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
     voice_sent_via_tool = False
     thinking_timeline = []
-    
-    ollama_history = []
-    for msg in history_buffer:
-        clean_msg = {"role": msg["role"]}
-        
-        # Preserve tool calling fields if present in history
-        if "tool_calls" in msg:
-            clean_msg["tool_calls"] = msg["tool_calls"]
-        if "tool_call_id" in msg:
-            clean_msg["tool_call_id"] = msg["tool_call_id"]
-        if "name" in msg:
-            clean_msg["name"] = msg["name"]
-            
-        content = msg.get("content")
-        if content is not None:
-            if isinstance(content, list):
-                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-                content_str = " ".join(text_parts) if text_parts else "[Sent an image]"
-            elif isinstance(content, str):
-                if len(content) > 5000 and not any(c.isspace() for c in content[1000:3000]):
-                    content_str = "[Image base64 data removed]"
-                else:
-                    if msg.get("role") == "assistant":
-                        content_str = clean_thinking_tags(content)
-                    else:
-                        content_str = content
-            else:
-                content_str = str(content)
-                
-            # Append message details (ID, Replies, Reactions) to the content for LLM awareness
-            msg_details = []
-            if msg.get("message_id"):
-                msg_details.append(f"ID: {msg['message_id']}")
-            if msg.get("reply_to_message_id"):
-                msg_details.append(f"Replying to: {msg['reply_to_message_id']}")
-                
-            reactions = msg.get("reactions", {})
-            reaction_parts = []
-            if reactions.get("user"):
-                reaction_parts.append(f"User: {', '.join(reactions['user'])}")
-            if reactions.get("assistant"):
-                reaction_parts.append(f"Emery: {', '.join(reactions['assistant'])}")
-            if reaction_parts:
-                msg_details.append(f"Reactions: {', '.join(reaction_parts)}")
-                
-            if msg_details:
-                prefix = f"[{' | '.join(msg_details)}] "
-                clean_msg["content"] = prefix + content_str
-            else:
-                clean_msg["content"] = content_str
-        else:
-            clean_msg["content"] = None if "tool_calls" in msg else ""
-            
-        ollama_history.append(clean_msg)
+    payload, ollama_history = _build_main_model_payload(
+        history_buffer=history_buffer,
+        model_to_use=model_to_use,
+        allow_tools=allow_tools,
+    )
     
     for loop_count in range(TOOL_LOOP):
-        full_context = stable_prefix + ollama_history
-        
-        payload = {
-            "model": model_to_use,
-            "messages": full_context,
-            "stream": False,
-            "max_tokens": 8192,
-            "temperature": 0.8,
-            "top_p": 0.95,
-            "top_k": 20,
-            "chat_template_kwargs": chat_template_kwargs,
-        }
-        
-        if allow_tools and tools_schema:
-            payload["tools"] = tools_schema
+        payload["messages"] = [{"role": "system", "content": get_stable_system_prompt()}] + ollama_history
  
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")

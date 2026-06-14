@@ -9,7 +9,8 @@ from pathlib import Path
 
 from emery.config import (
     USER_TIMEZONE, JOBS_FILE_PATH, TELEGRAM_GROUP_CHAT_ID,
-    ROUTINES_TOPIC_ID, CHAT_TOPIC_ID
+    ROUTINES_TOPIC_ID, CHAT_TOPIC_ID, ROUTINE_HISTORY_DEFER_SECONDS,
+    ENABLE_ROUTINE_CACHE_WARMUP
 )
 import emery.globals as globals
 from emery.telegram_delivery import try_send_rich_or_split_html_message, try_send_split_html_message
@@ -31,6 +32,300 @@ SHARED_TARGET_ALIASES = {"both", "us", "family", "everyone", "all", "we", "our"}
 CREATOR_TARGET_ALIASES = {"me", "myself", "my"}
 SECONDARY_TARGET_ALIASES = {"wife", "spouse", "partner", "her", "husband", "him"}
 SCHEDULE_TYPE_ORDER = ("once", "daily", "weekly", "monthly", "yearly", "interval")
+_PENDING_ROUTINE_HISTORY: dict[tuple[int, int | None], list[dict]] = {}
+_ROUTINE_HISTORY_FLUSH_JOB_PREFIX = "routine_history_flush"
+_ROUTINE_HISTORY_RESULT_CHARS = 1800
+_ROUTINE_HISTORY_PROMPT_CHARS = 500
+_ROUTINE_HISTORY_MAX_PENDING_ENTRIES = 5
+
+
+def _truncate_for_history(text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0].strip() + "..."
+
+
+def _routine_history_key(chat_id: int, message_thread_id: int | None) -> tuple[int, int | None]:
+    return chat_id, normalize_message_thread_id(chat_id, message_thread_id)
+
+
+def _is_routine_history_candidate(
+    *,
+    delivery_scope: str | None,
+    schedule_type: str | None,
+    route_to_routines: bool,
+    prompt: str | None,
+    description: str | None,
+) -> bool:
+    if delivery_scope == "routine":
+        return True
+    if delivery_scope:
+        return False
+    return (
+        str(schedule_type or "").lower() in RECURRING_SCHEDULE_TYPES
+        and route_to_routines
+        and not _looks_like_reminder(prompt or "", description or "")
+    )
+
+
+def _routine_destination_for_job_data(job_data: dict) -> tuple[int | None, int | None] | None:
+    if not isinstance(job_data, dict):
+        return None
+
+    delivery_scope = job_data.get("delivery_scope")
+    schedule_type = str(job_data.get("schedule_type") or "").lower()
+    route_to_routines = job_data.get("route_to_routines", True)
+    prompt = job_data.get("prompt")
+    description = job_data.get("description")
+
+    if not _is_routine_history_candidate(
+        delivery_scope=delivery_scope,
+        schedule_type=schedule_type,
+        route_to_routines=route_to_routines,
+        prompt=prompt,
+        description=description,
+    ):
+        return None
+
+    chat_id = job_data.get("chat_id") or job_data.get("origin_chat_id")
+    message_thread_id = job_data.get("message_thread_id") or job_data.get("origin_message_thread_id")
+
+    if TELEGRAM_GROUP_CHAT_ID is not None:
+        chat_id = TELEGRAM_GROUP_CHAT_ID
+    if ROUTINES_TOPIC_ID is not None:
+        message_thread_id = ROUTINES_TOPIC_ID
+
+    if chat_id is None:
+        return None
+    return chat_id, normalize_message_thread_id(chat_id, message_thread_id)
+
+
+def _job_next_time(job):
+    next_t = getattr(job, "next_t", None)
+    if callable(next_t):
+        next_t = next_t()
+    if next_t is None:
+        return None
+    if next_t.tzinfo is None:
+        if hasattr(USER_TIMEZONE, "localize"):
+            return USER_TIMEZONE.localize(next_t)
+        return next_t.replace(tzinfo=USER_TIMEZONE)
+    return next_t.astimezone(USER_TIMEZONE)
+
+
+def _job_data_next_time(job_data: dict, now: datetime):
+    if not isinstance(job_data, dict):
+        return None
+
+    schedule_type = str(job_data.get("schedule_type") or "").lower()
+    schedule_value = str(job_data.get("schedule_value") or "").strip()
+    try:
+        if schedule_type == "interval":
+            return now + timedelta(seconds=parse_duration_to_seconds(schedule_value))
+    except Exception as exc:
+        logging.debug("📅 SCHEDULER: Unable to infer next routine time from job data: %s", exc)
+    return None
+
+
+def _next_routine_eta_seconds(
+    *,
+    chat_id: int,
+    message_thread_id: int | None,
+    now: datetime,
+) -> float | None:
+    if not globals.application or not globals.application.job_queue:
+        return None
+
+    jobs_getter = getattr(globals.application.job_queue, "jobs", None)
+    if not callable(jobs_getter):
+        return None
+
+    target_key = _routine_history_key(chat_id, message_thread_id)
+    soonest_eta = None
+    try:
+        jobs = jobs_getter()
+    except Exception as exc:
+        logging.debug("📅 SCHEDULER: Unable to inspect JobQueue for nearby routines: %s", exc)
+        return None
+
+    for queued_job in jobs:
+        job_data = getattr(queued_job, "data", None)
+        destination = _routine_destination_for_job_data(job_data)
+        if destination != target_key:
+            continue
+
+        next_time = _job_next_time(queued_job)
+        eta_seconds = (next_time - now).total_seconds() if next_time is not None else None
+        if eta_seconds is None or eta_seconds <= 0:
+            fallback_next_time = _job_data_next_time(job_data, now)
+            eta_seconds = (fallback_next_time - now).total_seconds() if fallback_next_time is not None else None
+        if eta_seconds is None or eta_seconds <= 0:
+            continue
+        if soonest_eta is None or eta_seconds < soonest_eta:
+            soonest_eta = eta_seconds
+
+    return soonest_eta
+
+
+def _format_routine_history_summary(entries: list[dict]) -> str:
+    lines = ["Recent scheduled routine results were delivered to Telegram."]
+    for index, entry in enumerate(entries, start=1):
+        lines.extend([
+            "",
+            f"{index}. {entry['description']} ({entry['job_id']})",
+            f"   Time: {entry['timestamp']}",
+        ])
+        if entry.get("prompt"):
+            lines.append(f"   Prompt: {entry['prompt']}")
+        if entry.get("result"):
+            lines.append(f"   Delivered result excerpt: {entry['result']}")
+    return "\n".join(lines).strip()
+
+
+def _flush_pending_routine_history(key: tuple[int, int | None], *, reason: str) -> bool:
+    entries = _PENDING_ROUTINE_HISTORY.pop(key, [])
+    if not entries:
+        return False
+
+    chat_id, message_thread_id = key
+    if chat_id not in globals.chat_histories:
+        globals.chat_histories[chat_id] = deque()
+
+    globals.chat_histories[chat_id].append({
+        "role": "assistant",
+        "content": _format_routine_history_summary(entries),
+        "message_thread_id": message_thread_id,
+        "timestamp": datetime.now(USER_TIMEZONE),
+        "is_routine_history_summary": True,
+    })
+    logging.info(
+        "📅 SCHEDULER: Flushed %s compact routine history entr%s for chat_id=%s thread_id=%s (%s)",
+        len(entries),
+        "y" if len(entries) == 1 else "ies",
+        chat_id,
+        message_thread_id,
+        reason,
+    )
+    return True
+
+
+async def _warm_chat_history_after_routines(key: tuple[int, int | None], *, reason: str) -> None:
+    if not ENABLE_ROUTINE_CACHE_WARMUP:
+        return
+
+    chat_id, message_thread_id = key
+    history = globals.chat_histories.get(chat_id)
+    if not history:
+        return
+
+    from emery.engine import warm_main_model_cache
+
+    warmed = await warm_main_model_cache(
+        history,
+        reason=f"routine batch complete: chat_id={chat_id} thread_id={message_thread_id} {reason}",
+    )
+    if warmed:
+        logging.info(
+            "📅 SCHEDULER: Warmed chat cache after routine batch for chat_id=%s thread_id=%s (%s)",
+            chat_id,
+            message_thread_id,
+            reason,
+        )
+
+
+def _schedule_pending_routine_history_flush(key: tuple[int, int | None]) -> None:
+    if ROUTINE_HISTORY_DEFER_SECONDS <= 0:
+        return
+    if not globals.application or not globals.application.job_queue:
+        return
+
+    chat_id, message_thread_id = key
+    globals.application.job_queue.run_once(
+        _flush_pending_routine_history_job,
+        when=ROUTINE_HISTORY_DEFER_SECONDS,
+        data={"key": key},
+        name=f"{_ROUTINE_HISTORY_FLUSH_JOB_PREFIX}:{chat_id}:{message_thread_id or 0}",
+    )
+
+
+async def _flush_pending_routine_history_job(context):
+    key = (context.job.data or {}).get("key")
+    if not isinstance(key, tuple) or len(key) != 2:
+        return
+
+    chat_id, message_thread_id = key
+    now = datetime.now(USER_TIMEZONE)
+    eta_seconds = _next_routine_eta_seconds(
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        now=now,
+    )
+    if eta_seconds is not None and eta_seconds <= ROUTINE_HISTORY_DEFER_SECONDS:
+        logging.info(
+            "📅 SCHEDULER: Keeping compact routine history deferred for chat_id=%s thread_id=%s; next routine in %.0fs",
+            chat_id,
+            message_thread_id,
+            eta_seconds,
+        )
+        _schedule_pending_routine_history_flush(key)
+        return
+
+    if _flush_pending_routine_history(key, reason="timer"):
+        await _warm_chat_history_after_routines(key, reason="timer")
+
+
+def _record_routine_history(
+    *,
+    chat_id: int,
+    message_thread_id: int | None,
+    job_id: str,
+    description: str,
+    prompt: str | None,
+    result_text: str,
+    now: datetime,
+) -> bool:
+    from emery.helpers import clean_thinking_tags
+
+    key = _routine_history_key(chat_id, message_thread_id)
+    entry = {
+        "job_id": job_id or "unknown",
+        "description": description or "Scheduled routine",
+        "timestamp": now.strftime("%A, %B %d, %Y at %I:%M %p"),
+        "prompt": _truncate_for_history(prompt or "", _ROUTINE_HISTORY_PROMPT_CHARS),
+        "result": _truncate_for_history(clean_thinking_tags(result_text or ""), _ROUTINE_HISTORY_RESULT_CHARS),
+    }
+    pending_entries = _PENDING_ROUTINE_HISTORY.setdefault(key, [])
+    pending_entries.append(entry)
+
+    eta_seconds = _next_routine_eta_seconds(
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        now=now,
+    )
+    should_defer = (
+        ROUTINE_HISTORY_DEFER_SECONDS > 0
+        and eta_seconds is not None
+        and eta_seconds <= ROUTINE_HISTORY_DEFER_SECONDS
+    )
+
+    if len(pending_entries) >= _ROUTINE_HISTORY_MAX_PENDING_ENTRIES:
+        _flush_pending_routine_history(key, reason="pending limit")
+        if should_defer:
+            _schedule_pending_routine_history_flush(key)
+        return not should_defer
+
+    if should_defer:
+        logging.info(
+            "📅 SCHEDULER: Deferred compact routine history for job '%s' (%s); next routine in %.0fs",
+            description,
+            job_id,
+            eta_seconds,
+        )
+        _schedule_pending_routine_history_flush(key)
+        return False
+
+    return _flush_pending_routine_history(key, reason="no nearby routine")
 
 
 def _normalize_text(value: str) -> str:
@@ -603,6 +898,14 @@ async def run_custom_job(context):
 
         from emery.helpers import get_current_system_prompt
 
+        use_compact_routine_history = _is_routine_history_candidate(
+            delivery_scope=delivery_scope,
+            schedule_type=schedule_type,
+            route_to_routines=route_to_routines,
+            prompt=prompt,
+            description=description,
+        )
+
         runtime_context = await get_current_system_prompt(exec_prompt, active_user_id)
         now_dt = datetime.now(USER_TIMEZONE)
         scheduled_trigger = {
@@ -622,7 +925,8 @@ async def run_custom_job(context):
 
         # Keep scheduled jobs isolated from prior chat turns so each run produces one fresh report.
         res_text, voice_sent_via_tool = await emery_engine(job_history)
-        globals.chat_histories[chat_id].extend(job_history)
+        if not use_compact_routine_history:
+            globals.chat_histories[chat_id].extend(job_history)
         clean_res_text = clean_thinking_tags(res_text).strip()
         job_html_text = f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}"
         job_rich_text = f"# 🛡️ EMERYCHAT JOB: {_markdown_escape(description)}\n\n{rich_mention_prefix}{clean_res_text}"
@@ -682,12 +986,28 @@ async def run_custom_job(context):
                     logging.warning("⚠️ SCHEDULER: Job '%s' (%s) requested a voice memo, but none was sent.", description, job_id)
             except Exception as e:
                 logging.error("❌ SCHEDULER: Failed to send voice memo for job %s: %s", job_id, e, exc_info=True)
-        globals.chat_histories[chat_id].append({
-            "role": "assistant",
-            "content": res_text,
-            "message_thread_id": message_thread_id,
-            "timestamp": datetime.now(USER_TIMEZONE),
-        })
+        if use_compact_routine_history:
+            should_warm_cache = _record_routine_history(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                job_id=job_id,
+                description=description,
+                prompt=prompt,
+                result_text=res_text,
+                now=datetime.now(USER_TIMEZONE),
+            )
+            if should_warm_cache:
+                await _warm_chat_history_after_routines(
+                    _routine_history_key(chat_id, message_thread_id),
+                    reason="no nearby routine",
+                )
+        else:
+            globals.chat_histories[chat_id].append({
+                "role": "assistant",
+                "content": res_text,
+                "message_thread_id": message_thread_id,
+                "timestamp": datetime.now(USER_TIMEZONE),
+            })
     except Exception as e:
         logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
         

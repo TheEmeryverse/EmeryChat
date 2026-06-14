@@ -436,13 +436,15 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
 
-Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. This applies to normal chat turns, reaction-triggered evaluations, heartbeat evaluations, and scheduled jobs. Use `/clear` only when you intentionally want to reset the in-memory prompt context for that chat.
+Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. This applies to normal chat turns, reaction-triggered evaluations, heartbeat evaluations, and non-routine scheduled jobs. Routine jobs are still executed in isolated one-shot contexts, but their delivered results may be compacted and deferred before they are added back to chat history so closely spaced routines do not churn the prompt cache. After the last nearby routine has finished, Emery can issue a tiny discarded warmup completion against the full chat context so the next human query does not pay the full prefill cost. Use `/clear` only when you intentionally want to reset the in-memory prompt context for that chat.
 
 ### Scheduler and heartbeat
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ENABLE_SCHEDULER` | `true` | Enables custom job scheduling |
+| `ROUTINE_HISTORY_DEFER_SECONDS` | `600` | Defers compact routine-history ingestion when another routine is due soon |
+| `ENABLE_ROUTINE_CACHE_WARMUP` | `true` | Warms the normal chat prompt cache after the final nearby routine finishes |
 | `ENABLE_HEARTBEAT` | `true` | Enables inactivity check-ins |
 | `HEARTBEAT_INTERVAL_SECONDS` | `3600` | Heartbeat polling interval |
 | `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Silence before check-in |
