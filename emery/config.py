@@ -72,6 +72,8 @@ INTEGRATIONS_CONFIG_PATH = Path(os.getenv("INTEGRATIONS_CONFIG_PATH", str(CONFIG
 NEWS_FEEDS_CONFIG_PATH = Path(os.getenv("NEWS_FEEDS_CONFIG_PATH", str(CONFIG_DIR / "news_feeds.json")))
 WEATHER_LOCATIONS_FILE_PATH = os.getenv("WEATHER_LOCATIONS_FILE_PATH", str(CONFIG_DIR / "weather_locations.json"))
 JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", str(CONFIG_DIR / "custom_jobs.json"))
+EXPERT_ARCHIVE_DIR = os.getenv("EXPERT_ARCHIVE_DIR", "~/expert")
+EXPERT_INDEX_PATH = os.getenv("EXPERT_INDEX_PATH", str(CONFIG_DIR / "expert_sessions.json"))
 
 
 DEFAULT_NEWS_FEEDS = [
@@ -252,6 +254,7 @@ _raw_integrations = _ensure_json_file(INTEGRATIONS_CONFIG_PATH, _default_integra
 _raw_news_feeds = _ensure_json_file(NEWS_FEEDS_CONFIG_PATH, DEFAULT_NEWS_FEEDS)
 _ensure_json_file(Path(WEATHER_LOCATIONS_FILE_PATH), {})
 _ensure_json_file(Path(JOBS_FILE_PATH), [])
+_ensure_json_file(Path(EXPERT_INDEX_PATH), [])
 
 USERS_CONFIG = _normalize_users_config(_raw_users)
 INTEGRATIONS_CONFIG = _normalize_integrations_config(_raw_integrations)

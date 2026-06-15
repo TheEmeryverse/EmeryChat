@@ -22,6 +22,7 @@ The project is built around a simple operating model:
 - Maintains structured persistent memory in `data/memory/memory_store.json`
 - Supports family/group-chat behavior with silent listening, debounced replies, scoped memory ownership, and user-specific recall
 - Can schedule one-off or recurring jobs and send the results back into Telegram
+- Supports `/expert` foreground research sessions with multi-round source gathering, optional read-only econ/finance tools, rich reports, archive, and resume
 - Can route chat, routines, and security alerts into separate Telegram forum topics
 - Supports optional tools for:
   - Google Calendar
@@ -327,6 +328,8 @@ Routing behavior:
 
 ### Information and research
 
+- `/expert <topic>` deep research sessions with inline questions, read-only econ/finance context when enabled, rich reports, archive, and resume
+- `/expert list`, `/expert resume <id>`, `/expert open <id>`, `/expert status`, `/expert cancel`
 - Web search via SearXNG
 - Web content extraction and summarization
 - RSS headline aggregation
@@ -463,6 +466,7 @@ EmeryChat now generates and persists these files under `config/` on startup:
 - `config/news_feeds.json`: RSS feed list
 - `config/weather_locations.json`: saved weather aliases like `home` and `work`
 - `config/custom_jobs.json`: scheduled jobs
+- `config/expert_sessions.json`: index of archived `/expert` research sessions
 
 These files are app-managed and should survive restarts and rebuilds when `config/` is bind-mounted in Docker.
 
@@ -477,6 +481,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_NASA`, `NASA_API_KEY` | NASA APOD |
 | `ENABLE_SEARCH`, `SEARXNG_URL` | Web search |
 | `ENABLE_WEB_SCRAPING`, `ALLOW_PRIVATE_WEB_FETCH` | Web content fetch |
+| `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH` | `/expert` research archives and index |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |

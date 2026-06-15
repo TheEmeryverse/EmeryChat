@@ -921,7 +921,7 @@ async def _validate_fetch_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
-async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches website content
+async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: bool = True) -> dict: # Fetches website content
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -980,7 +980,7 @@ async def fetch_web_content(url: str, max_chars: int = 8000) -> dict: # Fetches 
                     "error": "The page yielded very little text. It may require JavaScript to render or be a login wall."
                 }
 
-            if len(cleaned_text) > 1500:
+            if summarize_long and len(cleaned_text) > 1500:
                 logging.debug(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {current_url}...")
                 summary_prompt = (
                     f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "

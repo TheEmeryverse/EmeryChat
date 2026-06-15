@@ -252,6 +252,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content_text = f"sent a GIF / Animation (File ID: {file_id})"
     else:
         content_text = update.message.text or "[Non-text message]"
+
+    # Expert sessions own their chat/thread while waiting for user direction.
+    # Route typed answers and close/archive intents there before normal chat handling.
+    if update.message.text:
+        from emery.expert import handle_expert_message
+        if await handle_expert_message(update, context, content_text):
+            return
         
     content = f"[{now_str}] {sender_name}: {content_text}"
         
