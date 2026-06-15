@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.error import BadRequest
 
 from emery.config import (
@@ -347,7 +347,7 @@ def _research_packet_digest(session: ExpertSession, limit: int = 8) -> str:
         chunks.append(
             f"{packet.get('id')} | {packet.get('question_id')} | {packet.get('question')}\n"
             f"Sources: {', '.join(packet.get('source_ids') or []) or 'none'} | "
-            f"Econ: {', '.join(packet.get('econ_result_ids') or []) or 'none'}\n"
+            f"Structured tool results: {', '.join(packet.get('econ_result_ids') or []) or 'none'}\n"
             f"Summary: {packet.get('summary')}\n"
             f"Gaps: {'; '.join(str(gap) for gap in (packet.get('gaps') or [])[:4])}"
         )
@@ -423,7 +423,7 @@ def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dic
         _record_event(
             session,
             "agenda_add",
-            f"Main model added {item['id']}: {item['question']}",
+            f"{MODEL_NAME} added {item['id']}: {item['question']}",
             priority=item.get("priority"),
             why=item.get("why"),
         )
@@ -448,11 +448,19 @@ def _expert_status_prefix(session: ExpertSession) -> str:
 
 
 def _expert_counts_text(session: ExpertSession) -> str:
-    econ_text = f" | Econ {_econ_count(session)}" if ENABLE_FINANCE else ""
-    return f"Round {session.round}/{session.max_rounds} | Sources {_source_count(session)}/{session.target_sources}{econ_text}"
+    return f"Round {session.round} | Sources {_source_count(session)}"
 
 
-async def _send_expert_progress(bot, session: ExpertSession, action: str, detail: str = "", *, reply_markup=None, detail_is_html: bool = False) -> None:
+async def _send_expert_progress(
+    bot,
+    session: ExpertSession,
+    action: str,
+    detail: str = "",
+    *,
+    reply_markup=None,
+    detail_is_html: bool = False,
+    reply_to_message_id: int | None = None,
+):
     logging.info(
         "EXPERT MODE %s PROGRESS: %s%s",
         session.id,
@@ -463,7 +471,13 @@ async def _send_expert_progress(bot, session: ExpertSession, action: str, detail
     if detail:
         lines.append(detail if detail_is_html else telegram_escape(detail))
     lines.append(f"<code>{_expert_counts_text(session)}</code>")
-    await _send_status(bot, session, "\n".join(lines), reply_markup=reply_markup)
+    return await _send_status(
+        bot,
+        session,
+        "\n".join(lines),
+        reply_markup=reply_markup,
+        reply_to_message_id=reply_to_message_id,
+    )
 
 
 def _load_index() -> list[dict]:
@@ -546,19 +560,24 @@ def _question_markup(session: ExpertSession) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(rows) if rows else None
 
 
-async def _send_status(bot, session: ExpertSession, text: str, *, reply_markup=None) -> None:
+async def _send_status(bot, session: ExpertSession, text: str, *, reply_markup=None, reply_to_message_id: int | None = None):
+    reply_parameters = None
+    if reply_to_message_id:
+        reply_parameters = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
     try:
-        await bot.send_message(
+        return await bot.send_message(
             chat_id=session.chat_id,
             text=text,
             parse_mode="HTML",
             message_thread_id=session.message_thread_id,
+            reply_parameters=reply_parameters,
             reply_markup=reply_markup,
         )
     except BadRequest as exc:
         logging.warning("EXPERT: Telegram rejected status message: %s", exc)
     except Exception as exc:
         logging.error("EXPERT: Failed to send status message: %s", exc, exc_info=True)
+    return None
 
 
 async def _send_expert_typing_once(bot, session: ExpertSession) -> None:
@@ -616,7 +635,8 @@ def _schedule_normal_chat_warmup(session: ExpertSession, reason: str) -> None:
 
 async def _query_main_model(prompt: str, system_prompt: str) -> str:
     logging.info(
-        "EXPERT MODE: querying main model with max_tokens=%s temp=%s top_p=%s",
+        "EXPERT MODE: querying %s primary endpoint with max_tokens=%s temp=%s top_p=%s",
+        MODEL_NAME,
         EXPERT_MAIN_MAX_TOKENS,
         EXPERT_MAIN_TEMPERATURE,
         EXPERT_MAIN_TOP_P,
@@ -641,7 +661,7 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
         async with globals.main_model_lock:
             response = await globals.http_client.post(MAIN_MODEL_URL, json=payload, timeout=900)
         if response.status_code != 200:
-            logging.error("EXPERT: Main model returned HTTP %s: %s", response.status_code, safe_preview(response.text))
+            logging.error("EXPERT: %s primary endpoint returned HTTP %s: %s", MODEL_NAME, response.status_code, safe_preview(response.text))
             return ""
         data = response.json()
         message = ((data.get("choices") or [{}])[0]).get("message", {})
@@ -650,13 +670,14 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         return clean_thinking_tags(content).strip()
     except Exception as exc:
-        logging.error("EXPERT: Main model query failed: %s", exc, exc_info=True)
+        logging.error("EXPERT: %s primary endpoint query failed: %s", MODEL_NAME, exc, exc_info=True)
         return ""
 
 
 async def _query_expert_fast_model(prompt: str, system_prompt: str = None) -> str:
     logging.info(
-        "EXPERT MODE: querying LFM2.5 coprocessor with max_tokens=%s temp=%s top_p=%s",
+        "EXPERT MODE: querying %s research endpoint with max_tokens=%s temp=%s top_p=%s",
+        MODEL_NAME,
         EXPERT_FAST_MAX_TOKENS,
         EXPERT_FAST_TEMPERATURE,
         EXPERT_FAST_TOP_P,
@@ -937,7 +958,7 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
             bot,
             session,
             f"Checking {tool_label}",
-            request.get("reason") or "Gathering structured economic context.",
+            request.get("reason") or "Gathering structured data context.",
         )
         logging.info("🔧 EXPERT TOOL: %s | Args: %s", tool, format_logging_payload(args))
         try:
@@ -949,7 +970,7 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
                 "stock history error",
             )) and "failed" not in str(raw_content or "").lower()
         except Exception as exc:
-            logging.error("EXPERT: Econ tool %s failed: %s", tool, exc, exc_info=True)
+            logging.error("EXPERT: Structured data tool %s failed: %s", tool, exc, exc_info=True)
             raw_content = f"{tool} failed: {exc}"
             success = False
 
@@ -958,15 +979,15 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
             await _send_expert_progress(
                 bot,
                 session,
-                f"Asking the coprocessor to summarize {tool_label}",
-                f"This will become E{len(session.econ_results) + 1}.",
+                f"{MODEL_NAME} summarizing {tool_label}",
+                "Converting the tool output into research notes.",
             )
         summary = await _summarize_econ_result(session, tool, args, content) if content else ""
         result = {
             "id": f"E{len(session.econ_results) + 1}",
             "tool": tool,
             "args": args,
-            "reason": request.get("reason") or "Economic context",
+            "reason": request.get("reason") or "Structured data context",
             "success": success,
             "content": content[:12000],
             "summary": summary,
@@ -1031,11 +1052,11 @@ async def _summarize_research_packet(session: ExpertSession, question: dict, sou
         f"User topic: {session.topic}\n"
         f"Question: {question.get('id')} - {question.get('question')}\n\n"
         f"New source notes:\n{_source_items_digest(sources) or 'No new sources.'}\n\n"
-        f"New econ/finance notes:\n{_econ_items_digest(econ_results) or 'No new econ results.'}"
+        f"New structured data notes:\n{_econ_items_digest(econ_results) or 'No new structured data results.'}"
     )
     parsed = _extract_json_object(await _query_expert_fast_model(
         prompt,
-        "You summarize bounded research packets for a lead research model. Return only JSON.",
+        f"You summarize bounded research packets for {MODEL_NAME}. Return only JSON.",
     )) or {}
     return {
         "summary": str(parsed.get("summary") or "No packet summary returned.").strip(),
@@ -1053,7 +1074,7 @@ async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> 
     await _send_expert_progress(
         bot,
         session,
-        f"Coprocessor researching {question_id}",
+        f"{MODEL_NAME} researching {question_id}",
         question.get("question") or "",
     )
     _record_event(
@@ -1121,7 +1142,7 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
     )
     parsed = _extract_json_object(await _query_main_model(
         prompt,
-        "You are Emery's lead research model. Return only compact JSON.",
+        f"You are {MODEL_NAME}. Return only compact JSON.",
     )) or {}
     return {
         "answered": bool(parsed.get("answered")),
@@ -1196,7 +1217,7 @@ def _questions_for_midloop_pause(session: ExpertSession, questions: list[dict]) 
     _record_event(
         session,
         "self_branch",
-        "Main model proposed a mid-loop user question, but mid-loop questions are disabled; continuing autonomously.",
+        f"{MODEL_NAME} proposed a mid-loop user question, but mid-loop questions are disabled; continuing autonomously.",
         questions=questions[:4],
     )
     return []
@@ -1246,19 +1267,21 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            await _send_expert_progress(
+            source_progress_message = await _send_expert_progress(
                 bot,
                 session,
                 f"Reading {_source_domain(result.get('url')) or 'source'}",
                 result.get("title") or result.get("url") or "Untitled source",
             )
+            source_progress_message_id = getattr(source_progress_message, "message_id", None)
             logging.info("🔧 EXPERT TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": result.get("url")}))
             fetched = await fetch_web_content(result["url"], max_chars=12000, summarize_long=False)
             await _send_expert_progress(
                 bot,
                 session,
-                f"Asking the coprocessor to summarize S{len(session.sources) + 1}",
+                f"{MODEL_NAME} summarizing the source",
                 fetched.get("title") or result.get("title") or result.get("url") or "Fetched source",
+                reply_to_message_id=source_progress_message_id,
             )
             source = await _summarize_source(session, result, fetched)
             session.sources.append(source)
@@ -1271,13 +1294,14 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
                 url=source.get("url"),
                 success=source.get("fetch_success"),
             )
-            source_label = source["id"] if source.get("fetch_success") else f"failed fetch from {source.get('domain')}"
+            source_action = "Saved source notes" if source.get("fetch_success") else "Saved failed fetch note"
             await _send_expert_progress(
                 bot,
                 session,
-                f"Saved source {source_label}",
+                source_action,
                 f"<b>{telegram_escape(source.get('domain') or 'unknown source')}</b>: {telegram_escape(source.get('title'))}",
                 detail_is_html=True,
+                reply_to_message_id=source_progress_message_id,
             )
 
     await _send_expert_progress(
@@ -1292,13 +1316,15 @@ async def _build_final_report(session: ExpertSession) -> str:
         "Write the final /expert research report as clean Telegram-friendly Markdown. "
         "Use headings, bullets, numbered lists, compact tables only if they fit, and citations like [S12]. "
         "Include: executive summary, timeline, key actors, core findings, competing interpretations, "
-        "uncertainty/confidence notes, and source appendix. Be explicit about source reliability and perspective.\n\n"
+        "and uncertainty/confidence notes. Do not include a full source appendix; Emery will send "
+        "all sources separately after the report. Be explicit about source reliability and perspective when it "
+        "matters to the analysis.\n\n"
         f"User request: {session.topic}\n"
         f"User follow-up inputs: {json.dumps(session.user_inputs, ensure_ascii=True)}\n\n"
         f"Main-model research agenda:\n{_agenda_digest(session)}\n\n"
         f"Research packets:\n{_research_packet_digest(session, limit=20)}\n\n"
         f"Source notes:\n{_source_digest(session, limit=40)}\n\n"
-        f"Structured econ/finance notes:\n{_econ_digest(session, limit=20)}"
+        f"Structured data notes:\n{_econ_digest(session, limit=20)}"
     )
     system = (
         "You are Emery's senior research writer. Produce only the finished report in Markdown. "
@@ -1312,13 +1338,37 @@ async def _build_final_report(session: ExpertSession) -> str:
         f"# Expert Report: {session.title}",
         "",
         "## Executive Summary",
-        "The expert research loop completed, but the final synthesis model did not return a report. Source notes are preserved below.",
-        "",
-        "## Source Appendix",
+        "The expert research loop completed, but the final synthesis model did not return a report. Sources are preserved in the separate Sources message.",
     ]
-    for source in session.sources:
-        lines.append(f"- [{source.get('id')}] {source.get('title')} - {source.get('url')}")
     return "\n".join(lines)
+
+
+def _source_appendix_markdown(session: ExpertSession) -> str:
+    lines = ["# Sources", ""]
+    if not session.sources:
+        lines.append("No web sources were fetched for this expert session.")
+        return "\n".join(lines)
+
+    for source in session.sources:
+        source_id = source.get("id") or "Source"
+        title = source.get("title") or "Untitled source"
+        url = source.get("url") or ""
+        reliability = source.get("reliability_label") or "Reliability not labeled"
+        perspective = source.get("perspective") or "Perspective not labeled"
+        status = "Fetched" if source.get("fetch_success") else "Fetch failed"
+
+        line = f"- [{source_id}] {title}"
+        if url:
+            line += f" - {url}"
+        line += f"\n  {status}; {reliability}; {perspective}."
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _archived_report_markdown(session: ExpertSession) -> str:
+    report = (session.final_report or "").strip()
+    sources = _source_appendix_markdown(session).strip()
+    return f"{report}\n\n{sources}\n" if report else f"{sources}\n"
 
 
 async def _deliver_final_report(bot, session: ExpertSession) -> None:
@@ -1328,6 +1378,14 @@ async def _deliver_final_report(bot, session: ExpertSession) -> None:
         session.chat_id,
         session.final_report,
         fallback_html_text=fallback_html,
+        message_thread_id=session.message_thread_id,
+    )
+    source_appendix = _source_appendix_markdown(session)
+    await send_rich_or_split_html_message(
+        bot,
+        session.chat_id,
+        source_appendix,
+        fallback_html_text=emery_format(source_appendix),
         message_thread_id=session.message_thread_id,
     )
     await _send_expert_progress(
@@ -1370,8 +1428,8 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 session,
                 "Started deep research",
                 f"<b>{telegram_escape(session.title)}</b>\n"
-                f"{telegram_escape(f'Planning for roughly {session.target_sources} sources across up to {session.max_rounds} rounds; depth can adjust if gaps remain')}"
-                f"{' with structured econ tools enabled.' if ENABLE_FINANCE else '.'}",
+                f"{telegram_escape('Running a bounded multi-round agenda; depth can adjust if gaps remain')}"
+                f"{' Research tools are available when relevant.' if ENABLE_FINANCE else '.'}",
                 detail_is_html=True,
             )
 
@@ -1411,7 +1469,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             await _send_expert_progress(
                 bot,
                 session,
-                f"Main model reviewing {packet.get('id')}",
+                f"{MODEL_NAME} reviewing {packet.get('id')}",
                 "Checking whether the research question was actually answered and whether new questions matter.",
             )
             evaluation = await _evaluate_research_packet(session, question, packet)
@@ -1419,7 +1477,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             _record_event(
                 session,
                 "agenda_eval",
-                f"Main model evaluated {question.get('id')}: status={question.get('status')} confidence={question.get('confidence')}",
+                f"{MODEL_NAME} evaluated {question.get('id')}: status={question.get('status')} confidence={question.get('confidence')}",
                 answered=bool(evaluation.get("answered")),
                 stop_now=bool(evaluation.get("stop_now")),
             )
@@ -1428,7 +1486,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 session.pending_questions = questions_for_pause
                 session.pending_answers = {}
                 session.status = "waiting_for_answer"
-                _record_event(session, "pause", "Main model paused for critical user direction.")
+                _record_event(session, "pause", f"{MODEL_NAME} paused for critical user direction.")
                 await _send_expert_progress(
                     bot,
                     session,
@@ -1442,7 +1500,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 and not _agenda_has_open_core_questions(session)
                 and _source_count(session) >= max(8, session.target_sources // 2)
             ):
-                _record_event(session, "stop", "Main model decided the core research agenda is sufficiently answered.")
+                _record_event(session, "stop", f"{MODEL_NAME} decided the core research agenda is sufficiently answered.")
                 break
 
         await _send_expert_progress(
@@ -1494,7 +1552,7 @@ def _archive_session(session: ExpertSession) -> Path:
         json.dumps(session.to_dict(), indent=2, ensure_ascii=True) + "\n",
         encoding="utf-8",
     )
-    (folder / "report.md").write_text(session.final_report or "", encoding="utf-8")
+    (folder / "report.md").write_text(_archived_report_markdown(session), encoding="utf-8")
     (folder / "sources.json").write_text(
         json.dumps(session.sources, indent=2, ensure_ascii=True) + "\n",
         encoding="utf-8",
@@ -1532,7 +1590,7 @@ def _render_loop_markdown(session: ExpertSession) -> str:
         f"- Created: {session.created_at}",
         f"- Status: {session.status}",
         f"- Sources: {_source_count(session)}",
-        f"- Econ results: {_econ_count(session)}",
+        f"- Structured tool results: {_econ_count(session)}",
         "",
         "## User Inputs",
     ]
@@ -1566,7 +1624,7 @@ def _render_loop_markdown(session: ExpertSession) -> str:
         lines.append(f"### {packet.get('id')}: {packet.get('question_id')}")
         lines.append(f"- Question: {packet.get('question')}")
         lines.append(f"- Sources: {', '.join(packet.get('source_ids') or [])}")
-        lines.append(f"- Econ results: {', '.join(packet.get('econ_result_ids') or [])}")
+        lines.append(f"- Structured tool results: {', '.join(packet.get('econ_result_ids') or [])}")
         lines.append(f"- Confidence: {packet.get('confidence')}")
         lines.append("")
         lines.append(str(packet.get("summary") or ""))
@@ -1587,7 +1645,7 @@ def _render_loop_markdown(session: ExpertSession) -> str:
         lines.append(str(source.get("summary") or ""))
         lines.append("")
 
-    lines.extend(["", "## Structured Econ/Finance Results"])
+    lines.extend(["", "## Structured Tool Results"])
     for result in session.econ_results:
         lines.append(f"### {result.get('id')}: {result.get('tool')}")
         lines.append(f"- Args: `{json.dumps(result.get('args') or {}, ensure_ascii=True)}`")
@@ -1940,9 +1998,9 @@ async def _send_expert_status(update, context) -> None:
     await update.message.reply_text(
         f"Expert session {session.id}: {session.status}\n"
         f"Title: {session.title}\n"
-        f"Round: {session.round}/{session.max_rounds}\n"
-        f"Sources: {_source_count(session)}/{session.target_sources}\n"
-        f"Econ results: {_econ_count(session)}"
+        f"Round: {session.round}\n"
+        f"Sources: {_source_count(session)}\n"
+        f"Structured tool results: {_econ_count(session)}"
     )
 
 
@@ -1958,8 +2016,8 @@ async def _send_expert_list(update, context) -> None:
         session_id = entry.get("id", "")
         title = entry.get("title", "Untitled")
         econ_count = entry.get("econ_result_count", 0)
-        econ_label = f", {econ_count} econ" if econ_count else ""
-        lines.append(f"- {session_id}: {title} ({entry.get('source_count', 0)} sources{econ_label})")
+        data_label = f", {econ_count} structured tool results" if econ_count else ""
+        lines.append(f"- {session_id}: {title} ({entry.get('source_count', 0)} sources{data_label})")
         rows.append([
             InlineKeyboardButton(f"Resume {session_id}", callback_data=_callback("resume", "archive", session_id)),
             InlineKeyboardButton(f"Open {session_id}", callback_data=_callback("open", "archive", session_id)),
