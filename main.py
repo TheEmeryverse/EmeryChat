@@ -10,6 +10,7 @@ from emery.config import (
 import emery.globals as globals
 from emery.bot import (
     error_handler,
+    handle_help_command,
     handle_clear_command,
     handle_wipe_command,
     handle_message,
@@ -60,6 +61,7 @@ if __name__ == '__main__':
     
 
     
+    application.add_handler(CommandHandler("help", handle_help_command))
     application.add_handler(CommandHandler("clear", handle_clear_command))
     application.add_handler(CommandHandler("wipe", handle_wipe_command))
     application.add_handler(CommandHandler("expert", handle_expert_command))

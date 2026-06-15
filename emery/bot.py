@@ -158,6 +158,39 @@ async def validate_telegram_routing(application) -> bool:
         return False
 
 # --- TELEGRAM HANDLERS ---
+def _help_text() -> str:
+    return "\n".join([
+        "<b>Emery commands</b>",
+        "",
+        "<b>General</b>",
+        "/help - Show this command list.",
+        "/clear - Clear this chat's active context history.",
+        "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
+        "",
+        "<b>Expert research</b>",
+        "/expert &lt;topic&gt; - Start a foreground deep research session.",
+        "/expert list - Show archived expert sessions with inline actions.",
+        "/expert status - Show the active expert session status for this chat/thread.",
+        "/expert resume &lt;id&gt; - Load an archived expert session without auto-continuing research.",
+        "/expert open &lt;id&gt; - Send the archived report for a session.",
+        "/expert cancel - Cancel the active expert session in this chat/thread.",
+        "",
+        "<b>While an expert report is complete</b>",
+        "Use the inline buttons to continue researching, refine the report, close/archive, or cancel.",
+        "Typed replies like \"move on\" or \"archive this\" close and archive the active expert session.",
+        "",
+        "<b>Natural language tools</b>",
+        "You can also ask normally for reminders/routines, weather, web research, news, finance/econ data, images, voice replies, memory updates, smart-home actions, and infrastructure checks when those integrations are enabled.",
+    ])
+
+
+async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram handler for /help command."""
+    if not is_user_allowed(update):
+        return
+    await update.message.reply_text(_help_text(), parse_mode="HTML")
+
+
 async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for /clear command."""
     if not is_user_allowed(update):

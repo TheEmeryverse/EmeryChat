@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -14,17 +15,39 @@ from telegram.error import BadRequest
 
 from emery.config import (
     ENABLE_FINANCE,
+    EXPERT_ALLOW_MIDLOOP_QUESTIONS,
     EXPERT_ARCHIVE_DIR,
+    EXPERT_DEFAULT_TARGET_SOURCES,
+    EXPERT_FAST_ENABLE_THINKING,
+    EXPERT_FAST_MAX_TOKENS,
+    EXPERT_FAST_MIN_P,
+    EXPERT_FAST_PRESENCE_PENALTY,
+    EXPERT_FAST_REPETITION_PENALTY,
+    EXPERT_FAST_TEMPERATURE,
+    EXPERT_FAST_TOP_K,
+    EXPERT_FAST_TOP_P,
     EXPERT_INDEX_PATH,
+    EXPERT_MAIN_ENABLE_THINKING,
+    EXPERT_MAIN_MAX_TOKENS,
+    EXPERT_MAIN_MIN_P,
+    EXPERT_MAIN_PRESENCE_PENALTY,
+    EXPERT_MAIN_REPETITION_PENALTY,
+    EXPERT_MAIN_TEMPERATURE,
+    EXPERT_MAIN_TOP_K,
+    EXPERT_MAIN_TOP_P,
+    EXPERT_MAX_AGENDA_QUESTIONS,
+    EXPERT_MAX_NEW_QUESTIONS,
+    EXPERT_MAX_SOURCES,
+    EXPERT_MAX_SUBTASKS_PER_QUESTION,
+    EXPERT_MIN_TARGET_SOURCES,
     MAIN_MODEL_URL,
     MODEL_ID,
     MODEL_NAME,
     SEARXNG_URL,
-    THINK,
     USER_TIMEZONE,
 )
 from emery.helpers import clean_thinking_tags, emery_format, query_fast_model, telegram_escape
-from emery.logging_utils import safe_preview
+from emery.logging_utils import format_logging_payload, safe_preview
 from emery.telegram_delivery import send_rich_or_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 from emery.tools import (
@@ -50,12 +73,13 @@ ACTIVE_SESSIONS: dict[tuple[int, int | None], "ExpertSession"] = {}
 SESSION_TASKS: dict[str, asyncio.Task] = {}
 
 CALLBACK_PREFIX = "expert"
-DEFAULT_TARGET_SOURCES = 20
-DEFAULT_MAX_SOURCES = 30
+DEFAULT_TARGET_SOURCES = EXPERT_DEFAULT_TARGET_SOURCES
+DEFAULT_MAX_SOURCES = EXPERT_MAX_SOURCES
 DEFAULT_MAX_ROUNDS = 6
 FETCHES_PER_ROUND = 6
 SEARCH_RESULTS_PER_QUERY = 8
 ECON_REQUESTS_PER_ROUND = 3
+AGENDA_PRIORITY_ORDER = {"core": 0, "supporting": 1, "optional": 2}
 
 COMPLETED_WAITING_STATES = {"completed_pending_user", "waiting_for_answer"}
 
@@ -83,6 +107,22 @@ ECON_TOOL_ALLOWED_ARGS = {
     "get_stock_snapshot": {"symbol"},
     "get_stock_price_history": {"symbol", "outputsize", "limit"},
     "get_global_macro_dashboard": {"countries", "start_year", "end_year"},
+}
+
+ECON_TOOL_LABELS = {
+    "search_fred_series": "FRED series search",
+    "get_fred_series_observations": "FRED observations",
+    "search_imf_indicators": "IMF indicator search",
+    "get_imf_datamapper_series": "IMF DataMapper series",
+    "get_stock_snapshot": "stock snapshot",
+    "get_stock_price_history": "stock price history",
+    "get_bond_market_dashboard": "bond market dashboard",
+    "get_inflation_dashboard": "inflation dashboard",
+    "get_us_macro_dashboard": "U.S. macro dashboard",
+    "get_equity_market_dashboard": "equity market dashboard",
+    "get_global_macro_dashboard": "global macro dashboard",
+    "get_housing_consumer_dashboard": "housing and consumer dashboard",
+    "get_labor_market_dashboard": "labor market dashboard",
 }
 
 
@@ -117,6 +157,9 @@ class ExpertSession:
     pending_questions: list[dict] = field(default_factory=list)
     pending_answers: dict[str, str] = field(default_factory=dict)
     user_inputs: list[dict] = field(default_factory=list)
+    research_agenda: list[dict] = field(default_factory=list)
+    research_packets: list[dict] = field(default_factory=list)
+    new_questions_added: int = 0
     final_report: str = ""
     final_report_versions: list[dict] = field(default_factory=list)
     archive_path: str = ""
@@ -208,6 +251,184 @@ def _econ_count(session: ExpertSession) -> int:
     return len([result for result in session.econ_results if result.get("success")])
 
 
+def _source_target_bounds() -> tuple[int, int, int]:
+    minimum = max(1, int(EXPERT_MIN_TARGET_SOURCES or 1))
+    maximum = max(minimum, int(EXPERT_MAX_SOURCES or minimum))
+    default = min(max(int(EXPERT_DEFAULT_TARGET_SOURCES or minimum), minimum), maximum)
+    return minimum, default, maximum
+
+
+def _normalize_source_target(raw_value) -> int:
+    minimum, default, maximum = _source_target_bounds()
+    try:
+        target = int(raw_value)
+    except (TypeError, ValueError):
+        target = default
+    return min(max(target, minimum), maximum)
+
+
+def _round_budget_for_target(target_sources: int) -> int:
+    per_round = max(1, FETCHES_PER_ROUND)
+    return max(DEFAULT_MAX_ROUNDS, ((int(target_sources) + per_round - 1) // per_round) + 2)
+
+
+def _normalize_priority(value: str) -> str:
+    priority = str(value or "").strip().lower()
+    return priority if priority in AGENDA_PRIORITY_ORDER else "supporting"
+
+
+def _agenda_question_id(index: int) -> str:
+    return f"Q{index}"
+
+
+def _normalize_agenda_questions(raw_questions, *, existing_count: int = 0, limit: int | None = None) -> list[dict]:
+    if not isinstance(raw_questions, list):
+        return []
+    limit = max(0, int(limit if limit is not None else EXPERT_MAX_AGENDA_QUESTIONS))
+    normalized = []
+    seen = set()
+    for raw in raw_questions:
+        if len(normalized) >= limit:
+            break
+        if isinstance(raw, str):
+            question = raw.strip()
+            priority = "supporting"
+            why = ""
+        elif isinstance(raw, dict):
+            question = str(raw.get("question") or raw.get("prompt") or raw.get("research_question") or "").strip()
+            priority = _normalize_priority(raw.get("priority"))
+            why = str(raw.get("why") or raw.get("why_it_matters") or raw.get("rationale") or "").strip()[:500]
+        else:
+            continue
+        question = re.sub(r"\s+", " ", question)
+        if not question:
+            continue
+        dedupe_key = question.lower().rstrip("?")
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        item_id = _agenda_question_id(existing_count + len(normalized) + 1)
+        normalized.append({
+            "id": item_id,
+            "question": question[:500],
+            "priority": priority,
+            "why": why,
+            "status": "pending",
+            "attempts": 0,
+            "created_at": _now_label(),
+            "answered_at": "",
+            "answer_summary": "",
+            "confidence": "",
+            "source_ids": [],
+            "econ_result_ids": [],
+        })
+    return normalized
+
+
+def _agenda_digest(session: ExpertSession) -> str:
+    if not session.research_agenda:
+        return "No agenda yet."
+    lines = []
+    for item in session.research_agenda:
+        lines.append(
+            f"{item.get('id')} | {item.get('priority')} | {item.get('status')} | attempts={item.get('attempts', 0)}\n"
+            f"Question: {item.get('question')}\n"
+            f"Answer: {item.get('answer_summary') or 'Not answered yet.'}"
+        )
+    return "\n\n".join(lines)
+
+
+def _research_packet_digest(session: ExpertSession, limit: int = 8) -> str:
+    packets = session.research_packets[-limit:]
+    if not packets:
+        return "No research packets yet."
+    chunks = []
+    for packet in packets:
+        chunks.append(
+            f"{packet.get('id')} | {packet.get('question_id')} | {packet.get('question')}\n"
+            f"Sources: {', '.join(packet.get('source_ids') or []) or 'none'} | "
+            f"Econ: {', '.join(packet.get('econ_result_ids') or []) or 'none'}\n"
+            f"Summary: {packet.get('summary')}\n"
+            f"Gaps: {'; '.join(str(gap) for gap in (packet.get('gaps') or [])[:4])}"
+        )
+    return "\n\n".join(chunks)
+
+
+def _select_next_agenda_question(session: ExpertSession) -> dict | None:
+    candidates = [
+        item for item in session.research_agenda
+        if item.get("status") in {"pending", "needs_more"}
+        and int(item.get("attempts") or 0) < max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION)
+    ]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: (
+            AGENDA_PRIORITY_ORDER.get(item.get("priority"), 1),
+            int(item.get("attempts") or 0),
+            str(item.get("id") or ""),
+        ),
+    )[0]
+
+
+def _agenda_has_open_core_questions(session: ExpertSession) -> bool:
+    return any(
+        item.get("priority") == "core"
+        and item.get("status") in {"pending", "needs_more", "in_progress"}
+        and int(item.get("attempts") or 0) < max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION)
+        for item in session.research_agenda
+    )
+
+
+def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dict, evaluation: dict) -> None:
+    answered = bool(evaluation.get("answered"))
+    confidence = str(evaluation.get("confidence") or "").strip()[:80]
+    answer_summary = str(evaluation.get("answer_summary") or packet.get("summary") or "").strip()[:2000]
+    question["confidence"] = confidence
+    question["answer_summary"] = answer_summary
+    question["source_ids"] = sorted(set((question.get("source_ids") or []) + (packet.get("source_ids") or [])))
+    question["econ_result_ids"] = sorted(set((question.get("econ_result_ids") or []) + (packet.get("econ_result_ids") or [])))
+
+    if answered:
+        question["status"] = "answered"
+        question["answered_at"] = _now_label()
+    elif int(question.get("attempts") or 0) >= max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION):
+        question["status"] = "exhausted"
+        question["answered_at"] = _now_label()
+    else:
+        question["status"] = "needs_more"
+
+    additions_allowed = max(0, min(
+        EXPERT_MAX_NEW_QUESTIONS - int(session.new_questions_added or 0),
+        EXPERT_MAX_AGENDA_QUESTIONS - len(session.research_agenda),
+    ))
+    raw_new_questions = evaluation.get("new_questions") if isinstance(evaluation, dict) else []
+    normalized_new = _normalize_agenda_questions(
+        raw_new_questions,
+        existing_count=len(session.research_agenda),
+        limit=additions_allowed,
+    )
+    existing = {
+        str(item.get("question") or "").lower().rstrip("?")
+        for item in session.research_agenda
+    }
+    for item in normalized_new:
+        key = str(item.get("question") or "").lower().rstrip("?")
+        if key in existing:
+            continue
+        session.research_agenda.append(item)
+        session.new_questions_added += 1
+        existing.add(key)
+        _record_event(
+            session,
+            "agenda_add",
+            f"Main model added {item['id']}: {item['question']}",
+            priority=item.get("priority"),
+            why=item.get("why"),
+        )
+
+
 def _record_event(session: ExpertSession, event_type: str, message: str, **metadata) -> None:
     session.loop_events.append({
         "time": _now_label(),
@@ -216,22 +437,28 @@ def _record_event(session: ExpertSession, event_type: str, message: str, **metad
         "metadata": metadata,
     })
     session.touch()
+    logging.info("EXPERT MODE %s %s: %s", session.id, event_type.upper(), message)
 
 
 def _expert_status_prefix(session: ExpertSession) -> str:
     return (
-        f"<b>Expert mode</b> "
-        f"<code>{session.id}</code> "
-        f"<b>R{session.round}/{session.max_rounds}</b>"
+        f"🧠 <b>EXPERT MODE:</b> "
+        f"<code>{session.id}</code>"
     )
 
 
 def _expert_counts_text(session: ExpertSession) -> str:
     econ_text = f" | Econ {_econ_count(session)}" if ENABLE_FINANCE else ""
-    return f"Sources {_source_count(session)}/{session.target_sources}{econ_text}"
+    return f"Round {session.round}/{session.max_rounds} | Sources {_source_count(session)}/{session.target_sources}{econ_text}"
 
 
 async def _send_expert_progress(bot, session: ExpertSession, action: str, detail: str = "", *, reply_markup=None, detail_is_html: bool = False) -> None:
+    logging.info(
+        "EXPERT MODE %s PROGRESS: %s%s",
+        session.id,
+        action,
+        f" | {safe_preview(detail, max_len=180)}" if detail else "",
+    )
     lines = [_expert_status_prefix(session), f"<i>{telegram_escape(action)}</i>"]
     if detail:
         lines.append(detail if detail_is_html else telegram_escape(detail))
@@ -334,6 +561,38 @@ async def _send_status(bot, session: ExpertSession, text: str, *, reply_markup=N
         logging.error("EXPERT: Failed to send status message: %s", exc, exc_info=True)
 
 
+async def _send_expert_typing_once(bot, session: ExpertSession) -> None:
+    try:
+        await bot.send_chat_action(
+            chat_id=session.chat_id,
+            action="typing",
+            message_thread_id=session.message_thread_id,
+        )
+    except Exception as exc:
+        logging.debug("EXPERT MODE %s: typing indicator failed: %s", session.id, exc)
+
+
+async def _expert_typing_loop(bot, session: ExpertSession, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        await _send_expert_typing_once(bot, session)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=4)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _start_expert_typing(bot, session: ExpertSession) -> tuple[asyncio.Event, asyncio.Task]:
+    stop_event = asyncio.Event()
+    return stop_event, asyncio.create_task(_expert_typing_loop(bot, session, stop_event))
+
+
+async def _stop_expert_typing(stop_event: asyncio.Event, task: asyncio.Task) -> None:
+    stop_event.set()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 async def _warm_normal_chat_context(session: ExpertSession, reason: str) -> None:
     history = globals.chat_histories.get(session.chat_id)
     if not history:
@@ -356,6 +615,12 @@ def _schedule_normal_chat_warmup(session: ExpertSession, reason: str) -> None:
 
 
 async def _query_main_model(prompt: str, system_prompt: str) -> str:
+    logging.info(
+        "EXPERT MODE: querying main model with max_tokens=%s temp=%s top_p=%s",
+        EXPERT_MAIN_MAX_TOKENS,
+        EXPERT_MAIN_TEMPERATURE,
+        EXPERT_MAIN_TOP_P,
+    )
     payload = {
         "model": MODEL_ID,
         "messages": [
@@ -363,9 +628,14 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         "stream": False,
-        "temperature": 0.35,
-        "top_p": 0.9,
-        "chat_template_kwargs": {"enable_thinking": bool(THINK)},
+        "temperature": EXPERT_MAIN_TEMPERATURE,
+        "top_p": EXPERT_MAIN_TOP_P,
+        "top_k": EXPERT_MAIN_TOP_K,
+        "min_p": EXPERT_MAIN_MIN_P,
+        "presence_penalty": EXPERT_MAIN_PRESENCE_PENALTY,
+        "repetition_penalty": EXPERT_MAIN_REPETITION_PENALTY,
+        "max_tokens": EXPERT_MAIN_MAX_TOKENS,
+        "chat_template_kwargs": {"enable_thinking": bool(EXPERT_MAIN_ENABLE_THINKING)},
     }
     try:
         async with globals.main_model_lock:
@@ -384,7 +654,29 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
         return ""
 
 
+async def _query_expert_fast_model(prompt: str, system_prompt: str = None) -> str:
+    logging.info(
+        "EXPERT MODE: querying LFM2.5 coprocessor with max_tokens=%s temp=%s top_p=%s",
+        EXPERT_FAST_MAX_TOKENS,
+        EXPERT_FAST_TEMPERATURE,
+        EXPERT_FAST_TOP_P,
+    )
+    return await query_fast_model(
+        prompt,
+        system_prompt=system_prompt,
+        max_tokens=EXPERT_FAST_MAX_TOKENS,
+        temperature=EXPERT_FAST_TEMPERATURE,
+        top_p=EXPERT_FAST_TOP_P,
+        top_k=EXPERT_FAST_TOP_K,
+        min_p=EXPERT_FAST_MIN_P,
+        presence_penalty=EXPERT_FAST_PRESENCE_PENALTY,
+        repetition_penalty=EXPERT_FAST_REPETITION_PENALTY,
+        enable_thinking=EXPERT_FAST_ENABLE_THINKING,
+    )
+
+
 async def _make_initial_plan(session: ExpertSession) -> dict:
+    min_sources, default_sources, max_sources = _source_target_bounds()
     econ_instruction = ""
     if ENABLE_FINANCE:
         econ_instruction = (
@@ -395,7 +687,13 @@ async def _make_initial_plan(session: ExpertSession) -> dict:
 
     prompt = (
         "Create a deep research plan for this user request. Return strict JSON with keys: "
-        "title, framing, search_queries, source_targets, econ_requests. Include 5-8 diverse web search queries."
+        "title, framing, target_source_count, agenda_questions, search_queries, source_targets, econ_requests. "
+        "Choose target_source_count based on the topic's breadth and uncertainty rather than a fixed example count. "
+        f"Use {default_sources} as the normal deep-research default, at least {min_sources} for narrow topics, "
+        f"and up to {max_sources} for broad, fast-moving, or contested topics. "
+        f"Include 4-8 agenda_questions, each with question, priority (core/supporting/optional), and why. "
+        f"Keep the agenda bounded; maximum total agenda questions is {EXPERT_MAX_AGENDA_QUESTIONS}. "
+        "Also include 3-6 seed search_queries for the first agenda item."
         f"{econ_instruction}\n\n"
         f"User request: {session.topic}"
     )
@@ -413,9 +711,25 @@ async def _make_initial_plan(session: ExpertSession) -> dict:
             f"{session.topic} regional analysis",
             f"{session.topic} timeline",
         ]
+    agenda_questions = _normalize_agenda_questions(
+        parsed.get("agenda_questions") or parsed.get("research_questions"),
+        limit=EXPERT_MAX_AGENDA_QUESTIONS,
+    )
+    if not agenda_questions:
+        agenda_questions = _normalize_agenda_questions([
+            {"question": f"What are the core facts and timeline for {session.topic}?", "priority": "core", "why": "Establishes the factual base."},
+            {"question": f"Who are the key actors in {session.topic}, and what are their stated positions?", "priority": "core", "why": "Identifies actors and incentives."},
+            {"question": f"What claims or interpretations about {session.topic} are disputed across sources?", "priority": "supporting", "why": "Surfaces uncertainty and disagreement."},
+        ], limit=EXPERT_MAX_AGENDA_QUESTIONS)
     return {
         "title": str(parsed.get("title") or session.title),
         "framing": str(parsed.get("framing") or ""),
+        "target_source_count": _normalize_source_target(
+            parsed.get("target_source_count")
+            or parsed.get("target_sources_count")
+            or parsed.get("source_count")
+        ),
+        "agenda_questions": agenda_questions,
         "search_queries": [str(query).strip() for query in queries if str(query).strip()][:8],
         "source_targets": parsed.get("source_targets") if isinstance(parsed.get("source_targets"), list) else [],
         "econ_requests": _normalize_econ_requests(parsed.get("econ_requests")),
@@ -460,7 +774,7 @@ async def _summarize_source(session: ExpertSession, source: dict, fetched: dict)
         f"Content:\n{content[:9000]}"
     )
     system = "You distill research sources into compact JSON notes. Return only JSON."
-    parsed = _extract_json_object(await query_fast_model(prompt, system)) or {}
+    parsed = _extract_json_object(await _query_expert_fast_model(prompt, system)) or {}
     return {
         "id": f"S{len(session.sources) + 1}",
         "title": fetched.get("title") or source.get("title") or "Untitled",
@@ -494,6 +808,19 @@ def _source_digest(session: ExpertSession, limit: int = 24) -> str:
     return "\n\n".join(chunks)
 
 
+def _source_items_digest(sources: list[dict], limit: int = 12) -> str:
+    chunks = []
+    for source in sources[:limit]:
+        claims = "; ".join(str(claim) for claim in source.get("key_claims", [])[:4])
+        chunks.append(
+            f"{source.get('id')} | {source.get('title')} | {source.get('domain')} | "
+            f"{source.get('reliability_label')} | {source.get('perspective')}\n"
+            f"Summary: {source.get('summary')}\n"
+            f"Claims: {claims}"
+        )
+    return "\n\n".join(chunks)
+
+
 def _econ_digest(session: ExpertSession, limit: int = 12) -> str:
     chunks = []
     for result in session.econ_results[:limit]:
@@ -503,6 +830,18 @@ def _econ_digest(session: ExpertSession, limit: int = 12) -> str:
             f"Args: {json.dumps(result.get('args') or {}, ensure_ascii=True)}\n"
             f"Summary: {result.get('summary')}\n"
             f"Content: {str(result.get('content') or '')[:1800]}"
+        )
+    return "\n\n".join(chunks)
+
+
+def _econ_items_digest(results: list[dict], limit: int = 8) -> str:
+    chunks = []
+    for result in results[:limit]:
+        chunks.append(
+            f"{result.get('id')} | {result.get('tool')} | {result.get('reason')} | "
+            f"success={result.get('success')}\n"
+            f"Summary: {result.get('summary')}\n"
+            f"Content: {str(result.get('content') or '')[:1200]}"
         )
     return "\n\n".join(chunks)
 
@@ -580,7 +919,7 @@ async def _summarize_econ_result(session: ExpertSession, tool: str, args: dict, 
         f"Args: {json.dumps(args, ensure_ascii=True)}\n\n"
         f"Result:\n{content[:9000]}"
     )
-    summary = await query_fast_model(prompt, "You summarize economic data for research synthesis.")
+    summary = await _query_expert_fast_model(prompt, "You summarize economic data for research synthesis.")
     return summary.strip() if summary else content[:1000]
 
 
@@ -593,6 +932,14 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
         tool = request["tool"]
         args = request["args"]
         function = ECON_TOOL_FUNCTIONS[tool]
+        tool_label = ECON_TOOL_LABELS.get(tool, tool.replace("_", " "))
+        await _send_expert_progress(
+            bot,
+            session,
+            f"Checking {tool_label}",
+            request.get("reason") or "Gathering structured economic context.",
+        )
+        logging.info("🔧 EXPERT TOOL: %s | Args: %s", tool, format_logging_payload(args))
         try:
             raw_content = await function(**args)
             success = not str(raw_content or "").lower().startswith((
@@ -607,6 +954,13 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
             success = False
 
         content = str(raw_content or "").strip()
+        if content:
+            await _send_expert_progress(
+                bot,
+                session,
+                f"Asking the coprocessor to summarize {tool_label}",
+                f"This will become E{len(session.econ_results) + 1}.",
+            )
         summary = await _summarize_econ_result(session, tool, args, content) if content else ""
         result = {
             "id": f"E{len(session.econ_results) + 1}",
@@ -629,44 +983,154 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
         await _send_expert_progress(
             bot,
             session,
-            f"ran structured econ tool {result['id']}",
-            f"<b>{telegram_escape(tool)}</b>: {telegram_escape(result['reason'])}",
+            f"Saved {result['id']} from {tool_label}",
+            f"<b>{telegram_escape(tool_label)}</b>: {telegram_escape(result['reason'])}",
             detail_is_html=True,
         )
 
 
-async def _plan_next_round(session: ExpertSession) -> dict:
-    econ_instruction = ""
-    if ENABLE_FINANCE:
-        econ_instruction = (
-            " You may include econ_requests for read-only structured economic/financial tools if they would close a gap. "
-            f"{_available_econ_tool_text()}"
-        )
-
+async def _plan_subagent_research(session: ExpertSession, question: dict) -> dict:
+    econ_instruction = f" {_available_econ_tool_text()}" if ENABLE_FINANCE else ""
     prompt = (
-        "Review the research state and decide the next step. Return strict JSON with keys: "
-        "stop_now (boolean), next_queries (array), econ_requests (array), critical_questions (array). "
-        "Each critical question may include prompt and options. Ask user questions only if their answer "
-        f"materially changes the research path; otherwise self-branch.{econ_instruction}\n\n"
-        f"Topic: {session.topic}\n"
-        f"Completed rounds: {session.round}\n"
-        f"Fetched source count: {_source_count(session)} target {session.target_sources}\n"
-        f"Econ result count: {_econ_count(session)}\n"
-        f"Recent user inputs: {json.dumps(session.user_inputs[-4:], ensure_ascii=True)}\n\n"
-        f"Source digest:\n{_source_digest(session)}\n\n"
-        f"Econ digest:\n{_econ_digest(session)}"
+        "You are Emery's research subagent. Plan one bounded research pass for the assigned question. "
+        "Return strict JSON with keys: search_queries, econ_requests, focus. "
+        "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question. "
+        "Use econ_requests only if structured read-only economic/financial data materially helps."
+        f"{econ_instruction}\n\n"
+        f"User topic: {session.topic}\n"
+        f"Assigned question: {question.get('id')} - {question.get('question')}\n"
+        f"Why it matters: {question.get('why')}\n"
+        f"Attempt: {int(question.get('attempts') or 0) + 1}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n"
+        f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+        f"Recent packets:\n{_research_packet_digest(session, limit=4)}"
     )
-    system = "You are Emery's expert research planner. Return only compact JSON."
-    parsed = _extract_json_object(await query_fast_model(prompt, system)) or {}
-    next_queries = parsed.get("next_queries") if isinstance(parsed.get("next_queries"), list) else []
-    questions = parsed.get("critical_questions") if isinstance(parsed.get("critical_questions"), list) else []
+    parsed = _extract_json_object(await _query_expert_fast_model(
+        prompt,
+        "You are a bounded research subagent. Return only compact JSON.",
+    )) or {}
+    queries = parsed.get("search_queries") if isinstance(parsed.get("search_queries"), list) else []
+    clean_queries = [str(query).strip() for query in queries if str(query).strip()][:6]
+    if not clean_queries:
+        clean_queries = [
+            f"{session.topic} {question.get('question')}",
+            f"{question.get('question')} latest sources",
+            f"{question.get('question')} timeline actors",
+        ]
     return {
-        "stop_now": bool(parsed.get("stop_now")) and _source_count(session) >= max(8, session.target_sources // 2),
-        "next_queries": [str(query).strip() for query in next_queries if str(query).strip()][:6],
+        "search_queries": clean_queries,
         "econ_requests": _normalize_econ_requests(parsed.get("econ_requests")),
-        "critical_questions": _normalize_questions(questions),
+        "focus": str(parsed.get("focus") or question.get("question") or "").strip()[:500],
     }
 
+
+async def _summarize_research_packet(session: ExpertSession, question: dict, sources: list[dict], econ_results: list[dict]) -> dict:
+    prompt = (
+        "Summarize this bounded research pass for the main expert model. Return strict JSON with keys: "
+        "summary, key_findings, contradictions, gaps, confidence. Be concise and cite source IDs like [S3]. "
+        "Do not decide the next agenda step.\n\n"
+        f"User topic: {session.topic}\n"
+        f"Question: {question.get('id')} - {question.get('question')}\n\n"
+        f"New source notes:\n{_source_items_digest(sources) or 'No new sources.'}\n\n"
+        f"New econ/finance notes:\n{_econ_items_digest(econ_results) or 'No new econ results.'}"
+    )
+    parsed = _extract_json_object(await _query_expert_fast_model(
+        prompt,
+        "You summarize bounded research packets for a lead research model. Return only JSON.",
+    )) or {}
+    return {
+        "summary": str(parsed.get("summary") or "No packet summary returned.").strip(),
+        "key_findings": parsed.get("key_findings") if isinstance(parsed.get("key_findings"), list) else [],
+        "contradictions": parsed.get("contradictions") if isinstance(parsed.get("contradictions"), list) else [],
+        "gaps": parsed.get("gaps") if isinstance(parsed.get("gaps"), list) else [],
+        "confidence": str(parsed.get("confidence") or "unlabeled").strip(),
+    }
+
+
+async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> dict:
+    question["status"] = "in_progress"
+    question["attempts"] = int(question.get("attempts") or 0) + 1
+    question_id = question.get("id") or "Q?"
+    await _send_expert_progress(
+        bot,
+        session,
+        f"Coprocessor researching {question_id}",
+        question.get("question") or "",
+    )
+    _record_event(
+        session,
+        "subtask_start",
+        f"Started {question_id}: {question.get('question')}",
+        attempts=question.get("attempts"),
+    )
+
+    plan = await _plan_subagent_research(session, question)
+    source_start = len(session.sources)
+    econ_start = len(session.econ_results)
+    if plan.get("econ_requests"):
+        await _run_econ_requests(bot, session, plan["econ_requests"])
+    await _fetch_round(bot, session, plan["search_queries"])
+    new_sources = session.sources[source_start:]
+    new_econ = session.econ_results[econ_start:]
+    packet_notes = await _summarize_research_packet(session, question, new_sources, new_econ)
+    packet = {
+        "id": f"P{len(session.research_packets) + 1}",
+        "question_id": question_id,
+        "question": question.get("question"),
+        "attempt": question.get("attempts"),
+        "focus": plan.get("focus"),
+        "search_queries": plan.get("search_queries") or [],
+        "source_ids": [source.get("id") for source in new_sources if source.get("id")],
+        "econ_result_ids": [result.get("id") for result in new_econ if result.get("id")],
+        "created_at": _now_label(),
+        **packet_notes,
+    }
+    session.research_packets.append(packet)
+    _record_event(
+        session,
+        "research_packet",
+        f"Completed {packet['id']} for {question_id}: {packet.get('summary')[:240]}",
+        source_ids=packet["source_ids"],
+        econ_result_ids=packet["econ_result_ids"],
+    )
+    return packet
+
+
+async def _evaluate_research_packet(session: ExpertSession, question: dict, packet: dict) -> dict:
+    remaining_new = max(0, EXPERT_MAX_NEW_QUESTIONS - int(session.new_questions_added or 0))
+    remaining_total = max(0, EXPERT_MAX_AGENDA_QUESTIONS - len(session.research_agenda))
+    question_instruction = (
+        "Mid-loop user questions are disabled. Return critical_questions as an empty array and make the best research assumption yourself."
+        if not EXPERT_ALLOW_MIDLOOP_QUESTIONS
+        else "You may include critical_questions only when a user preference would materially change the research path."
+    )
+    prompt = (
+        "You are the main expert research lead. Evaluate whether the subagent answered the assigned question. "
+        "Return strict JSON with keys: answered (boolean), confidence, answer_summary, new_questions, critical_questions, stop_now. "
+        "You own the agenda. Add new_questions only if new information materially changes the final answer. "
+        "Do not add rabbit holes or background-only questions. Each new question must include question, priority "
+        "(core/supporting/optional), and why. Respect the remaining budgets. "
+        f"{question_instruction}\n\n"
+        f"User topic: {session.topic}\n"
+        f"Remaining new-question budget: {remaining_new}\n"
+        f"Remaining total agenda slots: {remaining_total}\n"
+        f"Assigned question: {question.get('id')} - {question.get('question')}\n"
+        f"Question priority: {question.get('priority')}\n"
+        f"Attempt: {question.get('attempts')}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n\n"
+        f"Agenda:\n{_agenda_digest(session)}\n\n"
+        f"Research packet:\n{json.dumps(packet, ensure_ascii=True, indent=2)}"
+    )
+    parsed = _extract_json_object(await _query_main_model(
+        prompt,
+        "You are Emery's lead research model. Return only compact JSON.",
+    )) or {}
+    return {
+        "answered": bool(parsed.get("answered")),
+        "confidence": str(parsed.get("confidence") or packet.get("confidence") or "").strip(),
+        "answer_summary": str(parsed.get("answer_summary") or packet.get("summary") or "").strip(),
+        "new_questions": parsed.get("new_questions") if isinstance(parsed.get("new_questions"), list) else [],
+        "critical_questions": _normalize_questions(parsed.get("critical_questions") if isinstance(parsed.get("critical_questions"), list) else []),
+        "stop_now": bool(parsed.get("stop_now")),
+    }
 
 def _normalize_questions(raw_questions: list) -> list[dict]:
     questions = []
@@ -694,15 +1158,64 @@ def _normalize_questions(raw_questions: list) -> list[dict]:
     return questions
 
 
+def _format_direction_prompt(prompt: str) -> str:
+    text = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    if not text:
+        return "Which direction should I take next?"
+    if text.endswith("?"):
+        return text
+
+    cleaned = text.rstrip(".:; ")
+    lowered = cleaned.lower()
+    imperative_prefixes = (
+        "provide ",
+        "summarize ",
+        "include ",
+        "focus ",
+        "compare ",
+        "analyze ",
+        "investigate ",
+        "research ",
+        "explain ",
+        "cover ",
+        "add ",
+        "write ",
+        "detail ",
+    )
+    if lowered.startswith(imperative_prefixes):
+        return f"Should I {cleaned[:1].lower()}{cleaned[1:]} now, or keep researching?"
+    return f"Should I use this direction for the next research branch: {cleaned}?"
+
+
+def _questions_for_midloop_pause(session: ExpertSession, questions: list[dict]) -> list[dict]:
+    if not questions:
+        return []
+    if EXPERT_ALLOW_MIDLOOP_QUESTIONS:
+        return questions
+
+    _record_event(
+        session,
+        "self_branch",
+        "Main model proposed a mid-loop user question, but mid-loop questions are disabled; continuing autonomously.",
+        questions=questions[:4],
+    )
+    return []
+
+
 async def _ask_pending_questions(bot, session: ExpertSession) -> None:
-    lines = ["<b>Expert needs direction</b>", ""]
+    lines = [
+        f"{_expert_status_prefix(session)}",
+        "<b>Research fork</b>",
+        "I found a choice that could change the next branch of research. Pick an option, or type your own instruction.",
+        "",
+    ]
     for index, question in enumerate(session.pending_questions[:4], start=1):
-        lines.append(f"{index}. {question.get('prompt')}")
+        lines.append(f"<b>{index}. {telegram_escape(_format_direction_prompt(question.get('prompt')))}</b>")
         for option in question.get("options", [])[:4]:
             desc = f" - {option.get('description')}" if option.get("description") else ""
-            lines.append(f"   - {option.get('label')}{desc}")
+            lines.append(f"   • {telegram_escape(option.get('label'))}{telegram_escape(desc)}")
         lines.append("")
-    lines.append("Tap options below, or type your answer in your own words.")
+    lines.append("I'll wait here until you choose an option or reply in your own words.")
     await _send_status(bot, session, "\n".join(lines).strip(), reply_markup=_question_markup(session))
 
 
@@ -715,6 +1228,13 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             break
         if query not in session.search_queries:
             session.search_queries.append(query)
+        await _send_expert_progress(
+            bot,
+            session,
+            "Searching the web",
+            query,
+        )
+        logging.info("🔧 EXPERT TOOL: web_search | Args: %s", format_logging_payload({"query": query}))
         results = await _search_web(query)
         session.search_results.extend(results)
         _record_event(session, "search", f"Search query: {query}", results=len(results))
@@ -726,7 +1246,20 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
+            await _send_expert_progress(
+                bot,
+                session,
+                f"Reading {_source_domain(result.get('url')) or 'source'}",
+                result.get("title") or result.get("url") or "Untitled source",
+            )
+            logging.info("🔧 EXPERT TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": result.get("url")}))
             fetched = await fetch_web_content(result["url"], max_chars=12000, summarize_long=False)
+            await _send_expert_progress(
+                bot,
+                session,
+                f"Asking the coprocessor to summarize S{len(session.sources) + 1}",
+                fetched.get("title") or result.get("title") or result.get("url") or "Fetched source",
+            )
             source = await _summarize_source(session, result, fetched)
             session.sources.append(source)
             fetches_this_round += 1
@@ -742,7 +1275,7 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             await _send_expert_progress(
                 bot,
                 session,
-                f"read source {source_label}",
+                f"Saved source {source_label}",
                 f"<b>{telegram_escape(source.get('domain') or 'unknown source')}</b>: {telegram_escape(source.get('title'))}",
                 detail_is_html=True,
             )
@@ -750,7 +1283,7 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
     await _send_expert_progress(
         bot,
         session,
-        f"completed research round {session.round}",
+        f"Completed research round {session.round}",
     )
 
 
@@ -762,6 +1295,8 @@ async def _build_final_report(session: ExpertSession) -> str:
         "uncertainty/confidence notes, and source appendix. Be explicit about source reliability and perspective.\n\n"
         f"User request: {session.topic}\n"
         f"User follow-up inputs: {json.dumps(session.user_inputs, ensure_ascii=True)}\n\n"
+        f"Main-model research agenda:\n{_agenda_digest(session)}\n\n"
+        f"Research packets:\n{_research_packet_digest(session, limit=20)}\n\n"
         f"Source notes:\n{_source_digest(session, limit=40)}\n\n"
         f"Structured econ/finance notes:\n{_econ_digest(session, limit=20)}"
     )
@@ -798,7 +1333,7 @@ async def _deliver_final_report(bot, session: ExpertSession) -> None:
     await _send_expert_progress(
         bot,
         session,
-        "research loop complete",
+        "Research loop complete",
         "The full loop is still active. What should I do next?",
         reply_markup=_session_action_markup(session),
     )
@@ -807,65 +1342,115 @@ async def _deliver_final_report(bot, session: ExpertSession) -> None:
 
 async def _run_research_session(session: ExpertSession, bot) -> None:
     current_task = asyncio.current_task()
+    typing_stop, typing_task = _start_expert_typing(bot, session)
     try:
         ACTIVE_SESSIONS[session.key()] = session
-        if session.round == 0 and not session.search_queries:
+        if session.round == 0 and not session.search_queries and not session.research_agenda:
+            await _send_expert_progress(bot, session, "Building the expert research plan")
             plan = await _make_initial_plan(session)
             session.title = plan["title"]
+            session.target_sources = _normalize_source_target(plan.get("target_source_count"))
+            session.max_sources = max(session.target_sources, DEFAULT_MAX_SOURCES)
+            session.max_rounds = max(session.max_rounds, _round_budget_for_target(session.target_sources))
+            session.research_agenda = plan["agenda_questions"]
             session.search_queries.extend(plan["search_queries"])
-            _record_event(session, "plan", plan.get("framing") or "Initial research plan created.")
+            _record_event(
+                session,
+                "plan",
+                plan.get("framing") or "Initial research plan created.",
+                target_source_count=session.target_sources,
+                max_sources=session.max_sources,
+                max_rounds=session.max_rounds,
+                agenda_count=len(session.research_agenda),
+            )
             if plan.get("econ_requests"):
                 await _run_econ_requests(bot, session, plan["econ_requests"])
             await _send_expert_progress(
                 bot,
                 session,
-                "started deep research",
+                "Started deep research",
                 f"<b>{telegram_escape(session.title)}</b>\n"
-                f"{telegram_escape(f'Targeting {session.target_sources}+ sources across multiple rounds')}"
+                f"{telegram_escape(f'Planning for roughly {session.target_sources} sources across up to {session.max_rounds} rounds; depth can adjust if gaps remain')}"
                 f"{' with structured econ tools enabled.' if ENABLE_FINANCE else '.'}",
                 detail_is_html=True,
             )
 
         session.status = "running"
-        while session.status == "running" and session.round < session.max_rounds and _source_count(session) < session.target_sources:
+        while session.status == "running" and session.round < session.max_rounds and _source_count(session) < session.max_sources:
+            if session.followup_instruction:
+                additions_allowed = max(0, EXPERT_MAX_AGENDA_QUESTIONS - len(session.research_agenda))
+                if additions_allowed:
+                    added = _normalize_agenda_questions([{
+                        "question": session.followup_instruction,
+                        "priority": "core",
+                        "why": "User requested this direction while continuing the expert session.",
+                    }], existing_count=len(session.research_agenda), limit=1)
+                    session.research_agenda.extend(added)
+                    for item in added:
+                        _record_event(session, "agenda_add", f"User-added {item['id']}: {item['question']}")
+                session.followup_instruction = ""
+
+            question = _select_next_agenda_question(session)
+            if not question:
+                _record_event(session, "agenda_done", "No open agenda questions remain within budget.")
+                break
+            if _source_count(session) >= session.target_sources and not _agenda_has_open_core_questions(session):
+                _record_event(session, "stop", "Source target reached and core agenda questions are resolved.")
+                break
+
             session.round += 1
             session.touch()
-            if session.followup_instruction:
-                _record_event(session, "user_followup", session.followup_instruction)
-
-            if session.round == 1:
-                queries = session.search_queries[:6]
-            else:
-                next_plan = await _plan_next_round(session)
-                if next_plan["critical_questions"]:
-                    session.pending_questions = next_plan["critical_questions"]
-                    session.pending_answers = {}
-                    session.status = "waiting_for_answer"
-                    _record_event(session, "pause", "Paused for critical user direction.")
-                    await _ask_pending_questions(bot, session)
-                    return
-                if next_plan["stop_now"]:
-                    break
-                queries = next_plan["next_queries"] or [
-                    f"{session.topic} latest analysis",
-                    f"{session.topic} timeline actors",
-                    f"{session.topic} regional sources",
-                ]
-                if next_plan.get("econ_requests"):
-                    await _run_econ_requests(bot, session, next_plan["econ_requests"])
-
-            if session.followup_instruction:
-                queries = [f"{session.topic} {session.followup_instruction}", *queries]
-                session.followup_instruction = ""
 
             await _send_expert_progress(
                 bot,
                 session,
-                f"running research round {session.round}",
-                "Searching, reading, and updating the research map.",
+                f"Running agenda question {question.get('id')}",
+                question.get("question") or "",
             )
-            await _fetch_round(bot, session, queries[:6])
+            packet = await _run_research_subtask(bot, session, question)
+            await _send_expert_progress(
+                bot,
+                session,
+                f"Main model reviewing {packet.get('id')}",
+                "Checking whether the research question was actually answered and whether new questions matter.",
+            )
+            evaluation = await _evaluate_research_packet(session, question, packet)
+            _apply_agenda_evaluation(session, question, packet, evaluation)
+            _record_event(
+                session,
+                "agenda_eval",
+                f"Main model evaluated {question.get('id')}: status={question.get('status')} confidence={question.get('confidence')}",
+                answered=bool(evaluation.get("answered")),
+                stop_now=bool(evaluation.get("stop_now")),
+            )
+            questions_for_pause = _questions_for_midloop_pause(session, evaluation.get("critical_questions") or [])
+            if questions_for_pause:
+                session.pending_questions = questions_for_pause
+                session.pending_answers = {}
+                session.status = "waiting_for_answer"
+                _record_event(session, "pause", "Main model paused for critical user direction.")
+                await _send_expert_progress(
+                    bot,
+                    session,
+                    "Asking you for expert direction",
+                    "Your answer will steer the next research branch.",
+                )
+                await _ask_pending_questions(bot, session)
+                return
+            if (
+                evaluation.get("stop_now")
+                and not _agenda_has_open_core_questions(session)
+                and _source_count(session) >= max(8, session.target_sources // 2)
+            ):
+                _record_event(session, "stop", "Main model decided the core research agenda is sufficiently answered.")
+                break
 
+        await _send_expert_progress(
+            bot,
+            session,
+            "Writing the final expert report",
+            "Synthesizing the full loop into Telegram-friendly Markdown.",
+        )
         session.final_report = await _build_final_report(session)
         session.final_report_versions.append({"time": _now_label(), "report": session.final_report})
         session.status = "completed_pending_user"
@@ -879,8 +1464,9 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
         session.status = "error"
         _record_event(session, "error", f"Expert loop failed: {exc}")
         logging.error("EXPERT: Session %s failed: %s", session.id, exc, exc_info=True)
-        await _send_expert_progress(bot, session, "failed", str(exc))
+        await _send_expert_progress(bot, session, "Expert research failed", str(exc))
     finally:
+        await _stop_expert_typing(typing_stop, typing_task)
         if SESSION_TASKS.get(session.id) is current_task:
             SESSION_TASKS.pop(session.id, None)
 
@@ -961,6 +1547,36 @@ def _render_loop_markdown(session: ExpertSession) -> str:
     for query in session.search_queries:
         lines.append(f"- {query}")
 
+    lines.extend(["", "## Research Agenda"])
+    for item in session.research_agenda:
+        lines.append(f"### {item.get('id')}: {item.get('question')}")
+        lines.append(f"- Priority: {item.get('priority')}")
+        lines.append(f"- Status: {item.get('status')}")
+        lines.append(f"- Attempts: {item.get('attempts')}")
+        lines.append(f"- Confidence: {item.get('confidence')}")
+        if item.get("why"):
+            lines.append(f"- Why: {item.get('why')}")
+        if item.get("answer_summary"):
+            lines.append("")
+            lines.append(str(item.get("answer_summary")))
+        lines.append("")
+
+    lines.extend(["", "## Research Packets"])
+    for packet in session.research_packets:
+        lines.append(f"### {packet.get('id')}: {packet.get('question_id')}")
+        lines.append(f"- Question: {packet.get('question')}")
+        lines.append(f"- Sources: {', '.join(packet.get('source_ids') or [])}")
+        lines.append(f"- Econ results: {', '.join(packet.get('econ_result_ids') or [])}")
+        lines.append(f"- Confidence: {packet.get('confidence')}")
+        lines.append("")
+        lines.append(str(packet.get("summary") or ""))
+        if packet.get("gaps"):
+            lines.append("")
+            lines.append("Gaps:")
+            for gap in packet.get("gaps") or []:
+                lines.append(f"- {gap}")
+        lines.append("")
+
     lines.extend(["", "## Sources"])
     for source in session.sources:
         lines.append(f"### {source.get('id')}: {source.get('title')}")
@@ -999,7 +1615,7 @@ async def _close_and_archive(bot, session: ExpertSession) -> None:
     await _send_expert_progress(
         bot,
         session,
-        "archived session",
+        "Archived session",
         f"Saved to:\n<code>{telegram_escape(folder)}</code>",
         detail_is_html=True,
     )
@@ -1052,7 +1668,7 @@ async def _classify_expert_user_intent(session: ExpertSession, text: str) -> str
         f"{state_instruction}\n\n"
         f"User message: {text}"
     )
-    result = await query_fast_model(
+    result = await _query_expert_fast_model(
         prompt,
         "You are a strict intent classifier for an active expert research session. Return one label only.",
     )
@@ -1073,20 +1689,24 @@ async def _exit_waiting_session(bot, session: ExpertSession, action: str) -> boo
 
 
 async def _refine_report(bot, session: ExpertSession, instruction: str) -> None:
-    await _send_expert_progress(bot, session, "refining final report", "Rewriting from the retained expert context.")
-    prompt = (
-        "Revise the existing expert report according to the user instruction. Preserve source citations and "
-        "Telegram-friendly Markdown. Return only the revised report.\n\n"
-        f"Instruction: {instruction}\n\n"
-        f"Existing report:\n{session.final_report}\n\n"
-        f"Source notes:\n{_source_digest(session, limit=40)}"
-    )
-    report = await _query_main_model(prompt, "You revise research reports. Return only Markdown.")
-    if report:
-        session.final_report = report
-        session.final_report_versions.append({"time": _now_label(), "instruction": instruction, "report": report})
-        _record_event(session, "refine", f"Final report refined: {instruction}")
-    await _deliver_final_report(bot, session)
+    typing_stop, typing_task = _start_expert_typing(bot, session)
+    await _send_expert_progress(bot, session, "Refining the final report", "Rewriting from the retained expert context.")
+    try:
+        prompt = (
+            "Revise the existing expert report according to the user instruction. Preserve source citations and "
+            "Telegram-friendly Markdown. Return only the revised report.\n\n"
+            f"Instruction: {instruction}\n\n"
+            f"Existing report:\n{session.final_report}\n\n"
+            f"Source notes:\n{_source_digest(session, limit=40)}"
+        )
+        report = await _query_main_model(prompt, "You revise research reports. Return only Markdown.")
+        if report:
+            session.final_report = report
+            session.final_report_versions.append({"time": _now_label(), "instruction": instruction, "report": report})
+            _record_event(session, "refine", f"Final report refined: {instruction}")
+        await _deliver_final_report(bot, session)
+    finally:
+        await _stop_expert_typing(typing_stop, typing_task)
 
 
 async def handle_expert_command(update, context) -> None:
@@ -1151,6 +1771,7 @@ async def handle_expert_message(update, context, content_text: str) -> bool:
         return False
 
     bot = context.bot
+    await _send_expert_typing_once(bot, session)
     session.user_inputs.append({"time": _now_label(), "text": text, "state": session.status})
 
     if session.status == "waiting_for_answer":
@@ -1170,7 +1791,7 @@ async def handle_expert_message(update, context, content_text: str) -> bool:
             return True
         session.followup_instruction = text
         session.status = "running"
-        await _send_expert_progress(bot, session, "resuming with your direction", text)
+        await _send_expert_progress(bot, session, "Resuming with your direction", text)
         _start_session_task(session, bot)
         return True
 
@@ -1275,7 +1896,7 @@ async def handle_expert_callback(update, context) -> None:
             session.pending_questions = []
             session.pending_answers = {}
             session.status = "running"
-            await _send_expert_progress(context.bot, session, "resuming with selected options")
+            await _send_expert_progress(context.bot, session, "Resuming with selected options")
             _start_session_task(session, context.bot)
 
 
@@ -1299,7 +1920,7 @@ async def _cancel_session_object(bot, session: ExpertSession) -> None:
     session.status = "cancelled"
     _record_event(session, "cancelled", "User cancelled expert session.")
     ACTIVE_SESSIONS.pop(session.key(), None)
-    await _send_expert_progress(bot, session, "cancelled session")
+    await _send_expert_progress(bot, session, "Cancelled expert session")
     _schedule_normal_chat_warmup(session, "cancel")
 
 

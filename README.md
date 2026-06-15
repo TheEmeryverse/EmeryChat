@@ -481,7 +481,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_NASA`, `NASA_API_KEY` | NASA APOD |
 | `ENABLE_SEARCH`, `SEARXNG_URL` | Web search |
 | `ENABLE_WEB_SCRAPING`, `ALLOW_PRIVATE_WEB_FETCH` | Web content fetch |
-| `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH` | `/expert` research archives and index |
+| `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, and expert-specific model tuning |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |

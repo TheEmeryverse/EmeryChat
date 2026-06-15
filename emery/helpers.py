@@ -110,7 +110,18 @@ async def transcribe_audio(audio_bytes): # Sends User's voice message to Open We
     except Exception as e:
         logging.error(f"❌ STT Error: {e}"); return ""
 
-async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
+async def query_fast_model(
+    prompt: str,
+    system_prompt: str = None,
+    max_tokens: int = None,
+    temperature: float = None,
+    top_p: float = None,
+    top_k: int = None,
+    min_p: float = None,
+    presence_penalty: float = None,
+    repetition_penalty: float = None,
+    enable_thinking: bool = True,
+) -> str:
     """
     Queries the fast text coprocessor model on a secondary endpoint.
     Used to offload non-vision processing tasks from the main model.
@@ -130,8 +141,21 @@ async def query_fast_model(prompt: str, system_prompt: str = None) -> str:
     payload = {
         "model": FAST_MODEL_ID,
         "messages": messages,
-        "chat_template_kwargs": {"enable_thinking": True},
+        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
     }
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
+    optional_params = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "min_p": min_p,
+        "presence_penalty": presence_penalty,
+        "repetition_penalty": repetition_penalty,
+    }
+    for key, value in optional_params.items():
+        if value is not None:
+            payload[key] = value
 
     try:
         logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID} via openai-compatible...")
