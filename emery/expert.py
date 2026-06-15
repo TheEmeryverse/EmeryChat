@@ -381,7 +381,7 @@ def _agenda_has_open_core_questions(session: ExpertSession) -> bool:
     )
 
 
-def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dict, evaluation: dict) -> None:
+def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dict, evaluation: dict) -> list[dict]:
     answered = bool(evaluation.get("answered"))
     confidence = str(evaluation.get("confidence") or "").strip()[:80]
     answer_summary = str(evaluation.get("answer_summary") or packet.get("summary") or "").strip()[:2000]
@@ -413,12 +413,14 @@ def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dic
         str(item.get("question") or "").lower().rstrip("?")
         for item in session.research_agenda
     }
+    added_items = []
     for item in normalized_new:
         key = str(item.get("question") or "").lower().rstrip("?")
         if key in existing:
             continue
         session.research_agenda.append(item)
         session.new_questions_added += 1
+        added_items.append(item)
         existing.add(key)
         _record_event(
             session,
@@ -427,6 +429,7 @@ def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dic
             priority=item.get("priority"),
             why=item.get("why"),
         )
+    return added_items
 
 
 def _record_event(session: ExpertSession, event_type: str, message: str, **metadata) -> None:
@@ -440,43 +443,171 @@ def _record_event(session: ExpertSession, event_type: str, message: str, **metad
     logging.info("EXPERT MODE %s %s: %s", session.id, event_type.upper(), message)
 
 
-def _expert_status_prefix(session: ExpertSession) -> str:
-    return (
-        f"🧠 <b>EXPERT MODE:</b> "
-        f"<code>{session.id}</code>"
-    )
+def _model_display_name() -> str:
+    return str(MODEL_NAME or "Emery").strip() or "Emery"
 
 
-def _expert_counts_text(session: ExpertSession) -> str:
-    return f"Round {session.round} | Sources {_source_count(session)}"
+def _assistant_display_name() -> str:
+    name = _model_display_name()
+    suffix = "'" if name.endswith("s") else "'s"
+    return f"{name}{suffix} Assistant"
 
 
-async def _send_expert_progress(
+def _question_label(question_id: str | None) -> str:
+    raw = str(question_id or "").strip()
+    match = re.search(r"\d+", raw)
+    return match.group(0) if match else raw
+
+
+def _compact_notice_text(title: str, lines: list[str] | None = None, *, lines_are_html: bool = False) -> str:
+    text_lines = [f"🧠 <b>{telegram_escape(title)}</b>"]
+    for line in lines or []:
+        clean = str(line or "").strip()
+        if clean:
+            text_lines.append(clean if lines_are_html else telegram_escape(clean))
+    return "\n".join(text_lines)
+
+
+def _source_total_line(session: ExpertSession) -> str:
+    return f"📚 Sources Gathered: {_source_count(session)}"
+
+
+def _question_line(question_id: str | None) -> str:
+    label = _question_label(question_id)
+    return f"🔎 Research Question: {label}" if label else ""
+
+
+def _short_line(text: str, limit: int = 160) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
+
+
+def _agenda_lines(agenda: list[dict]) -> list[str]:
+    lines = ["🔎 Research Questions:"]
+    for item in agenda:
+        label = _question_label(item.get("id")) or str(len(lines))
+        lines.append(f"{label}. {_short_line(item.get('question'), 180)}")
+    return lines
+
+
+async def _send_model_notice(
     bot,
     session: ExpertSession,
-    action: str,
-    detail: str = "",
+    title_suffix: str,
+    lines: list[str] | None = None,
     *,
     reply_markup=None,
-    detail_is_html: bool = False,
-    reply_to_message_id: int | None = None,
+    lines_are_html: bool = False,
 ):
     logging.info(
-        "EXPERT MODE %s PROGRESS: %s%s",
+        "EXPERT MODE %s NOTICE: %s%s",
         session.id,
-        action,
-        f" | {safe_preview(detail, max_len=180)}" if detail else "",
+        f"{_model_display_name()} {title_suffix}".strip(),
+        f" | {safe_preview(' | '.join(str(line) for line in (lines or [])), max_len=180)}" if lines else "",
     )
-    lines = [_expert_status_prefix(session), f"<i>{telegram_escape(action)}</i>"]
-    if detail:
-        lines.append(detail if detail_is_html else telegram_escape(detail))
-    lines.append(f"<code>{_expert_counts_text(session)}</code>")
     return await _send_status(
         bot,
         session,
-        "\n".join(lines),
+        _compact_notice_text(f"{_model_display_name()} {title_suffix}".strip(), lines, lines_are_html=lines_are_html),
         reply_markup=reply_markup,
-        reply_to_message_id=reply_to_message_id,
+    )
+
+
+async def _send_assistant_notice(
+    bot,
+    session: ExpertSession,
+    title_suffix: str,
+    lines: list[str] | None = None,
+    *,
+    lines_are_html: bool = False,
+):
+    logging.info(
+        "EXPERT MODE %s NOTICE: %s%s",
+        session.id,
+        f"{_assistant_display_name()} {title_suffix}".strip(),
+        f" | {safe_preview(' | '.join(str(line) for line in (lines or [])), max_len=180)}" if lines else "",
+    )
+    return await _send_status(
+        bot,
+        session,
+        _compact_notice_text(f"{_assistant_display_name()} {title_suffix}".strip(), lines, lines_are_html=lines_are_html),
+    )
+
+
+async def _send_source_found_notice(bot, session: ExpertSession, source: dict, question_id: str | None) -> None:
+    domain = source.get("domain") or _source_domain(source.get("url")) or "source"
+    await _send_assistant_notice(
+        bot,
+        session,
+        "found a source!",
+        [
+            domain,
+            _question_line(question_id),
+            _source_total_line(session),
+        ],
+    )
+
+
+async def _send_structured_context_notice(bot, session: ExpertSession, tool_label: str, question_id: str | None) -> None:
+    await _send_assistant_notice(
+        bot,
+        session,
+        "gathered structured context",
+        [
+            tool_label,
+            _question_line(question_id),
+            _source_total_line(session),
+        ],
+    )
+
+
+async def _send_plan_ready_notice(bot, session: ExpertSession) -> None:
+    await _send_model_notice(
+        bot,
+        session,
+        "plan ready",
+        [
+            *_agenda_lines(session.research_agenda),
+            _source_total_line(session),
+        ],
+    )
+
+
+async def _send_question_added_notice(bot, session: ExpertSession, question: dict) -> None:
+    label = _question_label(question.get("id"))
+    await _send_model_notice(
+        bot,
+        session,
+        "added a research question",
+        [
+            f"🔎 Research Question: {label}" if label else "🔎 Research Question",
+            _short_line(question.get("question"), 220),
+        ],
+    )
+
+
+async def _send_question_start_notice(bot, session: ExpertSession, question: dict) -> None:
+    await _send_assistant_notice(
+        bot,
+        session,
+        "is researching",
+        [
+            _question_line(question.get("id")),
+            _source_total_line(session),
+        ],
+    )
+
+
+async def _send_question_review_notice(bot, session: ExpertSession, question: dict) -> None:
+    status = str(question.get("status") or "reviewed").replace("_", " ")
+    await _send_model_notice(
+        bot,
+        session,
+        "reviewed progress",
+        [
+            f"{_question_line(question.get('id'))} {status}".strip(),
+            _source_total_line(session),
+        ],
     )
 
 
@@ -719,7 +850,7 @@ async def _make_initial_plan(session: ExpertSession) -> dict:
         f"User request: {session.topic}"
     )
     system = (
-        "You are the lead research orchestrator for Emery's /expert mode. "
+        f"You are the lead research orchestrator for {_model_display_name()}'s /expert mode. "
         "Return only compact JSON. Do not include hidden reasoning."
     )
     parsed = _extract_json_object(await _query_main_model(prompt, system)) or {}
@@ -944,7 +1075,7 @@ async def _summarize_econ_result(session: ExpertSession, tool: str, args: dict, 
     return summary.strip() if summary else content[:1000]
 
 
-async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) -> None:
+async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict], question_id: str | None = None) -> None:
     normalized_requests = _normalize_econ_requests(requests)
     if not normalized_requests:
         return
@@ -954,12 +1085,6 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
         args = request["args"]
         function = ECON_TOOL_FUNCTIONS[tool]
         tool_label = ECON_TOOL_LABELS.get(tool, tool.replace("_", " "))
-        await _send_expert_progress(
-            bot,
-            session,
-            f"Checking {tool_label}",
-            request.get("reason") or "Gathering structured data context.",
-        )
         logging.info("🔧 EXPERT TOOL: %s | Args: %s", tool, format_logging_payload(args))
         try:
             raw_content = await function(**args)
@@ -975,13 +1100,6 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
             success = False
 
         content = str(raw_content or "").strip()
-        if content:
-            await _send_expert_progress(
-                bot,
-                session,
-                f"{MODEL_NAME} summarizing {tool_label}",
-                "Converting the tool output into research notes.",
-            )
         summary = await _summarize_econ_result(session, tool, args, content) if content else ""
         result = {
             "id": f"E{len(session.econ_results) + 1}",
@@ -1001,19 +1119,14 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict]) 
             args=args,
             success=success,
         )
-        await _send_expert_progress(
-            bot,
-            session,
-            f"Saved {result['id']} from {tool_label}",
-            f"<b>{telegram_escape(tool_label)}</b>: {telegram_escape(result['reason'])}",
-            detail_is_html=True,
-        )
+        if success:
+            await _send_structured_context_notice(bot, session, tool_label, question_id)
 
 
 async def _plan_subagent_research(session: ExpertSession, question: dict) -> dict:
     econ_instruction = f" {_available_econ_tool_text()}" if ENABLE_FINANCE else ""
     prompt = (
-        "You are Emery's research subagent. Plan one bounded research pass for the assigned question. "
+        f"You are {_assistant_display_name()}. Plan one bounded research pass for the assigned question. "
         "Return strict JSON with keys: search_queries, econ_requests, focus. "
         "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question. "
         "Use econ_requests only if structured read-only economic/financial data materially helps."
@@ -1046,7 +1159,7 @@ async def _plan_subagent_research(session: ExpertSession, question: dict) -> dic
 
 async def _summarize_research_packet(session: ExpertSession, question: dict, sources: list[dict], econ_results: list[dict]) -> dict:
     prompt = (
-        "Summarize this bounded research pass for the main expert model. Return strict JSON with keys: "
+        f"Summarize this bounded research pass for {_model_display_name()}. Return strict JSON with keys: "
         "summary, key_findings, contradictions, gaps, confidence. Be concise and cite source IDs like [S3]. "
         "Do not decide the next agenda step.\n\n"
         f"User topic: {session.topic}\n"
@@ -1071,12 +1184,7 @@ async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> 
     question["status"] = "in_progress"
     question["attempts"] = int(question.get("attempts") or 0) + 1
     question_id = question.get("id") or "Q?"
-    await _send_expert_progress(
-        bot,
-        session,
-        f"{MODEL_NAME} researching {question_id}",
-        question.get("question") or "",
-    )
+    await _send_question_start_notice(bot, session, question)
     _record_event(
         session,
         "subtask_start",
@@ -1088,8 +1196,8 @@ async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> 
     source_start = len(session.sources)
     econ_start = len(session.econ_results)
     if plan.get("econ_requests"):
-        await _run_econ_requests(bot, session, plan["econ_requests"])
-    await _fetch_round(bot, session, plan["search_queries"])
+        await _run_econ_requests(bot, session, plan["econ_requests"], question_id)
+    await _fetch_round(bot, session, plan["search_queries"], question_id)
     new_sources = session.sources[source_start:]
     new_econ = session.econ_results[econ_start:]
     packet_notes = await _summarize_research_packet(session, question, new_sources, new_econ)
@@ -1125,7 +1233,7 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         else "You may include critical_questions only when a user preference would materially change the research path."
     )
     prompt = (
-        "You are the main expert research lead. Evaluate whether the subagent answered the assigned question. "
+        f"You are {_model_display_name()}. Evaluate whether {_assistant_display_name()} answered the assigned question. "
         "Return strict JSON with keys: answered (boolean), confidence, answer_summary, new_questions, critical_questions, stop_now. "
         "You own the agenda. Add new_questions only if new information materially changes the final answer. "
         "Do not add rabbit holes or background-only questions. Each new question must include question, priority "
@@ -1225,9 +1333,8 @@ def _questions_for_midloop_pause(session: ExpertSession, questions: list[dict]) 
 
 async def _ask_pending_questions(bot, session: ExpertSession) -> None:
     lines = [
-        f"{_expert_status_prefix(session)}",
-        "<b>Research fork</b>",
-        "I found a choice that could change the next branch of research. Pick an option, or type your own instruction.",
+        f"🧠 <b>{telegram_escape(_model_display_name())} needs direction</b>",
+        "I found a choice that could change the next research branch.",
         "",
     ]
     for index, question in enumerate(session.pending_questions[:4], start=1):
@@ -1236,11 +1343,11 @@ async def _ask_pending_questions(bot, session: ExpertSession) -> None:
             desc = f" - {option.get('description')}" if option.get("description") else ""
             lines.append(f"   • {telegram_escape(option.get('label'))}{telegram_escape(desc)}")
         lines.append("")
-    lines.append("I'll wait here until you choose an option or reply in your own words.")
+    lines.append("Tap an option, or reply in your own words.")
     await _send_status(bot, session, "\n".join(lines).strip(), reply_markup=_question_markup(session))
 
 
-async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
+async def _fetch_round(bot, session: ExpertSession, queries: list[str], question_id: str | None = None) -> None:
     seen = {source.get("normalized_url") for source in session.sources}
     fetches_this_round = 0
 
@@ -1249,12 +1356,6 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             break
         if query not in session.search_queries:
             session.search_queries.append(query)
-        await _send_expert_progress(
-            bot,
-            session,
-            "Searching the web",
-            query,
-        )
         logging.info("🔧 EXPERT TOOL: web_search | Args: %s", format_logging_payload({"query": query}))
         results = await _search_web(query)
         session.search_results.extend(results)
@@ -1267,22 +1368,8 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            source_progress_message = await _send_expert_progress(
-                bot,
-                session,
-                f"Reading {_source_domain(result.get('url')) or 'source'}",
-                result.get("title") or result.get("url") or "Untitled source",
-            )
-            source_progress_message_id = getattr(source_progress_message, "message_id", None)
             logging.info("🔧 EXPERT TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": result.get("url")}))
             fetched = await fetch_web_content(result["url"], max_chars=12000, summarize_long=False)
-            await _send_expert_progress(
-                bot,
-                session,
-                f"{MODEL_NAME} summarizing the source",
-                fetched.get("title") or result.get("title") or result.get("url") or "Fetched source",
-                reply_to_message_id=source_progress_message_id,
-            )
             source = await _summarize_source(session, result, fetched)
             session.sources.append(source)
             fetches_this_round += 1
@@ -1294,26 +1381,13 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str]) -> None:
                 url=source.get("url"),
                 success=source.get("fetch_success"),
             )
-            source_action = "Saved source notes" if source.get("fetch_success") else "Saved failed fetch note"
-            await _send_expert_progress(
-                bot,
-                session,
-                source_action,
-                f"<b>{telegram_escape(source.get('domain') or 'unknown source')}</b>: {telegram_escape(source.get('title'))}",
-                detail_is_html=True,
-                reply_to_message_id=source_progress_message_id,
-            )
-
-    await _send_expert_progress(
-        bot,
-        session,
-        f"Completed research round {session.round}",
-    )
+            if source.get("fetch_success"):
+                await _send_source_found_notice(bot, session, source, question_id)
 
 
 async def _build_final_report(session: ExpertSession) -> str:
     prompt = (
-        "Write the final /expert research report as clean Telegram-friendly Markdown. "
+        "Write the final research report as clean Telegram-friendly Markdown. "
         "Use headings, bullets, numbered lists, compact tables only if they fit, and citations like [S12]. "
         "Include: executive summary, timeline, key actors, core findings, competing interpretations, "
         "and uncertainty/confidence notes. Do not include a full source appendix; Emery will send "
@@ -1321,13 +1395,13 @@ async def _build_final_report(session: ExpertSession) -> str:
         "matters to the analysis.\n\n"
         f"User request: {session.topic}\n"
         f"User follow-up inputs: {json.dumps(session.user_inputs, ensure_ascii=True)}\n\n"
-        f"Main-model research agenda:\n{_agenda_digest(session)}\n\n"
+        f"{_model_display_name()} research agenda:\n{_agenda_digest(session)}\n\n"
         f"Research packets:\n{_research_packet_digest(session, limit=20)}\n\n"
         f"Source notes:\n{_source_digest(session, limit=40)}\n\n"
         f"Structured data notes:\n{_econ_digest(session, limit=20)}"
     )
     system = (
-        "You are Emery's senior research writer. Produce only the finished report in Markdown. "
+        f"You are {_model_display_name()}'s senior research writer. Produce only the finished report in Markdown. "
         "Do not include hidden reasoning or process notes."
     )
     report = await _query_main_model(prompt, system)
@@ -1335,10 +1409,10 @@ async def _build_final_report(session: ExpertSession) -> str:
         return report
 
     lines = [
-        f"# Expert Report: {session.title}",
+        f"# {_model_display_name()} Report: {session.title}",
         "",
         "## Executive Summary",
-        "The expert research loop completed, but the final synthesis model did not return a report. Sources are preserved in the separate Sources message.",
+        "The research loop completed, but the final synthesis did not return a report. Sources are preserved in the separate Sources message.",
     ]
     return "\n".join(lines)
 
@@ -1346,7 +1420,7 @@ async def _build_final_report(session: ExpertSession) -> str:
 def _source_appendix_markdown(session: ExpertSession) -> str:
     lines = ["# Sources", ""]
     if not session.sources:
-        lines.append("No web sources were fetched for this expert session.")
+        lines.append("No web sources were fetched for this research session.")
         return "\n".join(lines)
 
     for source in session.sources:
@@ -1388,11 +1462,11 @@ async def _deliver_final_report(bot, session: ExpertSession) -> None:
         fallback_html_text=emery_format(source_appendix),
         message_thread_id=session.message_thread_id,
     )
-    await _send_expert_progress(
+    await _send_model_notice(
         bot,
         session,
-        "Research loop complete",
-        "The full loop is still active. What should I do next?",
+        "research complete",
+        ["What should I do next?"],
         reply_markup=_session_action_markup(session),
     )
     _schedule_normal_chat_warmup(session, "report complete")
@@ -1404,7 +1478,12 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
     try:
         ACTIVE_SESSIONS[session.key()] = session
         if session.round == 0 and not session.search_queries and not session.research_agenda:
-            await _send_expert_progress(bot, session, "Building the expert research plan")
+            await _send_model_notice(
+                bot,
+                session,
+                "started research",
+                [_short_line(session.topic, 220)],
+            )
             plan = await _make_initial_plan(session)
             session.title = plan["title"]
             session.target_sources = _normalize_source_target(plan.get("target_source_count"))
@@ -1421,17 +1500,9 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 max_rounds=session.max_rounds,
                 agenda_count=len(session.research_agenda),
             )
+            await _send_plan_ready_notice(bot, session)
             if plan.get("econ_requests"):
                 await _run_econ_requests(bot, session, plan["econ_requests"])
-            await _send_expert_progress(
-                bot,
-                session,
-                "Started deep research",
-                f"<b>{telegram_escape(session.title)}</b>\n"
-                f"{telegram_escape('Running a bounded multi-round agenda; depth can adjust if gaps remain')}"
-                f"{' Research tools are available when relevant.' if ENABLE_FINANCE else '.'}",
-                detail_is_html=True,
-            )
 
         session.status = "running"
         while session.status == "running" and session.round < session.max_rounds and _source_count(session) < session.max_sources:
@@ -1441,11 +1512,12 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                     added = _normalize_agenda_questions([{
                         "question": session.followup_instruction,
                         "priority": "core",
-                        "why": "User requested this direction while continuing the expert session.",
+                        "why": f"User requested this direction while continuing the {_model_display_name()} research session.",
                     }], existing_count=len(session.research_agenda), limit=1)
                     session.research_agenda.extend(added)
                     for item in added:
                         _record_event(session, "agenda_add", f"User-added {item['id']}: {item['question']}")
+                        await _send_question_added_notice(bot, session, item)
                 session.followup_instruction = ""
 
             question = _select_next_agenda_question(session)
@@ -1459,21 +1531,9 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             session.round += 1
             session.touch()
 
-            await _send_expert_progress(
-                bot,
-                session,
-                f"Running agenda question {question.get('id')}",
-                question.get("question") or "",
-            )
             packet = await _run_research_subtask(bot, session, question)
-            await _send_expert_progress(
-                bot,
-                session,
-                f"{MODEL_NAME} reviewing {packet.get('id')}",
-                "Checking whether the research question was actually answered and whether new questions matter.",
-            )
             evaluation = await _evaluate_research_packet(session, question, packet)
-            _apply_agenda_evaluation(session, question, packet, evaluation)
+            added_questions = _apply_agenda_evaluation(session, question, packet, evaluation)
             _record_event(
                 session,
                 "agenda_eval",
@@ -1481,18 +1541,15 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 answered=bool(evaluation.get("answered")),
                 stop_now=bool(evaluation.get("stop_now")),
             )
+            await _send_question_review_notice(bot, session, question)
+            for added_question in added_questions:
+                await _send_question_added_notice(bot, session, added_question)
             questions_for_pause = _questions_for_midloop_pause(session, evaluation.get("critical_questions") or [])
             if questions_for_pause:
                 session.pending_questions = questions_for_pause
                 session.pending_answers = {}
                 session.status = "waiting_for_answer"
                 _record_event(session, "pause", f"{MODEL_NAME} paused for critical user direction.")
-                await _send_expert_progress(
-                    bot,
-                    session,
-                    "Asking you for expert direction",
-                    "Your answer will steer the next research branch.",
-                )
                 await _ask_pending_questions(bot, session)
                 return
             if (
@@ -1503,11 +1560,14 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 _record_event(session, "stop", f"{MODEL_NAME} decided the core research agenda is sufficiently answered.")
                 break
 
-        await _send_expert_progress(
+        await _send_model_notice(
             bot,
             session,
-            "Writing the final expert report",
-            "Synthesizing the full loop into Telegram-friendly Markdown.",
+            "is synthesizing",
+            [
+                _source_total_line(session),
+                "Writing final report",
+            ],
         )
         session.final_report = await _build_final_report(session)
         session.final_report_versions.append({"time": _now_label(), "report": session.final_report})
@@ -1520,9 +1580,9 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
         raise
     except Exception as exc:
         session.status = "error"
-        _record_event(session, "error", f"Expert loop failed: {exc}")
+        _record_event(session, "error", f"Research loop failed: {exc}")
         logging.error("EXPERT: Session %s failed: %s", session.id, exc, exc_info=True)
-        await _send_expert_progress(bot, session, "Expert research failed", str(exc))
+        await _send_model_notice(bot, session, "research failed", [str(exc)])
     finally:
         await _stop_expert_typing(typing_stop, typing_task)
         if SESSION_TASKS.get(session.id) is current_task:
@@ -1583,7 +1643,7 @@ def _archive_session(session: ExpertSession) -> Path:
 
 def _render_loop_markdown(session: ExpertSession) -> str:
     lines = [
-        f"# Expert Loop: {session.title}",
+        f"# {_model_display_name()} Research Loop: {session.title}",
         "",
         f"- Session ID: `{session.id}`",
         f"- Topic: {session.topic}",
@@ -1670,12 +1730,11 @@ async def _close_and_archive(bot, session: ExpertSession) -> None:
         task.cancel()
     folder = _archive_session(session)
     ACTIVE_SESSIONS.pop(session.key(), None)
-    await _send_expert_progress(
+    await _send_model_notice(
         bot,
         session,
-        "Archived session",
-        f"Saved to:\n<code>{telegram_escape(folder)}</code>",
-        detail_is_html=True,
+        "archived research",
+        [f"Saved to: {folder}"],
     )
     _schedule_normal_chat_warmup(session, "archive")
 
@@ -1698,9 +1757,9 @@ async def _classify_expert_user_intent(session: ExpertSession, text: str) -> str
         default = "answer_question"
         pending = json.dumps(session.pending_questions[:4], ensure_ascii=True)
         state_instruction = (
-            "The expert agent is waiting for the user to answer one or more pending questions. "
-            "Use close_archive only if the user wants to end, close, archive, finish, or move on from expert mode. "
-            "Use cancel only if the user wants to stop/discard the active expert session. "
+            f"{_model_display_name()} is waiting for the user to answer one or more pending questions. "
+            "Use close_archive only if the user wants to end, close, archive, finish, or move on from the research session. "
+            f"Use cancel only if the user wants to stop/discard the active {_model_display_name()} research session. "
             "Otherwise use answer_question, including free-form answers that do not match the button options."
         )
     else:
@@ -1709,16 +1768,16 @@ async def _classify_expert_user_intent(session: ExpertSession, text: str) -> str
         default = "normal_message"
         pending = "[]"
         state_instruction = (
-            "The expert research loop has completed and the user is deciding what to do next. "
-            "Use close_archive if the user wants to end, close, archive, finish, wrap up, or move on from expert mode. "
+            "The research loop has completed and the user is deciding what to do next. "
+            "Use close_archive if the user wants to end, close, archive, finish, wrap up, or move on from the research session. "
             "Use continue_research if the user wants more research, more sources, a new branch, or deeper investigation. "
             "Use refine_report if the user asks to rewrite, shorten, expand, reorganize, polish, or otherwise alter the report. "
             "Use cancel if the user wants to discard/cancel the session. "
-            "Use normal_message only if the message is not directing the expert session."
+            "Use normal_message only if the message is not directing the research session."
         )
 
     prompt = (
-        "Classify this Telegram message for Emery's /expert mode. "
+        f"Classify this Telegram message for {_model_display_name()}'s /expert mode. "
         f"Return exactly one label from: {labels}.\n\n"
         f"Session status: {session.status}\n"
         f"Session title: {session.title}\n"
@@ -1728,7 +1787,7 @@ async def _classify_expert_user_intent(session: ExpertSession, text: str) -> str
     )
     result = await _query_expert_fast_model(
         prompt,
-        "You are a strict intent classifier for an active expert research session. Return one label only.",
+        f"You are a strict intent classifier for an active {_model_display_name()} research session. Return one label only.",
     )
     return _normalize_intent_label(result, allowed, default)
 
@@ -1748,10 +1807,10 @@ async def _exit_waiting_session(bot, session: ExpertSession, action: str) -> boo
 
 async def _refine_report(bot, session: ExpertSession, instruction: str) -> None:
     typing_stop, typing_task = _start_expert_typing(bot, session)
-    await _send_expert_progress(bot, session, "Refining the final report", "Rewriting from the retained expert context.")
+    await _send_model_notice(bot, session, "is refining the report", [_source_total_line(session)])
     try:
         prompt = (
-            "Revise the existing expert report according to the user instruction. Preserve source citations and "
+            "Revise the existing research report according to the user instruction. Preserve source citations and "
             "Telegram-friendly Markdown. Return only the revised report.\n\n"
             f"Instruction: {instruction}\n\n"
             f"Existing report:\n{session.final_report}\n\n"
@@ -1801,7 +1860,7 @@ async def handle_expert_command(update, context) -> None:
 
     key = _session_key(chat_id, thread_id)
     if key in ACTIVE_SESSIONS and ACTIVE_SESSIONS[key].status in {"running", "waiting_for_answer", "completed_pending_user"}:
-        await update.message.reply_text("An expert session is already active here. Use /expert status, /expert cancel, or close/archive the current session first.")
+        await update.message.reply_text(f"A {_model_display_name()} research session is already active here. Use /expert status, /expert cancel, or close/archive the current session first.")
         return
 
     topic = " ".join(args).strip()
@@ -1842,14 +1901,14 @@ async def handle_expert_message(update, context, content_text: str) -> bool:
         session.pending_answers["typed"] = text
         session.pending_questions = []
         session.pending_answers = {}
-        _record_event(session, "answer", f"User answered expert question: {text}")
+        _record_event(session, "answer", f"User answered research question: {text}")
         if is_refine_answer:
             session.status = "completed_pending_user"
             await _refine_report(bot, session, text)
             return True
         session.followup_instruction = text
         session.status = "running"
-        await _send_expert_progress(bot, session, "Resuming with your direction", text)
+        await _send_model_notice(bot, session, "is resuming research", [_short_line(text, 220)])
         _start_session_task(session, bot)
         return True
 
@@ -1895,7 +1954,7 @@ async def handle_expert_callback(update, context) -> None:
             await _open_archived_report(update, context, archive_id)
         return
     if not session:
-        await query.message.reply_text("That expert session is no longer active.")
+        await query.message.reply_text(f"That {_model_display_name()} research session is no longer active.")
         return
 
     if action == "noop":
@@ -1906,11 +1965,11 @@ async def handle_expert_callback(update, context) -> None:
         return
 
     if action in {"close", "continue", "refine"} and session.status != "completed_pending_user":
-        await query.message.reply_text(f"That expert session is currently {session.status}. Use /expert status or /expert cancel.")
+        await query.message.reply_text(f"That {_model_display_name()} research session is currently {session.status}. Use /expert status or /expert cancel.")
         return
 
     if action == "q" and session.status != "waiting_for_answer":
-        await query.message.reply_text("That expert question is no longer active.")
+        await query.message.reply_text("That research question is no longer active.")
         return
 
     if action == "close":
@@ -1948,13 +2007,13 @@ async def handle_expert_callback(update, context) -> None:
             if q.get("id") not in session.pending_answers
         ]
         if unanswered:
-            await query.message.reply_text("Recorded. Answer the remaining expert questions, or type a full response.")
+            await query.message.reply_text("Recorded. Answer the remaining research questions, or type a full response.")
         else:
             session.followup_instruction = "; ".join(session.pending_answers.values())
             session.pending_questions = []
             session.pending_answers = {}
             session.status = "running"
-            await _send_expert_progress(context.bot, session, "Resuming with selected options")
+            await _send_model_notice(context.bot, session, "is resuming research", ["Using your selected options"])
             _start_session_task(session, context.bot)
 
 
@@ -1976,16 +2035,16 @@ async def _cancel_session_object(bot, session: ExpertSession) -> None:
     if task and not task.done():
         task.cancel()
     session.status = "cancelled"
-    _record_event(session, "cancelled", "User cancelled expert session.")
+    _record_event(session, "cancelled", f"User cancelled {_model_display_name()} research session.")
     ACTIVE_SESSIONS.pop(session.key(), None)
-    await _send_expert_progress(bot, session, "Cancelled expert session")
+    await _send_model_notice(bot, session, "cancelled research")
     _schedule_normal_chat_warmup(session, "cancel")
 
 
 async def _cancel_active_session(update, context) -> None:
     session = _active_session_for_update(update)
     if not session:
-        await update.message.reply_text("No active expert session in this chat/thread.")
+        await update.message.reply_text(f"No active {_model_display_name()} research session in this chat/thread.")
         return
     await _cancel_session_object(context.bot, session)
 
@@ -1993,10 +2052,10 @@ async def _cancel_active_session(update, context) -> None:
 async def _send_expert_status(update, context) -> None:
     session = _active_session_for_update(update)
     if not session:
-        await update.message.reply_text("No active expert session in this chat/thread.")
+        await update.message.reply_text(f"No active {_model_display_name()} research session in this chat/thread.")
         return
     await update.message.reply_text(
-        f"Expert session {session.id}: {session.status}\n"
+        f"{_model_display_name()} research session {session.id}: {session.status}\n"
         f"Title: {session.title}\n"
         f"Round: {session.round}\n"
         f"Sources: {_source_count(session)}\n"
@@ -2007,10 +2066,10 @@ async def _send_expert_status(update, context) -> None:
 async def _send_expert_list(update, context) -> None:
     entries = _load_index()[:10]
     if not entries:
-        await update.message.reply_text("No archived expert sessions yet.")
+        await update.message.reply_text(f"No archived {_model_display_name()} research sessions yet.")
         return
 
-    lines = ["Archived expert sessions:"]
+    lines = [f"Archived {_model_display_name()} research sessions:"]
     rows = []
     for entry in entries:
         session_id = entry.get("id", "")
@@ -2037,7 +2096,7 @@ async def _resume_archived_session(update, context, session_id: str) -> None:
     target_message = update.message or (update.callback_query.message if update.callback_query else None)
     if not entry:
         if target_message:
-            await target_message.reply_text(f"No archived expert session found for ID {session_id}.")
+            await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
         data = json.loads(Path(entry["session_path"]).read_text(encoding="utf-8"))
@@ -2053,7 +2112,7 @@ async def _resume_archived_session(update, context, session_id: str) -> None:
     if active and active.status in {"running", "waiting_for_answer", "completed_pending_user"}:
         if target_message:
             await target_message.reply_text(
-                "An expert session is already active in this chat/thread. Close, archive, or cancel it before resuming another one."
+                f"A {_model_display_name()} research session is already active in this chat/thread. Close, archive, or cancel it before resuming another one."
             )
         return
 
@@ -2063,11 +2122,11 @@ async def _resume_archived_session(update, context, session_id: str) -> None:
     session.pending_questions = []
     session.pending_answers = {}
     session.followup_instruction = ""
-    _record_event(session, "resume", "Archived session resumed into active expert mode.")
+    _record_event(session, "resume", f"Archived session resumed into active {_model_display_name()} research mode.")
     ACTIVE_SESSIONS[session.key()] = session
     if target_message:
         await target_message.reply_text(
-            f"Resumed expert session {session.id}: {session.title}\nWhat should I do next?",
+            f"Resumed {_model_display_name()} research session {session.id}: {session.title}\nWhat should I do next?",
             reply_markup=_session_action_markup(session),
         )
 
@@ -2077,7 +2136,7 @@ async def _open_archived_report(update, context, session_id: str) -> None:
     target_message = update.message or (update.callback_query.message if update.callback_query else None)
     if not entry:
         if target_message:
-            await target_message.reply_text(f"No archived expert session found for ID {session_id}.")
+            await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
         report = Path(entry["report_path"]).read_text(encoding="utf-8")
