@@ -13,7 +13,7 @@ from emery.tools import (
     generate_image,
     speak_message,
     get_system_stats,
-    fetch_web_content,
+    fetch_web_content, get_youtube_transcript,
     search_fred_series, get_fred_series_observations,
     search_imf_indicators, get_imf_datamapper_series,
     get_stock_snapshot, get_stock_price_history,
@@ -331,6 +331,38 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
             "name": "fetch_web_content", 
             "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long). Use AFTER web_search to do deep research, a deep dive, a report, etc. if needed. MUST pass only the URL as a string. Do not pass any other arguments.", 
             "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }
+    })
+
+if is_enabled("ENABLE_YOUTUBE_TRANSCRIPT"):
+    AVAILABLE_TOOLS["get_youtube_transcript"] = get_youtube_transcript
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "get_youtube_transcript",
+            "description": "Fetch the full transcript/captions for a YouTube video URL or video ID. Use this for requests to summarize, quote, analyze, search, or retrieve a YouTube video's transcript. It works only when the video has public manual or auto-generated captions available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_url_or_id": {
+                        "type": "string",
+                        "description": "A YouTube watch/shorts/embed/youtu.be URL or raw 11-character video ID."
+                    },
+                    "languages": {
+                        "type": "string",
+                        "description": "Optional comma-separated preferred transcript language codes, such as 'en' or 'en,es'. Defaults to English."
+                    },
+                    "translate_to": {
+                        "type": "string",
+                        "description": "Optional target language code for YouTube's caption translation, such as 'en'. Leave blank to keep the transcript's original selected language."
+                    },
+                    "include_timestamps": {
+                        "type": "boolean",
+                        "description": "Whether to include timestamps before each transcript segment. Use true when the user asks for timestamps or exact locations."
+                    }
+                },
+                "required": ["video_url_or_id"]
+            }
         }
     })
 

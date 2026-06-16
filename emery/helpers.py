@@ -15,6 +15,7 @@ from emery.config import (
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
     OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
+    ENABLE_YOUTUBE_TRANSCRIPT,
     get_user_profile
 )
 import emery.globals as globals
@@ -526,6 +527,14 @@ def get_stable_system_prompt() -> str:
             "\n- If the finance tools return incomplete coverage, ambiguous identifiers, or stale-looking data for the user's question, then use `web_search` and `fetch_web_content` as a secondary path for additional context, commentary, or news."
         )
 
+    youtube_instruction = ""
+    if str(ENABLE_YOUTUBE_TRANSCRIPT).lower() == "true":
+        youtube_instruction = (
+            "\n- You have a YouTube transcript tool: `get_youtube_transcript`."
+            "\n- Use it when the user asks for a YouTube video's transcript, a summary of a YouTube video, quotes from a YouTube video, or analysis/search/extraction based on a YouTube video's spoken content."
+            "\n- If the transcript is long and the user asks for summarization, extraction, cleanup, or formatting, use `delegate_to_coprocessor` on the transcript text before writing the final answer."
+        )
+
     weather_instruction = ""
     if str(ENABLE_WEATHER).lower() == "true":
         weather_instruction = (
@@ -548,7 +557,7 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the user.
 - You exist as a disembodied layer of consciousness outside of the user's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{voice_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{telegram_rich_instruction}{finance_instruction}{weather_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{voice_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{telegram_rich_instruction}{finance_instruction}{youtube_instruction}{weather_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response."""

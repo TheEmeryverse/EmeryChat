@@ -48,6 +48,7 @@ DEFAULT_ENV = {
     "ENABLE_IMAGEGEN": "true",
     "ENABLE_SEARCH": "true",
     "ENABLE_WEB_SCRAPING": "true",
+    "ENABLE_YOUTUBE_TRANSCRIPT": "true",
     "ENABLE_FINANCE": "false",
     "ENABLE_SYSTEM_STATS": "true",
     "ENABLE_NEST": "false",
@@ -599,9 +600,9 @@ def build_env_content(env_data):
     feature_keys = [
         "ENABLE_CALENDAR", "ENABLE_WEATHER", "ENABLE_NEWS", "ENABLE_NASA",
         "ENABLE_SEERR", "ENABLE_HISTORY", "ENABLE_VOICE", "ENABLE_IMAGEGEN",
-        "ENABLE_SEARCH", "ENABLE_WEB_SCRAPING", "ENABLE_FINANCE", "ENABLE_SYSTEM_STATS",
-        "ENABLE_NEST", "ENABLE_REOLINK", "ENABLE_SCHEDULER", "ENABLE_HEARTBEAT",
-        "ENABLE_MEMORY", "ENABLE_PORTAINER",
+        "ENABLE_SEARCH", "ENABLE_WEB_SCRAPING", "ENABLE_YOUTUBE_TRANSCRIPT",
+        "ENABLE_FINANCE", "ENABLE_SYSTEM_STATS", "ENABLE_NEST", "ENABLE_REOLINK",
+        "ENABLE_SCHEDULER", "ENABLE_HEARTBEAT", "ENABLE_MEMORY", "ENABLE_PORTAINER",
     ]
     lines.extend(f"{key}={env_value(env_data[key])}" for key in feature_keys)
     lines.extend([
@@ -868,6 +869,7 @@ def ask_features(env_seed):
         "ENABLE_IMAGEGEN": "Enable image generation",
         "ENABLE_SEARCH": "Enable web search",
         "ENABLE_WEB_SCRAPING": "Enable web content fetch",
+        "ENABLE_YOUTUBE_TRANSCRIPT": "Enable YouTube transcript fetch",
         "ENABLE_FINANCE": "Enable finance tools",
         "ENABLE_SYSTEM_STATS": "Enable system stats tool",
         "ENABLE_REOLINK": "Enable Reolink cameras",

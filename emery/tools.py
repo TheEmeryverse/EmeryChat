@@ -9,7 +9,7 @@ import requests
 import ipaddress
 import socket
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, quote, urlparse
+from urllib.parse import parse_qs, urljoin, quote, urlparse
 from datetime import datetime, time, timedelta
 import pytz
 import feedparser
@@ -867,6 +867,212 @@ async def web_search(query): # Searches the internet
     except Exception as e: 
         logging.error(f"Search error: {e}")
         return "Search failed."
+
+
+_YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _extract_youtube_video_id(video_url_or_id: str) -> str | None:
+    candidate = str(video_url_or_id or "").strip()
+    if not candidate:
+        return None
+
+    if _YOUTUBE_VIDEO_ID_PATTERN.fullmatch(candidate):
+        return candidate
+
+    if candidate.startswith(("www.", "youtube.com", "m.youtube.com", "youtu.be")):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    query_video_id = (parse_qs(parsed.query).get("v") or [""])[0].strip()
+    if query_video_id and _YOUTUBE_VIDEO_ID_PATTERN.fullmatch(query_video_id):
+        return query_video_id
+
+    if host.endswith("youtu.be") and path_parts:
+        short_id = path_parts[0].strip()
+        if _YOUTUBE_VIDEO_ID_PATTERN.fullmatch(short_id):
+            return short_id
+
+    if "youtube.com" in host:
+        for marker in {"embed", "shorts", "live", "v"}:
+            if marker in path_parts:
+                idx = path_parts.index(marker)
+                if idx + 1 < len(path_parts):
+                    path_id = path_parts[idx + 1].strip()
+                    if _YOUTUBE_VIDEO_ID_PATTERN.fullmatch(path_id):
+                        return path_id
+
+    return None
+
+
+def _normalize_youtube_languages(languages) -> list[str]:
+    if not languages:
+        return ["en"]
+    if isinstance(languages, str):
+        parts = re.split(r"[, ]+", languages)
+    elif isinstance(languages, (list, tuple)):
+        parts = languages
+    else:
+        return ["en"]
+
+    normalized = [str(part).strip().lower() for part in parts if str(part).strip()]
+    return normalized or ["en"]
+
+
+def _format_transcript_timestamp(seconds) -> str:
+    try:
+        total_seconds = max(0, int(float(seconds)))
+    except (TypeError, ValueError):
+        total_seconds = 0
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _clean_transcript_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _transcript_available_languages(transcript_list) -> str:
+    languages = []
+    for transcript in transcript_list:
+        label = getattr(transcript, "language", None) or getattr(transcript, "language_code", "")
+        code = getattr(transcript, "language_code", "")
+        generated = "auto" if getattr(transcript, "is_generated", False) else "manual"
+        if label and code and label != code:
+            languages.append(f"{label} ({code}, {generated})")
+        elif code:
+            languages.append(f"{code} ({generated})")
+    return ", ".join(languages[:12]) if languages else "none reported"
+
+
+def _first_youtube_transcript(transcript_list):
+    for transcript in transcript_list:
+        return transcript
+    return None
+
+
+def _list_youtube_transcripts(api, api_class, video_id: str):
+    if hasattr(api, "list"):
+        return api.list(video_id)
+    if hasattr(api, "list_transcripts"):
+        return api.list_transcripts(video_id)
+    return api_class.list_transcripts(video_id)
+
+
+async def get_youtube_transcript(
+    video_url_or_id: str,
+    languages: str = "en",
+    translate_to: str = "",
+    include_timestamps: bool = False,
+) -> str:
+    """Fetch the available transcript/captions for a YouTube video."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return "YouTube transcript error: youtube-transcript-api is not installed. Run `pip install -r requirements.txt`."
+
+    video_id = _extract_youtube_video_id(video_url_or_id)
+    if not video_id:
+        return "YouTube transcript error: provide a valid YouTube URL or 11-character video ID."
+
+    preferred_languages = _normalize_youtube_languages(languages)
+    target_language = str(translate_to or "").strip().lower()
+
+    try:
+        api = YouTubeTranscriptApi()
+        transcript_list = await asyncio.to_thread(_list_youtube_transcripts, api, YouTubeTranscriptApi, video_id)
+
+        try:
+            transcript = transcript_list.find_manually_created_transcript(preferred_languages)
+        except Exception:
+            try:
+                transcript = transcript_list.find_generated_transcript(preferred_languages)
+            except Exception:
+                try:
+                    transcript = transcript_list.find_transcript(preferred_languages)
+                except Exception:
+                    transcript = _first_youtube_transcript(transcript_list)
+                    if transcript is None:
+                        return "YouTube transcript error: no public transcripts were found for this video."
+
+        original_language = getattr(transcript, "language", "")
+        original_language_code = getattr(transcript, "language_code", "")
+        original_is_generated = getattr(transcript, "is_generated", False)
+
+        if target_language:
+            if not getattr(transcript, "is_translatable", False):
+                return (
+                    "YouTube transcript error: the selected transcript is not translatable. "
+                    f"Available languages: {_transcript_available_languages(transcript_list)}"
+                )
+            transcript = transcript.translate(target_language)
+
+        fetched = await asyncio.to_thread(transcript.fetch)
+        if hasattr(fetched, "to_raw_data"):
+            rows = fetched.to_raw_data()
+        else:
+            rows = [
+                {
+                    "text": getattr(snippet, "text", ""),
+                    "start": getattr(snippet, "start", 0),
+                    "duration": getattr(snippet, "duration", 0),
+                }
+                for snippet in fetched
+            ]
+
+        lines = []
+        total_seconds = 0.0
+        for row in rows:
+            text = _clean_transcript_text(row.get("text", ""))
+            if not text:
+                continue
+            start = row.get("start", 0)
+            duration = row.get("duration", 0)
+            try:
+                total_seconds = max(total_seconds, float(start) + float(duration))
+            except (TypeError, ValueError):
+                pass
+            if include_timestamps:
+                lines.append(f"[{_format_transcript_timestamp(start)}] {text}")
+            else:
+                lines.append(text)
+
+        if not lines:
+            return "YouTube transcript error: transcript was found, but it contained no usable text."
+
+        language_label = getattr(transcript, "language", "") or original_language or "unknown"
+        language_code = getattr(transcript, "language_code", "") or original_language_code or "unknown"
+        generated_label = "auto-generated" if original_is_generated else "manual"
+        translated_label = f" translated to {target_language}" if target_language else ""
+        duration_label = _format_transcript_timestamp(total_seconds)
+
+        if include_timestamps:
+            body = "\n".join(lines)
+        else:
+            body = " ".join(lines)
+
+        header = (
+            f"YouTube transcript for {video_id}\n"
+            f"Language: {language_label} ({language_code}), {generated_label}{translated_label}\n"
+            f"Approx duration: {duration_label}\n"
+            f"Transcript:\n"
+        )
+        return header + body
+    except Exception as e:
+        error_name = e.__class__.__name__
+        available = ""
+        try:
+            available = f" Available languages: {_transcript_available_languages(transcript_list)}"
+        except Exception:
+            pass
+        logging.warning("⚠️ YouTube transcript lookup failed for %s: %s", video_id, e)
+        return f"YouTube transcript error ({error_name}): {e}.{available}".strip()
 
 
 def _is_private_or_local_ip(ip_text: str) -> bool:

@@ -494,12 +494,6 @@ def _normalize_tool_arguments(arguments):
     return arguments or {}
 
 
-def _truncate_tool_content(content: str, max_len: int = 500) -> str:
-    if len(content) <= max_len:
-        return content
-    return content[:max_len] + f"\n\n[... Tool output truncated. {len(content) - max_len} characters omitted ...]"
-
-
 def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
@@ -631,6 +625,7 @@ TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
+    "get_youtube_transcript": f"{MODEL_NAME} is reading the video transcript...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
     "get_nest_thermostats": f"{MODEL_NAME} is checking the Nest thermostat status...",
     "set_nest_thermostat_mode": f"{MODEL_NAME} is changing the Nest thermostat mode...",
@@ -776,7 +771,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                     
                     tool_response = {
                         "role": "tool",
-                        "content": _truncate_tool_content(str(result)),
+                        "content": str(result),
                         "name": fn
                     }
                     if "id" in tc:
