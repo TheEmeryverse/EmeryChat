@@ -579,6 +579,23 @@ async def _send_assistant_notice(
     )
 
 
+async def _send_expert_started_notice(bot, session: ExpertSession) -> None:
+    logging.info(
+        "EXPERT MODE %s NOTICE: Expert Mode Activated! | %s and the Assistant have started researching...",
+        session.id,
+        _model_display_name(),
+    )
+    return await _send_status(
+        bot,
+        session,
+        _compact_notice_text(
+            "Expert Mode Activated!",
+            [f"🧠 {_model_display_name()} and the Assistant have started researching..."],
+            icon="🧐",
+        ),
+    )
+
+
 async def _send_source_found_notice(bot, session: ExpertSession, source: dict, question_id: str | None) -> None:
     domain = source.get("domain") or _source_domain(source.get("url")) or "source"
     url = str(source.get("url") or "").strip()
@@ -1786,11 +1803,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
     try:
         ACTIVE_SESSIONS[session.key()] = session
         if session.round == 0 and not session.search_queries and not session.research_agenda:
-            await _send_model_notice(
-                bot,
-                session,
-                "started research!",
-            )
+            await _send_expert_started_notice(bot, session)
             plan = await _make_initial_plan(session)
             session.title = plan["title"]
             session.target_sources = _normalize_source_target(plan.get("target_source_count"))
