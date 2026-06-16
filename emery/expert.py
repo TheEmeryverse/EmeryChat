@@ -166,6 +166,7 @@ class ExpertSession:
     archive_path: str = ""
     followup_instruction: str = ""
     source_milestone_notice_count: int = 0
+    archive_label: str = ""
 
     def key(self) -> tuple[int, int | None]:
         return self.chat_id, normalize_message_thread_id(self.chat_id, self.message_thread_id)
@@ -696,6 +697,73 @@ def _save_index(entries: list[dict]) -> None:
     path = Path(EXPERT_INDEX_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(entries, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def _fallback_archive_label(title: str, topic: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(title or topic or "Research session")).strip()
+    text = re.sub(r"^(research|investigate|analyze|explain|cover)\s+", "", text, flags=re.IGNORECASE).strip()
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", text)
+    return " ".join(words[:5]) or "Research session"
+
+
+def _clean_archive_label(raw_label: str, *, title: str = "", topic: str = "") -> str:
+    label = clean_thinking_tags(str(raw_label or "")).strip()
+    label = re.sub(r"^```(?:json)?|```$", "", label, flags=re.IGNORECASE).strip()
+    label = re.sub(r"^(label|topic)\s*:\s*", "", label, flags=re.IGNORECASE).strip()
+    label = label.strip("\"'`*- \n\t")
+    label = re.sub(r"\s+", " ", label)
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", label)
+    if not words:
+        return _fallback_archive_label(title, topic)
+    return " ".join(words[:5])
+
+
+async def _generate_archive_label(title: str, topic: str) -> str:
+    fallback = _fallback_archive_label(title, topic)
+    prompt = (
+        "Create a concise archive button label for this research session. "
+        "Return only 2-5 words. No date, punctuation, quotes, markdown, or explanation.\n\n"
+        f"Title: {title}\n"
+        f"Original query: {topic}"
+    )
+    try:
+        raw = await _query_expert_fast_model(
+            prompt,
+            f"You create short topic labels for {_model_display_name()} research archives. Return only the label.",
+        )
+    except Exception as exc:
+        logging.warning("EXPERT: Archive label generation failed: %s", exc)
+        return fallback
+    return _clean_archive_label(raw, title=title, topic=topic)
+
+
+async def _ensure_archive_label(session: ExpertSession) -> str:
+    if session.archive_label:
+        return session.archive_label
+    session.archive_label = await _generate_archive_label(session.title, session.topic)
+    session.touch()
+    return session.archive_label
+
+
+def _archive_date_label(created_at: str) -> str:
+    try:
+        dt = datetime.fromisoformat(str(created_at or "").replace("Z", "+00:00"))
+        return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
+    except Exception:
+        return "Unknown date"
+
+
+def _archive_entry_topic_label(entry: dict) -> str:
+    return str(entry.get("archive_label") or "").strip() or _fallback_archive_label(entry.get("title"), entry.get("topic"))
+
+
+def _archive_entry_display_label(entry: dict) -> str:
+    return f"{_archive_date_label(entry.get('created_at'))} · {_archive_entry_topic_label(entry)}"
+
+
+def _telegram_button_text(text: str, limit: int = 64) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
 
 
 def _archive_root() -> Path:
@@ -1673,6 +1741,8 @@ def _archive_session(session: ExpertSession) -> Path:
     folder = archive_root / folder_name
     folder.mkdir(parents=True, exist_ok=False)
 
+    if not session.archive_label:
+        session.archive_label = _fallback_archive_label(session.title, session.topic)
     session.status = "archived"
     session.archive_path = str(folder)
     session.touch()
@@ -1697,6 +1767,7 @@ def _archive_session(session: ExpertSession) -> Path:
         "id": session.id,
         "title": session.title,
         "topic": session.topic,
+        "archive_label": session.archive_label,
         "created_at": session.created_at,
         "closed_at": _now_iso(),
         "source_count": _source_count(session),
@@ -1797,6 +1868,7 @@ async def _close_and_archive(bot, session: ExpertSession) -> None:
     task = SESSION_TASKS.pop(session.id, None)
     if task and not task.done():
         task.cancel()
+    await _ensure_archive_label(session)
     folder = _archive_session(session)
     ACTIVE_SESSIONS.pop(session.key(), None)
     await _send_model_notice(
@@ -1817,6 +1889,68 @@ def _normalize_intent_label(text: str, allowed_labels: set[str], default: str) -
         if re.search(rf"\b{re.escape(label)}\b", lowered):
             return label
     return default
+
+
+def _expert_help_text() -> str:
+    return "\n".join([
+        f"<b>{telegram_escape(_model_display_name())} research commands</b>",
+        "",
+        "/expert &lt;detailed research question&gt; - Start a focused research session.",
+        "/expert help - Show this help.",
+        "/expert list - Show archived research sessions.",
+        "/expert status - Show the active research session status.",
+        "/expert resume &lt;id&gt; - Resume an archived research session.",
+        "/expert open &lt;id&gt; - Send an archived report.",
+        "/expert cancel - Cancel the active research session.",
+        "",
+        "Use a complete research request, not a short command fragment.",
+    ])
+
+
+async def _send_expert_help(update) -> None:
+    await update.message.reply_text(_expert_help_text(), parse_mode="HTML")
+
+
+def _topic_has_enough_substance(topic: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", str(topic or ""))
+    if len(words) >= 4:
+        return True
+    if len(words) >= 3 and any(len(word) >= 8 for word in words):
+        return True
+    return False
+
+
+def _expert_topic_label(text: str) -> str:
+    return _normalize_intent_label(text, {"research_topic", "malformed"}, "unknown")
+
+
+async def _classify_expert_topic_input(topic: str) -> str:
+    prompt = (
+        "Classify whether this /expert argument is a detailed research topic or a malformed/command-like fragment. "
+        "Return exactly one label: research_topic or malformed.\n\n"
+        "Use malformed for vague one- or two-word inputs, command-like fragments, or inputs such as: "
+        "space, summary, research, question, help me, topic, list please. "
+        "Use research_topic for complete requests with enough detail for a research session.\n\n"
+        f"Input: {topic}"
+    )
+    try:
+        result = await _query_expert_fast_model(
+            prompt,
+            f"You classify candidate {_model_display_name()} research requests. Return one label only.",
+        )
+    except Exception as exc:
+        logging.warning("EXPERT: Topic classifier failed: %s", exc)
+        return "research_topic" if _topic_has_enough_substance(topic) else "malformed"
+    label = _expert_topic_label(result)
+    if label in {"research_topic", "malformed"}:
+        return label
+    return "research_topic" if _topic_has_enough_substance(topic) else "malformed"
+
+
+async def _send_malformed_expert_topic(update) -> None:
+    await update.message.reply_text(
+        "I'm sorry, I don't understand. Can you ask a detailed research question for me and my assistant to dive into?"
+    )
 
 
 async def _classify_expert_user_intent(session: ExpertSession, text: str) -> str:
@@ -1907,10 +2041,13 @@ async def handle_expert_command(update, context) -> None:
 
     args = list(getattr(context, "args", []) or [])
     if not args:
-        await update.message.reply_text("Usage: /expert <research topic>, /expert list, /expert status, /expert resume <id>, /expert open <id>, or /expert cancel.")
+        await _send_expert_help(update)
         return
 
     subcommand = args[0].lower()
+    if subcommand == "help":
+        await _send_expert_help(update)
+        return
     if subcommand == "list":
         await _send_expert_list(update, context)
         return
@@ -1926,6 +2063,9 @@ async def handle_expert_command(update, context) -> None:
     if subcommand == "open" and len(args) >= 2:
         await _open_archived_report(update, context, args[1])
         return
+    if subcommand in {"resume", "open"}:
+        await _send_expert_help(update)
+        return
 
     key = _session_key(chat_id, thread_id)
     if key in ACTIVE_SESSIONS and ACTIVE_SESSIONS[key].status in {"running", "waiting_for_answer", "completed_pending_user"}:
@@ -1933,6 +2073,10 @@ async def handle_expert_command(update, context) -> None:
         return
 
     topic = " ".join(args).strip()
+    if await _classify_expert_topic_input(topic) == "malformed":
+        await _send_malformed_expert_topic(update)
+        return
+
     session = ExpertSession(
         id=_short_id(),
         title=topic[:80],
@@ -2133,22 +2277,39 @@ async def _send_expert_status(update, context) -> None:
 
 
 async def _send_expert_list(update, context) -> None:
-    entries = _load_index()[:10]
+    all_entries = _load_index()
+    entries = all_entries[:10]
     if not entries:
         await update.message.reply_text(f"No archived {_model_display_name()} research sessions yet.")
         return
+
+    index_changed = False
+    for entry in entries:
+        if not str(entry.get("archive_label") or "").strip():
+            entry["archive_label"] = await _generate_archive_label(entry.get("title", ""), entry.get("topic", ""))
+            index_changed = True
+    if index_changed:
+        _save_index(all_entries)
 
     lines = [f"Archived {_model_display_name()} research sessions:"]
     rows = []
     for entry in entries:
         session_id = entry.get("id", "")
-        title = entry.get("title", "Untitled")
+        display_label = _archive_entry_display_label(entry)
         econ_count = entry.get("econ_result_count", 0)
         data_label = f", {econ_count} structured tool results" if econ_count else ""
-        lines.append(f"- {session_id}: {title} ({entry.get('source_count', 0)} sources{data_label})")
+        lines.append(f"- {display_label} ({entry.get('source_count', 0)} sources{data_label})")
         rows.append([
-            InlineKeyboardButton(f"Resume {session_id}", callback_data=_callback("resume", "archive", session_id)),
-            InlineKeyboardButton(f"Open {session_id}", callback_data=_callback("open", "archive", session_id)),
+            InlineKeyboardButton(
+                _telegram_button_text(f"Resume · {display_label}"),
+                callback_data=_callback("resume", "archive", session_id),
+            ),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                _telegram_button_text(f"Open report · {display_label}"),
+                callback_data=_callback("open", "archive", session_id),
+            ),
         ])
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
