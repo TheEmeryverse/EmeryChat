@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import os
@@ -164,6 +165,7 @@ class ExpertSession:
     final_report_versions: list[dict] = field(default_factory=list)
     archive_path: str = ""
     followup_instruction: str = ""
+    source_milestone_notice_count: int = 0
 
     def key(self) -> tuple[int, int | None]:
         return self.chat_id, normalize_message_thread_id(self.chat_id, self.message_thread_id)
@@ -453,14 +455,20 @@ def _assistant_display_name() -> str:
     return f"{name}{suffix} Assistant"
 
 
+def _model_possessive_name() -> str:
+    name = _model_display_name()
+    suffix = "'" if name.endswith("s") else "'s"
+    return f"{name}{suffix}"
+
+
 def _question_label(question_id: str | None) -> str:
     raw = str(question_id or "").strip()
     match = re.search(r"\d+", raw)
     return match.group(0) if match else raw
 
 
-def _compact_notice_text(title: str, lines: list[str] | None = None, *, lines_are_html: bool = False) -> str:
-    text_lines = [f"🧠 <b>{telegram_escape(title)}</b>"]
+def _compact_notice_text(title: str, lines: list[str] | None = None, *, lines_are_html: bool = False, icon: str = "🧠") -> str:
+    text_lines = [f"{telegram_escape(icon)} <b>{telegram_escape(title)}</b>"]
     for line in lines or []:
         clean = str(line or "").strip()
         if clean:
@@ -482,12 +490,22 @@ def _short_line(text: str, limit: int = 160) -> str:
     return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
 
 
-def _agenda_lines(agenda: list[dict]) -> list[str]:
-    lines = ["🔎 Research Questions:"]
+def _agenda_lines(agenda: list[dict], *, html: bool = False) -> list[str]:
+    lines = ["🔎 <b>Research Questions</b>" if html else "🔎 Research Questions:"]
     for item in agenda:
         label = _question_label(item.get("id")) or str(len(lines))
-        lines.append(f"{label}. {_short_line(item.get('question'), 180)}")
+        question = re.sub(r"\s+", " ", str(item.get("question") or "")).strip()
+        if not question:
+            continue
+        if html:
+            lines.append(f"<b>{telegram_escape(label)}.</b> {telegram_escape(question)}")
+        else:
+            lines.append(f"{label}. {question}")
     return lines
+
+
+def _source_total_line_html(session: ExpertSession) -> str:
+    return f"📚 <b>Sources Gathered:</b> {_source_count(session)}"
 
 
 async def _send_model_notice(
@@ -536,15 +554,38 @@ async def _send_assistant_notice(
 
 async def _send_source_found_notice(bot, session: ExpertSession, source: dict, question_id: str | None) -> None:
     domain = source.get("domain") or _source_domain(source.get("url")) or "source"
+    url = str(source.get("url") or "").strip()
+    domain_line = (
+        f'<a href="{html.escape(url, quote=True)}">{telegram_escape(domain)}</a>'
+        if url
+        else telegram_escape(domain)
+    )
     await _send_assistant_notice(
         bot,
         session,
         "found a source!",
         [
-            domain,
+            domain_line,
             _question_line(question_id),
             _source_total_line(session),
         ],
+        lines_are_html=True,
+    )
+
+
+async def _maybe_send_source_milestone_notice(bot, session: ExpertSession) -> None:
+    count = _source_count(session)
+    if count < 10 or count % 10 != 0 or count <= int(session.source_milestone_notice_count or 0):
+        return
+    session.source_milestone_notice_count = count
+    logging.info("EXPERT MODE %s NOTICE: %s hit %s sources", session.id, _assistant_display_name(), count)
+    await _send_status(
+        bot,
+        session,
+        _compact_notice_text(
+            f"{_assistant_display_name()} is chugging coffee!",
+            icon="☕️",
+        ),
     )
 
 
@@ -567,9 +608,10 @@ async def _send_plan_ready_notice(bot, session: ExpertSession) -> None:
         session,
         "plan ready",
         [
-            *_agenda_lines(session.research_agenda),
-            _source_total_line(session),
+            *_agenda_lines(session.research_agenda, html=True),
+            _source_total_line_html(session),
         ],
+        lines_are_html=True,
     )
 
 
@@ -598,16 +640,43 @@ async def _send_question_start_notice(bot, session: ExpertSession, question: dic
     )
 
 
-async def _send_question_review_notice(bot, session: ExpertSession, question: dict) -> None:
-    status = str(question.get("status") or "reviewed").replace("_", " ")
+async def _send_question_review_notice(bot, session: ExpertSession, question: dict, next_question: dict | None = None) -> None:
+    label = _question_label(question.get("id"))
+    next_label = _question_label((next_question or {}).get("id"))
+    status = str(question.get("status") or "reviewed")
+
+    if status == "needs_more":
+        await _send_model_notice(
+            bot,
+            session,
+            f"wants more information about Research Question {label}",
+            [f"{_assistant_display_name()} will circle back ↩"],
+        )
+        return
+
+    if status == "answered":
+        lines = [f"Moving on to Research Question {next_label}..." if next_label else "All current research questions are resolved."]
+        await _send_status(
+            bot,
+            session,
+            _compact_notice_text(f"{_model_possessive_name()} Research Question {label} fully answered!", lines),
+        )
+        return
+
+    if status == "exhausted":
+        await _send_model_notice(
+            bot,
+            session,
+            f"reached the limit for Research Question {label}",
+            ["Moving on with the best available evidence."],
+        )
+        return
+
     await _send_model_notice(
         bot,
         session,
-        "reviewed progress",
-        [
-            f"{_question_line(question.get('id'))} {status}".strip(),
-            _source_total_line(session),
-        ],
+        f"reviewed Research Question {label}",
+        [_source_total_line(session)],
     )
 
 
@@ -1383,6 +1452,7 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str], question
             )
             if source.get("fetch_success"):
                 await _send_source_found_notice(bot, session, source, question_id)
+                await _maybe_send_source_milestone_notice(bot, session)
 
 
 async def _build_final_report(session: ExpertSession) -> str:
@@ -1540,7 +1610,8 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 answered=bool(evaluation.get("answered")),
                 stop_now=bool(evaluation.get("stop_now")),
             )
-            await _send_question_review_notice(bot, session, question)
+            next_question = _select_next_agenda_question(session)
+            await _send_question_review_notice(bot, session, question, next_question)
             for added_question in added_questions:
                 await _send_question_added_notice(bot, session, added_question)
             questions_for_pause = _questions_for_midloop_pause(session, evaluation.get("critical_questions") or [])
