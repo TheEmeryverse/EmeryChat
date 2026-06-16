@@ -23,6 +23,7 @@ from emery import tool_registry
 import emery.globals as globals
 from emery.helpers import (
     get_stable_system_prompt,
+    message_content_to_text,
     normalize_gemma_thinking,
     clean_thinking_tags,
     query_fast_model,
@@ -688,7 +689,8 @@ def _compact_tool_schema(schema: dict) -> dict:
 
 def _compact_agentic_history(history_buffer, limit: int = 8) -> list[dict]:
     compact = []
-    for msg in history_buffer[-limit:]:
+    recent_messages = list(history_buffer)[-limit:]
+    for msg in recent_messages:
         role = msg.get("role", "")
         if role not in {"system", "user", "assistant", "tool"}:
             continue
@@ -1077,9 +1079,11 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
             res = r.json()
             _log_main_model_perf(res, request_wall_seconds)
             msg = _extract_response_message(res)
-            raw_content = msg.get('content') or ""
+            raw_content = message_content_to_text(msg.get("content"))
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
-            reasoning = msg.get('reasoning_content', "") or msg.get('thinking', "") or msg.get('reasoning', "")
+            reasoning = message_content_to_text(
+                msg.get("reasoning_content") or msg.get("thinking") or msg.get("reasoning")
+            )
             if reasoning:
                 reasoning = _strip_id_prefix(reasoning)
                 thinking_timeline.append(_format_thinking_turn(loop_count, "Reasoning", reasoning))
@@ -1089,11 +1093,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
             if allow_tools and msg.get("tool_calls"):
                 assistant_tool_msg = {
                     "role": msg.get("role", "assistant"),
-                    "content": cleaned_msg_content if cleaned_msg_content != raw_content else msg.get("content"),
+                    "content": cleaned_msg_content,
                     "tool_calls": msg["tool_calls"],
                 }
-                if cleaned_msg_content != raw_content:
-                    assistant_tool_msg["content"] = cleaned_msg_content
                 history_buffer.append(assistant_tool_msg)
                 ollama_history.append(assistant_tool_msg)
                 for tc in assistant_tool_msg['tool_calls']:

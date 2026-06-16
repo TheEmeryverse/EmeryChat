@@ -68,6 +68,25 @@ def clean_thinking_tags(text: str) -> str:
     return text.strip()
 
 
+def message_content_to_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and part.get("text") is not None:
+                    parts.append(str(part.get("text")))
+                elif part.get("content") is not None:
+                    parts.append(str(part.get("content")))
+            elif part is not None:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
+
+
 def _log_fast_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("FAST", response_json, wall_seconds))
 
@@ -171,14 +190,7 @@ async def query_fast_model(
         data = r.json()
         _log_fast_model_perf(data, wall_seconds)
         message = ((data.get("choices") or [{}])[0]).get("message", {})
-        content = message.get("content", "")
-
-        if isinstance(content, list):
-            content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
+        content = message_content_to_text(message.get("content", ""))
 
         content = clean_thinking_tags(normalize_gemma_thinking((content or "").strip()))
         return content
@@ -249,7 +261,8 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
             return "Failed to describe the image due to an Ollama processing error."
             
         data = r.json()
-        description = data.get('message', {}).get('content', "").strip()
+        message = data.get("message", {}) if isinstance(data, dict) else {}
+        description = message_content_to_text(message.get("content", "")).strip()
         
         # Safely strip reasoning blocks if the vision model uses them
         description = re.sub(r'<[tT]hink>.*?</[tT]hink>', '', description, flags=re.DOTALL).strip()
