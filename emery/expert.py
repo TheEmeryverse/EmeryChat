@@ -734,7 +734,6 @@ def _session_action_markup(session: ExpertSession) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Close and archive", callback_data=_callback("close", session.id)),
-            InlineKeyboardButton("Cancel", callback_data=_callback("cancel", session.id)),
         ],
     ])
 
