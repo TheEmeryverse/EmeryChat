@@ -1481,8 +1481,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             await _send_model_notice(
                 bot,
                 session,
-                "started research",
-                [_short_line(session.topic, 220)],
+                "started research!",
             )
             plan = await _make_initial_plan(session)
             session.title = plan["title"]
