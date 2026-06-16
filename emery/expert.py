@@ -486,6 +486,11 @@ def _question_line(question_id: str | None) -> str:
     return f"🔎 Research Question: {label}" if label else ""
 
 
+def _question_now_line(question_id: str | None) -> str:
+    label = _question_label(question_id)
+    return f"Now on 🔎 Research Question {label}" if label else ""
+
+
 def _short_line(text: str, limit: int = 160) -> str:
     clean = re.sub(r"\s+", " ", str(text or "")).strip()
     return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
@@ -503,10 +508,6 @@ def _agenda_lines(agenda: list[dict], *, html: bool = False) -> list[str]:
         else:
             lines.append(f"{label}. {question}")
     return lines
-
-
-def _source_total_line_html(session: ExpertSession) -> str:
-    return f"📚 <b>Sources Gathered:</b> {_source_count(session)}"
 
 
 async def _send_model_notice(
@@ -591,14 +592,13 @@ async def _maybe_send_source_milestone_notice(bot, session: ExpertSession) -> No
 
 
 async def _send_structured_context_notice(bot, session: ExpertSession, tool_label: str, question_id: str | None) -> None:
-    await _send_assistant_notice(
+    await _send_model_notice(
         bot,
         session,
-        "gathered structured context",
+        "is getting background information",
         [
             tool_label,
             _question_line(question_id),
-            _source_total_line(session),
         ],
     )
 
@@ -610,7 +610,6 @@ async def _send_plan_ready_notice(bot, session: ExpertSession) -> None:
         "plan ready",
         [
             *_agenda_lines(session.research_agenda, html=True),
-            _source_total_line_html(session),
         ],
         lines_are_html=True,
     )
@@ -635,10 +634,30 @@ async def _send_question_start_notice(bot, session: ExpertSession, question: dic
         session,
         "is researching",
         [
-            _question_line(question.get("id")),
+            _question_now_line(question.get("id")),
             _source_total_line(session),
         ],
     )
+
+
+async def _send_question_finished_notice(
+    bot,
+    session: ExpertSession,
+    question: dict,
+    next_question: dict | None = None,
+) -> None:
+    label = _question_label(question.get("id"))
+    next_label = _question_label((next_question or {}).get("id"))
+    lines = []
+    if label:
+        lines.append(f"✅ Submitting Research Question {label} report for review")
+    else:
+        lines.append("✅ Submitting research question report for review")
+    if next_label:
+        lines.append(f"➡ Moving onto Research Question {next_label} now")
+    else:
+        lines.append(f"➡ {_model_display_name()} is reviewing the final packet now")
+    await _send_assistant_notice(bot, session, "finished a Research Question", lines)
 
 
 async def _send_question_review_notice(bot, session: ExpertSession, question: dict, next_question: dict | None = None) -> None:
@@ -677,7 +696,6 @@ async def _send_question_review_notice(bot, session: ExpertSession, question: di
         bot,
         session,
         f"reviewed Research Question {label}",
-        [_source_total_line(session)],
     )
 
 
@@ -1678,6 +1696,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 stop_now=bool(evaluation.get("stop_now")),
             )
             next_question = _select_next_agenda_question(session)
+            await _send_question_finished_notice(bot, session, question, next_question)
             await _send_question_review_notice(bot, session, question, next_question)
             for added_question in added_questions:
                 await _send_question_added_notice(bot, session, added_question)
@@ -1701,10 +1720,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             bot,
             session,
             "is synthesizing",
-            [
-                _source_total_line(session),
-                "Writing final report",
-            ],
+            ["Writing final report"],
         )
         session.final_report = await _build_final_report(session)
         session.final_report_versions.append({"time": _now_label(), "report": session.final_report})
@@ -2010,7 +2026,7 @@ async def _exit_waiting_session(bot, session: ExpertSession, action: str) -> boo
 
 async def _refine_report(bot, session: ExpertSession, instruction: str) -> None:
     typing_stop, typing_task = _start_expert_typing(bot, session)
-    await _send_model_notice(bot, session, "is refining the report", [_source_total_line(session)])
+    await _send_model_notice(bot, session, "is refining the report")
     try:
         prompt = (
             "Revise the existing research report according to the user instruction. Preserve source citations and "
