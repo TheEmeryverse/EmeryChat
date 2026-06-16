@@ -81,6 +81,7 @@ FETCHES_PER_ROUND = 6
 SEARCH_RESULTS_PER_QUERY = 8
 ECON_REQUESTS_PER_ROUND = 3
 AGENDA_PRIORITY_ORDER = {"core": 0, "supporting": 1, "optional": 2}
+EVALUATION_STATUSES = {"answered", "needs_more", "sufficient_with_gaps", "exhausted"}
 
 COMPLETED_WAITING_STATES = {"completed_pending_user", "waiting_for_answer"}
 
@@ -321,6 +322,7 @@ def _normalize_agenda_questions(raw_questions, *, existing_count: int = 0, limit
             "created_at": _now_label(),
             "answered_at": "",
             "answer_summary": "",
+            "gap_summary": "",
             "confidence": "",
             "source_ids": [],
             "econ_result_ids": [],
@@ -336,7 +338,8 @@ def _agenda_digest(session: ExpertSession) -> str:
         lines.append(
             f"{item.get('id')} | {item.get('priority')} | {item.get('status')} | attempts={item.get('attempts', 0)}\n"
             f"Question: {item.get('question')}\n"
-            f"Answer: {item.get('answer_summary') or 'Not answered yet.'}"
+            f"Answer: {item.get('answer_summary') or 'Not answered yet.'}\n"
+            f"Gaps: {item.get('gap_summary') or 'No material gaps recorded.'}"
         )
     return "\n\n".join(lines)
 
@@ -384,23 +387,34 @@ def _agenda_has_open_core_questions(session: ExpertSession) -> bool:
     )
 
 
+def _normalize_evaluation_status(evaluation: dict, question: dict) -> str:
+    raw_status = str(evaluation.get("status") or "").strip().lower()
+    if raw_status in EVALUATION_STATUSES:
+        status = raw_status
+    elif bool(evaluation.get("answered")):
+        status = "answered"
+    else:
+        status = "needs_more"
+
+    if status == "needs_more" and int(question.get("attempts") or 0) >= max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION):
+        return "exhausted"
+    return status
+
+
 def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dict, evaluation: dict) -> list[dict]:
-    answered = bool(evaluation.get("answered"))
+    status = _normalize_evaluation_status(evaluation, question)
     confidence = str(evaluation.get("confidence") or "").strip()[:80]
     answer_summary = str(evaluation.get("answer_summary") or packet.get("summary") or "").strip()[:2000]
+    gap_summary = str(evaluation.get("gap_summary") or "").strip()[:1000]
     question["confidence"] = confidence
     question["answer_summary"] = answer_summary
+    question["gap_summary"] = gap_summary
     question["source_ids"] = sorted(set((question.get("source_ids") or []) + (packet.get("source_ids") or [])))
     question["econ_result_ids"] = sorted(set((question.get("econ_result_ids") or []) + (packet.get("econ_result_ids") or [])))
 
-    if answered:
-        question["status"] = "answered"
+    question["status"] = status
+    if status in {"answered", "sufficient_with_gaps", "exhausted"}:
         question["answered_at"] = _now_label()
-    elif int(question.get("attempts") or 0) >= max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION):
-        question["status"] = "exhausted"
-        question["answered_at"] = _now_label()
-    else:
-        question["status"] = "needs_more"
 
     additions_allowed = max(0, min(
         EXPERT_MAX_NEW_QUESTIONS - int(session.new_questions_added or 0),
@@ -666,11 +680,17 @@ async def _send_question_review_notice(bot, session: ExpertSession, question: di
     status = str(question.get("status") or "reviewed")
 
     if status == "needs_more":
+        next_is_same_question = bool(label and next_label and label == next_label)
+        line = (
+            f"{_assistant_display_name()} is taking another pass ↩"
+            if next_is_same_question
+            else f"{_assistant_display_name()} will circle back if the remaining research budget allows ↩"
+        )
         await _send_model_notice(
             bot,
             session,
             f"wants more information about Research Question {label}",
-            [f"{_assistant_display_name()} will circle back ↩"],
+            [line],
         )
         return
 
@@ -683,12 +703,26 @@ async def _send_question_review_notice(bot, session: ExpertSession, question: di
         )
         return
 
+    if status == "sufficient_with_gaps":
+        lines = ["Some details are still uncertain and will be noted in the report."]
+        if next_label:
+            lines.append(f"Moving on to Research Question {next_label}...")
+        else:
+            lines.append("Ready to synthesize with caveats.")
+        await _send_model_notice(
+            bot,
+            session,
+            f"has enough to continue from Research Question {label}",
+            lines,
+        )
+        return
+
     if status == "exhausted":
         await _send_model_notice(
             bot,
             session,
-            f"reached the limit for Research Question {label}",
-            ["Moving on with the best available evidence."],
+            f"reached diminishing returns on Research Question {label}",
+            ["Using the best available evidence in the final report."],
         )
         return
 
@@ -697,6 +731,14 @@ async def _send_question_review_notice(bot, session: ExpertSession, question: di
         session,
         f"reviewed Research Question {label}",
     )
+
+
+def _synthesis_notice_lines(session: ExpertSession) -> list[str]:
+    lines = ["Writing final report"]
+    caveat_statuses = {"needs_more", "sufficient_with_gaps", "exhausted"}
+    if any(item.get("status") in caveat_statuses for item in session.research_agenda):
+        lines.append("Unresolved gaps will be included as uncertainty notes.")
+    return lines
 
 
 def _load_index() -> list[dict]:
@@ -1388,7 +1430,12 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
     )
     prompt = (
         f"You are {_model_display_name()}. Evaluate whether {_assistant_display_name()} answered the assigned question. "
-        "Return strict JSON with keys: answered (boolean), confidence, answer_summary, new_questions, critical_questions, stop_now. "
+        "Return strict JSON with keys: status, confidence, answer_summary, gap_summary, new_questions, critical_questions, stop_now. "
+        "status must be exactly one of: answered, needs_more, sufficient_with_gaps, exhausted. "
+        "Use answered when the question is substantively answered with no material unresolved gaps. "
+        "Use needs_more only when an important gap remains and another assistant pass is worthwhile. "
+        "Use sufficient_with_gaps when the answer is good enough to continue or synthesize, but uncertainties should be noted in the report. "
+        "Use exhausted when more research is unlikely to improve the answer or the available evidence is too limited. "
         "You own the agenda. Add new_questions only if new information materially changes the final answer. "
         "Do not add rabbit holes or background-only questions. Each new question must include question, priority "
         "(core/supporting/optional), and why. Respect the remaining budgets. "
@@ -1406,10 +1453,15 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         prompt,
         f"You are {MODEL_NAME}. Return only compact JSON.",
     )) or {}
+    status = str(parsed.get("status") or "").strip().lower()
+    if status not in EVALUATION_STATUSES:
+        status = "answered" if bool(parsed.get("answered")) else "needs_more"
     return {
+        "status": status,
         "answered": bool(parsed.get("answered")),
         "confidence": str(parsed.get("confidence") or packet.get("confidence") or "").strip(),
         "answer_summary": str(parsed.get("answer_summary") or packet.get("summary") or "").strip(),
+        "gap_summary": str(parsed.get("gap_summary") or "").strip(),
         "new_questions": parsed.get("new_questions") if isinstance(parsed.get("new_questions"), list) else [],
         "critical_questions": _normalize_questions(parsed.get("critical_questions") if isinstance(parsed.get("critical_questions"), list) else []),
         "stop_now": bool(parsed.get("stop_now")),
@@ -1540,14 +1592,49 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str], question
                 await _maybe_send_source_milestone_notice(bot, session)
 
 
+def _is_report_meta_footer(text: str) -> bool:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not clean or len(clean) > 500:
+        return False
+    return any(
+        phrase in clean
+        for phrase in (
+            "report generated",
+            "provided research packets",
+            "structured data notes",
+            "source appendices separately",
+            "source appendix separately",
+            "sources separately",
+            "appendix separately",
+            "appendices separately",
+            "emery will receive",
+            "emery will send",
+            "based on the research packets",
+            "based on provided research",
+        )
+    )
+
+
+def _strip_report_meta_footer(report: str) -> str:
+    clean = str(report or "").strip()
+    if not clean:
+        return ""
+    blocks = re.split(r"\n\s*\n", clean)
+    while blocks and _is_report_meta_footer(blocks[-1]):
+        blocks.pop()
+    return "\n\n".join(block.strip() for block in blocks).strip()
+
+
 async def _build_final_report(session: ExpertSession) -> str:
     prompt = (
         "Write the final research report as clean Telegram-friendly Markdown. "
         "Use headings, bullets, numbered lists, compact tables only if they fit, and citations like [S12]. "
         "Include: executive summary, timeline, key actors, core findings, competing interpretations, "
-        "and uncertainty/confidence notes. Do not include a full source appendix; Emery will send "
-        "all sources separately after the report. Be explicit about source reliability and perspective when it "
-        "matters to the analysis.\n\n"
+        "and uncertainty/confidence notes. Do not include a source appendix in this report. "
+        "Do not include a source list; use citations only. "
+        "Do not mention separate source messages, appendices, research packets, structured data notes, "
+        "prompt inputs, or that the report was generated from provided materials. Be explicit about source "
+        "reliability and perspective when it matters to the analysis.\n\n"
         f"User request: {session.topic}\n"
         f"User follow-up inputs: {json.dumps(session.user_inputs, ensure_ascii=True)}\n\n"
         f"{_model_display_name()} research agenda:\n{_agenda_digest(session)}\n\n"
@@ -1557,9 +1644,9 @@ async def _build_final_report(session: ExpertSession) -> str:
     )
     system = (
         f"You are {_model_display_name()}'s senior research writer. Produce only the finished report in Markdown. "
-        "Do not include hidden reasoning or process notes."
+        "Do not include hidden reasoning, process notes, implementation notes, delivery notes, or meta disclaimers."
     )
-    report = await _query_main_model(prompt, system)
+    report = _strip_report_meta_footer(await _query_main_model(prompt, system))
     if report:
         return report
 
@@ -1567,7 +1654,7 @@ async def _build_final_report(session: ExpertSession) -> str:
         f"# {_model_display_name()} Report: {session.title}",
         "",
         "## Executive Summary",
-        "The research loop completed, but the final synthesis did not return a report. Sources are preserved in the separate Sources message.",
+        "A final synthesis could not be generated from the available research.",
     ]
     return "\n".join(lines)
 
@@ -1692,7 +1779,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
                 session,
                 "agenda_eval",
                 f"{MODEL_NAME} evaluated {question.get('id')}: status={question.get('status')} confidence={question.get('confidence')}",
-                answered=bool(evaluation.get("answered")),
+                evaluation_status=evaluation.get("status"),
                 stop_now=bool(evaluation.get("stop_now")),
             )
             next_question = _select_next_agenda_question(session)
@@ -1720,7 +1807,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
             bot,
             session,
             "is synthesizing",
-            ["Writing final report"],
+            _synthesis_notice_lines(session),
         )
         session.final_report = await _build_final_report(session)
         session.final_report_versions.append({"time": _now_label(), "report": session.final_report})
