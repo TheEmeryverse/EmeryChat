@@ -16,6 +16,7 @@ from telegram.error import BadRequest
 
 from emery.config import (
     ENABLE_FINANCE,
+    ENABLE_YOUTUBE_TRANSCRIPT,
     EXPERT_ALLOW_MIDLOOP_QUESTIONS,
     EXPERT_ARCHIVE_DIR,
     EXPERT_DEFAULT_TARGET_SOURCES,
@@ -53,6 +54,7 @@ from emery.telegram_delivery import send_rich_or_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 from emery.tools import (
     fetch_web_content,
+    get_youtube_transcript,
     search_fred_series,
     get_fred_series_observations,
     search_imf_indicators,
@@ -245,6 +247,14 @@ def _normalize_url(url: str) -> str:
 def _source_domain(url: str) -> str:
     host = urlparse(str(url or "")).netloc.lower()
     return host[4:] if host.startswith("www.") else host
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse(str(url or "").strip()).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com"} or host.endswith(".youtube.com")
 
 
 def _source_count(session: ExpertSession) -> int:
@@ -1143,6 +1153,38 @@ async def _summarize_source(session: ExpertSession, source: dict, fetched: dict)
     }
 
 
+async def _fetch_expert_source_content(result: dict) -> dict:
+    url = str(result.get("url") or "").strip()
+    if ENABLE_YOUTUBE_TRANSCRIPT and _is_youtube_url(url):
+        logging.info("🔧 EXPERT TOOL: get_youtube_transcript | Args: %s", format_logging_payload({"video_url_or_id": url}))
+        transcript = await get_youtube_transcript(url, languages="en", include_timestamps=False)
+        transcript_text = str(transcript or "").strip()
+        if transcript_text and not transcript_text.lower().startswith("youtube transcript error"):
+            return {
+                "success": True,
+                "title": result.get("title") or "YouTube transcript",
+                "url": url,
+                "content": transcript_text,
+                "content_type": "youtube_transcript",
+            }
+        logging.info(
+            "EXPERT: YouTube transcript unavailable for %s: %s",
+            url,
+            safe_preview(transcript_text, max_len=180),
+        )
+        return {
+            "success": False,
+            "title": result.get("title") or "YouTube video",
+            "url": url,
+            "error": transcript_text or "YouTube transcript unavailable.",
+            "content": "",
+            "content_type": "youtube_transcript",
+        }
+
+    logging.info("🔧 EXPERT TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": url}))
+    return await fetch_web_content(url, max_chars=12000, summarize_long=False)
+
+
 def _source_digest(session: ExpertSession, limit: int = 24) -> str:
     chunks = []
     for source in session.sources[:limit]:
@@ -1574,8 +1616,7 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str], question
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            logging.info("🔧 EXPERT TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": result.get("url")}))
-            fetched = await fetch_web_content(result["url"], max_chars=12000, summarize_long=False)
+            fetched = await _fetch_expert_source_content(result)
             source = await _summarize_source(session, result, fetched)
             session.sources.append(source)
             fetches_this_round += 1
@@ -2262,12 +2303,16 @@ async def handle_expert_callback(update, context) -> None:
     action = parts[2]
 
     session = _active_session_by_id(session_id)
-    if not session and action in {"resume", "open"} and len(parts) >= 4:
+    if not session and action in {"select", "resume", "open", "archive_cancel"} and len(parts) >= 4:
         archive_id = parts[3]
-        if action == "resume":
+        if action == "select":
+            await _send_archive_action_menu(update, archive_id)
+        elif action == "resume":
             await _resume_archived_session(update, context, archive_id)
-        else:
+        elif action == "open":
             await _open_archived_report(update, context, archive_id)
+        else:
+            await query.message.reply_text(f"{_model_display_name()} is back to normal chat.")
         return
     if not session:
         await query.message.reply_text(f"That {_model_display_name()} research session is no longer active.")
@@ -2404,17 +2449,36 @@ async def _send_expert_list(update, context) -> None:
         lines.append(f"- {display_label} ({entry.get('source_count', 0)} sources{data_label})")
         rows.append([
             InlineKeyboardButton(
-                _telegram_button_text(f"Resume · {display_label}"),
-                callback_data=_callback("resume", "archive", session_id),
-            ),
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                _telegram_button_text(f"Open report · {display_label}"),
-                callback_data=_callback("open", "archive", session_id),
+                _telegram_button_text(display_label),
+                callback_data=_callback("select", "archive", session_id),
             ),
         ])
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _send_archive_action_menu(update, session_id: str) -> None:
+    entry = _find_index_entry(session_id)
+    target_message = update.message or (update.callback_query.message if update.callback_query else None)
+    if not target_message:
+        return
+    if not entry:
+        await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
+        return
+
+    display_label = _archive_entry_display_label(entry)
+    rows = [
+        [
+            InlineKeyboardButton("Resume", callback_data=_callback("resume", "archive", session_id)),
+            InlineKeyboardButton("Open report", callback_data=_callback("open", "archive", session_id)),
+        ],
+        [
+            InlineKeyboardButton("Cancel", callback_data=_callback("archive_cancel", "archive", session_id)),
+        ],
+    ]
+    await target_message.reply_text(
+        f"{_model_display_name()} archived report:\n{display_label}",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 def _find_index_entry(session_id: str) -> dict | None:
@@ -2422,6 +2486,100 @@ def _find_index_entry(session_id: str) -> dict | None:
         if str(entry.get("id")) == str(session_id):
             return entry
     return None
+
+
+def _archive_folder_name_from_entry(entry: dict) -> str:
+    for key in ("archive_path", "report_path", "session_path"):
+        raw_path = str(entry.get(key) or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if key == "archive_path":
+            return path.name
+        return path.parent.name
+    return ""
+
+
+def _candidate_archive_folders(entry: dict) -> list[Path]:
+    session_id = str(entry.get("id") or "").strip()
+    candidates = []
+
+    archive_path = str(entry.get("archive_path") or "").strip()
+    if archive_path:
+        candidates.append(Path(archive_path))
+
+    for key in ("report_path", "session_path"):
+        raw_path = str(entry.get(key) or "").strip()
+        if raw_path:
+            candidates.append(Path(raw_path).parent)
+
+    folder_name = _archive_folder_name_from_entry(entry)
+    if folder_name:
+        candidates.append(_archive_root() / folder_name)
+
+    if session_id:
+        try:
+            candidates.extend(sorted(_archive_root().glob(f"*-{session_id}")))
+        except Exception as exc:
+            logging.warning("EXPERT: Unable to scan archive root for %s: %s", session_id, exc)
+
+    seen = set()
+    unique = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            resolved = candidate.expanduser()
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
+def _resolve_archived_file(entry: dict, filename: str, path_key: str) -> Path:
+    raw_path = str(entry.get(path_key) or "").strip()
+    if raw_path:
+        path = Path(raw_path).expanduser()
+        if path.exists():
+            return path
+
+    tried = []
+    for folder in _candidate_archive_folders(entry):
+        path = folder / filename
+        tried.append(str(path))
+        if path.exists():
+            _repair_archive_index_paths(str(entry.get("id") or ""), folder)
+            return path
+
+    if raw_path:
+        tried.insert(0, raw_path)
+    raise FileNotFoundError(f"{filename} was not found. Tried: {', '.join(tried) or raw_path or 'no archive paths'}")
+
+
+def _repair_archive_index_paths(session_id: str, folder: Path) -> None:
+    if not session_id:
+        return
+    entries = _load_index()
+    changed = False
+    for entry in entries:
+        if str(entry.get("id")) != str(session_id):
+            continue
+        report_path = str(folder / "report.md")
+        session_path = str(folder / "session.json")
+        archive_path = str(folder)
+        if (
+            entry.get("archive_path") != archive_path
+            or entry.get("report_path") != report_path
+            or entry.get("session_path") != session_path
+        ):
+            entry["archive_path"] = archive_path
+            entry["report_path"] = report_path
+            entry["session_path"] = session_path
+            changed = True
+        break
+    if changed:
+        _save_index(entries)
 
 
 async def _resume_archived_session(update, context, session_id: str) -> None:
@@ -2432,7 +2590,8 @@ async def _resume_archived_session(update, context, session_id: str) -> None:
             await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
-        data = json.loads(Path(entry["session_path"]).read_text(encoding="utf-8"))
+        session_path = _resolve_archived_file(entry, "session.json", "session_path")
+        data = json.loads(session_path.read_text(encoding="utf-8"))
         session = ExpertSession.from_dict(data)
     except Exception as exc:
         if target_message:
@@ -2472,7 +2631,8 @@ async def _open_archived_report(update, context, session_id: str) -> None:
             await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
-        report = Path(entry["report_path"]).read_text(encoding="utf-8")
+        report_path = _resolve_archived_file(entry, "report.md", "report_path")
+        report = report_path.read_text(encoding="utf-8")
     except Exception as exc:
         if target_message:
             await target_message.reply_text(f"Unable to open report for {session_id}: {exc}")
