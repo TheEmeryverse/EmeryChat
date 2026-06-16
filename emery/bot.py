@@ -173,6 +173,7 @@ def _help_text() -> str:
         "/expert status - Show the active expert session status for this chat/thread.",
         "/expert resume &lt;id&gt; - Load an archived expert session without auto-continuing research.",
         "/expert open &lt;id&gt; - Send the archived report for a session.",
+        "/expert clear - Delete all archived expert reports.",
         "/expert cancel - Cancel the active expert session in this chat/thread.",
         "",
         "<b>While an expert report is complete</b>",

@@ -334,6 +334,7 @@ Routing behavior:
 - `/expert resume <id>` restores an archived session into the current chat/thread without auto-continuing research
 - `/expert open <id>` sends the archived report back through the rich Telegram delivery path
 - `/expert status` shows the current active expert session state
+- `/expert clear` deletes all archived expert reports and clears the archive index
 - `/expert cancel` cancels the active expert session in the current chat/thread
 - Web search via SearXNG
 - Web content extraction and summarization
@@ -344,7 +345,7 @@ Routing behavior:
 
 Expert reports use citations like `[S12]` inside the report. The script sends the full source list separately, so the model is instructed not to include source appendices, source-list boilerplate, or delivery disclaimers inside the report itself.
 
-When an expert session is closed and archived, EmeryChat writes a resumable bundle under `EXPERT_ARCHIVE_DIR`:
+When an expert session is closed and archived, EmeryChat writes a resumable bundle under `EXPERT_ARCHIVE_DIR`. The default is `data/expert`, which is persisted by the default Docker bind mount for `./data:/app/data`:
 
 - `session.json`: complete session state for resume
 - `report.md`: final report plus source appendix for local archive use
@@ -486,7 +487,7 @@ EmeryChat now generates and persists these files under `config/` on startup:
 
 These files are app-managed and should survive restarts and rebuilds when `config/` is bind-mounted in Docker.
 
-`config/expert_sessions.json` stores archive metadata and file paths. If the app later runs with a different home directory or `EXPERT_ARCHIVE_DIR`, `/expert open` and `/expert resume` first try the saved paths, then try to relocate the archive folder under the current archive root by session ID and repair the index when successful.
+`config/expert_sessions.json` stores archive metadata and file paths. Archives are expected to stay under the configured `EXPERT_ARCHIVE_DIR`. Older `.env` files may use `EXPERT_ARCHIVE_DIR=~/expert`; inside Docker that resolves to `/root/expert`, which is not persisted by the default compose file. Prefer `EXPERT_ARCHIVE_DIR=data/expert` unless you explicitly mount another archive directory.
 
 ### Optional integrations
 
@@ -524,7 +525,8 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 
 - Confirm `EXPERT_ARCHIVE_DIR` points at the directory where archived session folders live.
 - Confirm `config/expert_sessions.json` is bind-mounted or persisted with the archive folder if running in Docker.
-- EmeryChat can repair stale absolute paths when the same archive folder exists under the current `EXPERT_ARCHIVE_DIR` and the folder name still ends with the session ID.
+- If the error references `/root/expert`, update `.env` to `EXPERT_ARCHIVE_DIR=data/expert` for future archives.
+- Old archives are not automatically migrated. If you need an old report, copy its archive folder into the configured `EXPERT_ARCHIVE_DIR` and update/recreate the matching index entry.
 
 ### Docker created folders instead of files
 

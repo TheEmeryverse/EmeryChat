@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -838,6 +839,30 @@ def _telegram_button_text(text: str, limit: int = 64) -> str:
 
 def _archive_root() -> Path:
     return Path(os.path.expanduser(EXPERT_ARCHIVE_DIR)).resolve()
+
+
+def clear_expert_archives() -> dict:
+    archive_root = _archive_root()
+    existing_entries = _load_index()
+    removed_items = 0
+
+    if archive_root.exists():
+        for child in archive_root.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed_items += 1
+            except FileNotFoundError:
+                continue
+    archive_root.mkdir(parents=True, exist_ok=True)
+    _save_index([])
+    return {
+        "archived_sessions": len(existing_entries),
+        "removed_items": removed_items,
+        "archive_dir": str(archive_root),
+    }
 
 
 def _callback(action: str, session_id: str, *parts: str) -> str:
@@ -2045,6 +2070,7 @@ def _expert_help_text() -> str:
         "/expert status - Show the active research session status.",
         "/expert resume &lt;id&gt; - Resume an archived research session.",
         "/expert open &lt;id&gt; - Send an archived report.",
+        "/expert clear - Delete all archived research reports.",
         "/expert cancel - Cancel the active research session.",
         "",
         "Use a complete research request, not a short command fragment.",
@@ -2053,6 +2079,15 @@ def _expert_help_text() -> str:
 
 async def _send_expert_help(update) -> None:
     await update.message.reply_text(_expert_help_text(), parse_mode="HTML")
+
+
+async def _clear_archived_reports(update) -> None:
+    result = clear_expert_archives()
+    await update.message.reply_text(
+        f"Deleted archived {_model_display_name()} research reports.\n"
+        f"Archived sessions cleared: {result['archived_sessions']}\n"
+        f"Archive items removed: {result['removed_items']}"
+    )
 
 
 def _topic_has_enough_substance(topic: str) -> bool:
@@ -2197,6 +2232,9 @@ async def handle_expert_command(update, context) -> None:
         return
     if subcommand == "status":
         await _send_expert_status(update, context)
+        return
+    if subcommand == "clear":
+        await _clear_archived_reports(update)
         return
     if subcommand == "cancel":
         await _cancel_active_session(update, context)
@@ -2488,100 +2526,6 @@ def _find_index_entry(session_id: str) -> dict | None:
     return None
 
 
-def _archive_folder_name_from_entry(entry: dict) -> str:
-    for key in ("archive_path", "report_path", "session_path"):
-        raw_path = str(entry.get(key) or "").strip()
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        if key == "archive_path":
-            return path.name
-        return path.parent.name
-    return ""
-
-
-def _candidate_archive_folders(entry: dict) -> list[Path]:
-    session_id = str(entry.get("id") or "").strip()
-    candidates = []
-
-    archive_path = str(entry.get("archive_path") or "").strip()
-    if archive_path:
-        candidates.append(Path(archive_path))
-
-    for key in ("report_path", "session_path"):
-        raw_path = str(entry.get(key) or "").strip()
-        if raw_path:
-            candidates.append(Path(raw_path).parent)
-
-    folder_name = _archive_folder_name_from_entry(entry)
-    if folder_name:
-        candidates.append(_archive_root() / folder_name)
-
-    if session_id:
-        try:
-            candidates.extend(sorted(_archive_root().glob(f"*-{session_id}")))
-        except Exception as exc:
-            logging.warning("EXPERT: Unable to scan archive root for %s: %s", session_id, exc)
-
-    seen = set()
-    unique = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-        except Exception:
-            resolved = candidate.expanduser()
-        key = str(resolved)
-        if key not in seen:
-            seen.add(key)
-            unique.append(resolved)
-    return unique
-
-
-def _resolve_archived_file(entry: dict, filename: str, path_key: str) -> Path:
-    raw_path = str(entry.get(path_key) or "").strip()
-    if raw_path:
-        path = Path(raw_path).expanduser()
-        if path.exists():
-            return path
-
-    tried = []
-    for folder in _candidate_archive_folders(entry):
-        path = folder / filename
-        tried.append(str(path))
-        if path.exists():
-            _repair_archive_index_paths(str(entry.get("id") or ""), folder)
-            return path
-
-    if raw_path:
-        tried.insert(0, raw_path)
-    raise FileNotFoundError(f"{filename} was not found. Tried: {', '.join(tried) or raw_path or 'no archive paths'}")
-
-
-def _repair_archive_index_paths(session_id: str, folder: Path) -> None:
-    if not session_id:
-        return
-    entries = _load_index()
-    changed = False
-    for entry in entries:
-        if str(entry.get("id")) != str(session_id):
-            continue
-        report_path = str(folder / "report.md")
-        session_path = str(folder / "session.json")
-        archive_path = str(folder)
-        if (
-            entry.get("archive_path") != archive_path
-            or entry.get("report_path") != report_path
-            or entry.get("session_path") != session_path
-        ):
-            entry["archive_path"] = archive_path
-            entry["report_path"] = report_path
-            entry["session_path"] = session_path
-            changed = True
-        break
-    if changed:
-        _save_index(entries)
-
-
 async def _resume_archived_session(update, context, session_id: str) -> None:
     entry = _find_index_entry(session_id)
     target_message = update.message or (update.callback_query.message if update.callback_query else None)
@@ -2590,8 +2534,7 @@ async def _resume_archived_session(update, context, session_id: str) -> None:
             await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
-        session_path = _resolve_archived_file(entry, "session.json", "session_path")
-        data = json.loads(session_path.read_text(encoding="utf-8"))
+        data = json.loads(Path(entry["session_path"]).expanduser().read_text(encoding="utf-8"))
         session = ExpertSession.from_dict(data)
     except Exception as exc:
         if target_message:
@@ -2631,8 +2574,7 @@ async def _open_archived_report(update, context, session_id: str) -> None:
             await target_message.reply_text(f"No archived {_model_display_name()} research session found for ID {session_id}.")
         return
     try:
-        report_path = _resolve_archived_file(entry, "report.md", "report_path")
-        report = report_path.read_text(encoding="utf-8")
+        report = Path(entry["report_path"]).expanduser().read_text(encoding="utf-8")
     except Exception as exc:
         if target_message:
             await target_message.reply_text(f"Unable to open report for {session_id}: {exc}")
