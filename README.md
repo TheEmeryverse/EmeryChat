@@ -328,13 +328,29 @@ Routing behavior:
 
 ### Information and research
 
-- `/expert <topic>` deep research sessions with inline questions, read-only econ/finance context when enabled, rich reports, archive, and resume
-- `/expert list`, `/expert resume <id>`, `/expert open <id>`, `/expert status`, `/expert cancel`
+- `/expert <topic>` foreground deep-research sessions with multi-round source gathering, rich Telegram reports, archive, and resume
+- `/expert help` shows expert-specific command help
+- `/expert list` shows archived reports as topic/date buttons; selecting one opens a second button menu for `Resume`, `Open report`, or `Cancel`
+- `/expert resume <id>` restores an archived session into the current chat/thread without auto-continuing research
+- `/expert open <id>` sends the archived report back through the rich Telegram delivery path
+- `/expert status` shows the current active expert session state
+- `/expert cancel` cancels the active expert session in the current chat/thread
 - Web search via SearXNG
 - Web content extraction and summarization
+- YouTube transcript extraction when `ENABLE_YOUTUBE_TRANSCRIPT=true`; expert mode uses transcripts for YouTube sources and does not count transcript failures as gathered sources
 - RSS headline aggregation
 - NASA APOD
 - Today in History
+
+Expert reports use citations like `[S12]` inside the report. The script sends the full source list separately, so the model is instructed not to include source appendices, source-list boilerplate, or delivery disclaimers inside the report itself.
+
+When an expert session is closed and archived, EmeryChat writes a resumable bundle under `EXPERT_ARCHIVE_DIR`:
+
+- `session.json`: complete session state for resume
+- `report.md`: final report plus source appendix for local archive use
+- `sources.json`: source metadata, fetch status, summaries, and labels
+- `econ_results.json`: structured tool result metadata and summaries
+- `loop.md`: readable round-by-round research log
 
 ### Weather
 
@@ -470,6 +486,8 @@ EmeryChat now generates and persists these files under `config/` on startup:
 
 These files are app-managed and should survive restarts and rebuilds when `config/` is bind-mounted in Docker.
 
+`config/expert_sessions.json` stores archive metadata and file paths. If the app later runs with a different home directory or `EXPERT_ARCHIVE_DIR`, `/expert open` and `/expert resume` first try the saved paths, then try to relocate the archive folder under the current archive root by session ID and repair the index when successful.
+
 ### Optional integrations
 
 | Variable group | Enables |
@@ -481,8 +499,8 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_NASA`, `NASA_API_KEY` | NASA APOD |
 | `ENABLE_SEARCH`, `SEARXNG_URL` | Web search |
 | `ENABLE_WEB_SCRAPING`, `ALLOW_PRIVATE_WEB_FETCH` | Web content fetch |
-| `ENABLE_YOUTUBE_TRANSCRIPT` | YouTube transcript fetch |
-| `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, and expert-specific model tuning |
+| `ENABLE_YOUTUBE_TRANSCRIPT` | YouTube transcript fetch for normal chat and `/expert` YouTube sources |
+| `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, archive resume/open behavior, and expert-specific model tuning |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |
@@ -501,6 +519,12 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 
 - By default, `fetch_web_content` blocks localhost, private LAN, link-local, multicast, and reserved IP ranges, including redirects to those ranges.
 - Set `ALLOW_PRIVATE_WEB_FETCH=true` only if you intentionally want the model to fetch local or LAN URLs.
+
+### `/expert open` cannot find an archived report
+
+- Confirm `EXPERT_ARCHIVE_DIR` points at the directory where archived session folders live.
+- Confirm `config/expert_sessions.json` is bind-mounted or persisted with the archive folder if running in Docker.
+- EmeryChat can repair stale absolute paths when the same archive folder exists under the current `EXPERT_ARCHIVE_DIR` and the folder name still ends with the session ID.
 
 ### Docker created folders instead of files
 
