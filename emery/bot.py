@@ -62,7 +62,20 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         mime_type=document.mime_type,
     )
     fallback_name = document.file_name or f"upload.{document_type or 'bin'}"
+    logging.info(
+        "📄 TELEGRAM DOC: received filename=%s mime=%s size=%s detected_type=%s caption=%s",
+        document.file_name,
+        document.mime_type,
+        getattr(document, "file_size", None),
+        document_type,
+        bool(caption),
+    )
     if not document_type:
+        logging.info(
+            "📄 TELEGRAM DOC: unsupported document filename=%s mime=%s falling_back_to_caption_or_placeholder",
+            document.file_name,
+            document.mime_type,
+        )
         return caption or "[Non-text message]"
 
     doc_file = await document.get_file()
@@ -72,8 +85,27 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         filename=fallback_name,
         mime_type=document.mime_type,
     )
+    logging.info(
+        "📄 TELEGRAM DOC: extraction result filename=%s success=%s status=%s errors=%s",
+        fallback_name,
+        extraction.get("success"),
+        extraction.get("docling_status"),
+        len(extraction.get("errors") or []),
+    )
     summary = await summarize_document_result(extraction) if extraction.get("success") else ""
     error = None if extraction.get("success") else "; ".join(extraction.get("errors") or []) or "Document extraction failed."
+    if summary:
+        logging.info(
+            "📄 TELEGRAM DOC: summary attached filename=%s summary_chars=%s",
+            fallback_name,
+            len(summary),
+        )
+    elif error:
+        logging.warning(
+            "⚠️ TELEGRAM DOC: using fallback note filename=%s note=%s",
+            fallback_name,
+            error,
+        )
     return build_document_context_text(
         source_name=fallback_name,
         source_type=document_type,

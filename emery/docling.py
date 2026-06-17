@@ -132,6 +132,14 @@ async def convert_document_bytes(
     mime_type: str | None = None,
 ) -> dict:
     document_type = detect_supported_document_type(filename=filename, mime_type=mime_type)
+    logging.info(
+        "📄 DOCLING: upload detection filename=%s mime=%s -> type=%s enabled=%s url=%s",
+        filename,
+        mime_type,
+        document_type,
+        ENABLE_DOCLING,
+        DOCLING_URL or "(unset)",
+    )
     if not ENABLE_DOCLING or not DOCLING_URL:
         return _fallback_docling_result(filename or "document", document_type or "unknown", "Docling is not enabled.")
     if not document_type:
@@ -144,6 +152,13 @@ async def convert_document_bytes(
     }
 
     try:
+        logging.info(
+            "📄 DOCLING: uploading filename=%s type=%s bytes=%s endpoint=%s",
+            filename,
+            document_type,
+            len(file_bytes),
+            url,
+        )
         response = await asyncio.to_thread(
             _post_docling_file_sync,
             url,
@@ -152,12 +167,28 @@ async def convert_document_bytes(
             files,
         )
         if response.status_code != 200:
+            logging.warning(
+                "⚠️ DOCLING: upload failed filename=%s type=%s status=%s body=%s",
+                filename,
+                document_type,
+                response.status_code,
+                safe_preview(response.text, max_len=240),
+            )
             return _fallback_docling_result(
                 filename or "document",
                 document_type,
                 f"Docling returned HTTP {response.status_code}: {safe_preview(response.text, max_len=240)}",
             )
-        return _normalize_docling_result(response.json(), filename or "document", document_type)
+        normalized = _normalize_docling_result(response.json(), filename or "document", document_type)
+        logging.info(
+            "📄 DOCLING: upload success filename=%s status=%s markdown_chars=%s text_chars=%s errors=%s",
+            filename,
+            normalized.get("docling_status"),
+            len(normalized.get("markdown") or ""),
+            len(normalized.get("plain_text") or ""),
+            len(normalized.get("errors") or []),
+        )
+        return normalized
     except Exception as exc:
         logging.warning("⚠️ DOCLING: file conversion failed for %s: %s", filename, exc)
         return _fallback_docling_result(filename or "document", document_type, f"Docling conversion failed: {exc}")
@@ -166,6 +197,14 @@ async def convert_document_bytes(
 async def convert_document_url(url: str, filename: str | None = None, content_type: str | None = None) -> dict:
     document_type = detect_supported_document_type(filename=filename, content_type=content_type, url=url)
     source_name = filename or unquote(urlparse(url).path.rsplit("/", 1)[-1]) or url
+    logging.info(
+        "📄 DOCLING: source detection url=%s content_type=%s -> type=%s enabled=%s server=%s",
+        safe_preview(url, max_len=180),
+        content_type,
+        document_type,
+        ENABLE_DOCLING,
+        DOCLING_URL or "(unset)",
+    )
     if not ENABLE_DOCLING or not DOCLING_URL:
         return _fallback_docling_result(source_name, document_type or "unknown", "Docling is not enabled.")
     if not document_type:
@@ -178,6 +217,12 @@ async def convert_document_url(url: str, filename: str | None = None, content_ty
     }
 
     try:
+        logging.info(
+            "📄 DOCLING: fetching remote document source_name=%s type=%s endpoint=%s",
+            source_name,
+            document_type,
+            target_url,
+        )
         response = await globals.http_client.post(
             target_url,
             headers={**_docling_headers(), "Content-Type": "application/json"},
@@ -185,12 +230,28 @@ async def convert_document_url(url: str, filename: str | None = None, content_ty
             timeout=300,
         )
         if response.status_code != 200:
+            logging.warning(
+                "⚠️ DOCLING: source conversion failed source=%s type=%s status=%s body=%s",
+                source_name,
+                document_type,
+                response.status_code,
+                safe_preview(response.text, max_len=240),
+            )
             return _fallback_docling_result(
                 source_name,
                 document_type,
                 f"Docling returned HTTP {response.status_code}: {safe_preview(response.text, max_len=240)}",
             )
-        return _normalize_docling_result(response.json(), source_name, document_type)
+        normalized = _normalize_docling_result(response.json(), source_name, document_type)
+        logging.info(
+            "📄 DOCLING: source success source=%s status=%s markdown_chars=%s text_chars=%s errors=%s",
+            source_name,
+            normalized.get("docling_status"),
+            len(normalized.get("markdown") or ""),
+            len(normalized.get("plain_text") or ""),
+            len(normalized.get("errors") or []),
+        )
+        return normalized
     except Exception as exc:
         logging.warning("⚠️ DOCLING: URL conversion failed for %s: %s", url, exc)
         return _fallback_docling_result(source_name, document_type, f"Docling conversion failed: {exc}")
@@ -199,6 +260,11 @@ async def convert_document_url(url: str, filename: str | None = None, content_ty
 async def summarize_document_result(result: dict, max_input_chars: int = 12000) -> str:
     content = str(result.get("plain_text") or result.get("markdown") or "").strip()
     if not content:
+        logging.warning(
+            "⚠️ DOCLING: no extracted content to summarize source=%s status=%s",
+            result.get("source_name"),
+            result.get("docling_status"),
+        )
         return ""
 
     prompt = (
@@ -222,8 +288,17 @@ async def summarize_document_result(result: dict, max_input_chars: int = 12000) 
         enable_thinking=False,
     )
     if summary:
+        logging.info(
+            "📄 DOCLING: summary success source=%s summary_chars=%s",
+            result.get("source_name"),
+            len(summary.strip()),
+        )
         return summary.strip()
 
+    logging.warning(
+        "⚠️ DOCLING: summary model returned empty source=%s falling_back_to_preview",
+        result.get("source_name"),
+    )
     return safe_preview(content, max_len=1500)
 
 

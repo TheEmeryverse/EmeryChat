@@ -1175,6 +1175,12 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                 content_type=content_type,
                 url=current_url,
             )
+            logging.info(
+                "📄 FETCH: url=%s content_type=%s detected_document_type=%s",
+                current_url,
+                content_type,
+                resolved_document_type,
+            )
             if resolved_document_type:
                 extraction = await convert_document_url(
                     current_url,
@@ -1183,6 +1189,11 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                 )
                 if extraction.get("success"):
                     summary = await summarize_document_result(extraction)
+                    logging.info(
+                        "📄 FETCH: docling success source=%s summary_chars=%s",
+                        extraction.get("source_name"),
+                        len(summary or ""),
+                    )
                     summary_text = summary or safe_preview(
                         extraction.get("plain_text") or extraction.get("markdown") or "",
                         max_len=max_chars,
@@ -1203,6 +1214,11 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                         "content": content,
                     }
                 error_text = "; ".join(extraction.get("errors") or []) or "Document extraction failed."
+                logging.warning(
+                    "⚠️ FETCH: docling fallback source=%s note=%s",
+                    extraction.get("source_name"),
+                    error_text,
+                )
                 return {
                     "success": True,
                     "title": extraction.get("source_name") or "Document",
