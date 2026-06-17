@@ -746,7 +746,7 @@ def _validate_fast_tool_call(call: dict, allowed_names: set[str], schemas: dict[
         if required not in args or args.get(required) in (None, "")
     ]
     if missing:
-        logging.info("⚡ AGENTIC: Skipping %s because required args are missing: %s", name, missing)
+        logging.info("⚡ HELPER: Skipping %s because required args are missing: %s", name, missing)
         return None
 
     return {"name": name, "arguments": args}
@@ -794,7 +794,7 @@ def _parse_fast_agentic_calls(message: dict, allowed_names: set[str], schemas: d
 async def _query_fast_agentic_tool_calls(history_buffer, user_query: str, allowed_names: list[str]) -> list[dict]:
     parsed_url = urlparse((FAST_MODEL_URL or "").strip())
     if not parsed_url.path.rstrip("/").endswith("/chat/completions"):
-        logging.warning("⚡ AGENTIC: FAST_MODEL_URL is not an OpenAI-compatible chat-completions endpoint: %s", FAST_MODEL_URL)
+        logging.warning("⚡ HELPER: FAST_MODEL_URL is not an OpenAI-compatible chat-completions endpoint: %s", FAST_MODEL_URL)
         return []
 
     schemas = _tool_schema_by_name()
@@ -837,26 +837,26 @@ async def _query_fast_agentic_tool_calls(history_buffer, user_query: str, allowe
     }
 
     try:
-        logging.info("⚡ AGENTIC: Asking %s for read-only tool preflight...", FAST_MODEL_ID)
+        logging.info("⚡ HELPER: Asking %s for read-only tool preflight...", FAST_MODEL_ID)
         request_started = time.perf_counter()
         async with globals.fast_model_lock:
             response = await globals.http_client.post(FAST_MODEL_URL.rstrip("/"), json=payload, timeout=120)
         wall_seconds = time.perf_counter() - request_started
         if response.status_code != 200:
             logging.warning(
-                "⚡ AGENTIC: Fast tool preflight returned HTTP %s: %s",
+                "⚡ HELPER: Fast tool preflight returned HTTP %s: %s",
                 response.status_code,
                 safe_preview(response.text, max_len=240),
             )
             return []
 
         data = response.json()
-        logging.info(format_llama_perf_line("FAST-AGENTIC", data, wall_seconds))
+        logging.info(format_llama_perf_line("FAST-HELPER", data, wall_seconds))
         message = _extract_response_message(data)
         calls = _parse_fast_agentic_calls(message, allowed_set, schemas)
         return calls[:max_calls]
     except Exception as exc:
-        logging.warning("⚡ AGENTIC: Fast tool preflight failed: %s", exc, exc_info=True)
+        logging.warning("⚡ HELPER: Fast tool preflight failed: %s", exc, exc_info=True)
         return []
 
 
