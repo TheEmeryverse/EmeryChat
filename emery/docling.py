@@ -1,6 +1,9 @@
+import asyncio
 import os
 import logging
 from urllib.parse import urlparse, unquote
+
+import requests
 
 import emery.globals as globals
 from emery.config import ENABLE_DOCLING, DOCLING_URL, DOCLING_BEARER_TOKEN
@@ -72,6 +75,20 @@ def _build_docling_options(document_type: str) -> dict[str, object]:
     }
 
 
+def _flatten_docling_options(document_type: str) -> list[tuple[str, str]]:
+    data: list[tuple[str, str]] = []
+    for key, value in _build_docling_options(document_type).items():
+        if isinstance(value, list):
+            data.extend((key, str(item).lower() if isinstance(item, bool) else str(item)) for item in value)
+        else:
+            data.append((key, str(value).lower() if isinstance(value, bool) else str(value)))
+    return data
+
+
+def _post_docling_file_sync(url: str, headers: dict[str, str], data: list[tuple[str, str]], files: dict):
+    return requests.post(url, headers=headers, data=data, files=files, timeout=300, verify=False)
+
+
 def _normalize_docling_result(
     payload: dict,
     source_name: str,
@@ -121,24 +138,18 @@ async def convert_document_bytes(
         return _fallback_docling_result(filename or "document", "unknown", "Unsupported document type.")
 
     url = DOCLING_URL.rstrip("/") + "/v1/convert/file"
-    data = []
-    for key, value in _build_docling_options(document_type).items():
-        if isinstance(value, list):
-            data.extend((key, str(item).lower() if isinstance(item, bool) else str(item)) for item in value)
-        else:
-            data.append((key, str(value).lower() if isinstance(value, bool) else str(value)))
-
+    data = _flatten_docling_options(document_type)
     files = {
         "files": (filename or f"upload.{document_type}", file_bytes, mime_type or "application/octet-stream")
     }
 
     try:
-        response = await globals.http_client.post(
+        response = await asyncio.to_thread(
+            _post_docling_file_sync,
             url,
-            headers=_docling_headers(),
-            data=data,
-            files=files,
-            timeout=300,
+            _docling_headers(),
+            data,
+            files,
         )
         if response.status_code != 200:
             return _fallback_docling_result(
