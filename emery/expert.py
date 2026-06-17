@@ -1405,22 +1405,40 @@ async def _run_econ_requests(bot, session: ExpertSession, requests: list[dict], 
 
 async def _plan_subagent_research(session: ExpertSession, question: dict) -> dict:
     econ_instruction = f" {_available_econ_tool_text()}" if ENABLE_FINANCE else ""
+    attempted_queries = ", ".join(f'"{q}"' for q in session.search_queries[-15:]) if session.search_queries else "None"
+    existing_domains = ", ".join(sorted(list(set(s.get("domain") for s in session.sources if s.get("domain"))))) if session.sources else "None"
+    gap_summary = question.get("gap_summary") or "None recorded yet."
+
+    system_prompt = (
+        "You are a highly efficient research assistant that generates precise, keyword-based search query plans. "
+        "Return only a compact JSON object. Avoid conversational filler."
+    )
+
     prompt = (
-        f"You are {_assistant_display_name()}. Plan one bounded research pass for the assigned question. "
-        "Return strict JSON with keys: search_queries, econ_requests, focus. "
-        "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question. "
-        "Use econ_requests only if structured read-only economic/financial data materially helps."
+        f"You are {_assistant_display_name()}. Plan one bounded research pass for the assigned question.\n"
+        "Return strict JSON with keys: search_queries, econ_requests, focus.\n"
+        "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question.\n"
+        "Use econ_requests only if structured read-only economic/financial data materially helps.\n"
         f"{econ_instruction}\n\n"
+        "### Search Query Rules:\n"
+        "1. Generate 3-6 distinct keyword search queries. Do NOT ask natural language questions (e.g., write 'company X CEO 2026' instead of 'Who is the CEO of company X in 2026?').\n"
+        "2. Diversify search angles (e.g., use synonyms, target primary press releases, or search for reports/PDFs).\n"
+        "3. Do NOT repeat search queries that have already been attempted.\n"
+        "4. Target any outstanding gaps from prior attempts if applicable.\n\n"
         f"User topic: {session.topic}\n"
+        f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
+        f"Already Fetched Source Domains: {existing_domains}\n\n"
+        f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+        f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
+        "### CURRENT ASSIGNED TASK (DYNAMIC SUFFIX) ###\n"
         f"Assigned question: {question.get('id')} - {question.get('question')}\n"
         f"Why it matters: {question.get('why')}\n"
         f"Attempt: {int(question.get('attempts') or 0) + 1}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n"
-        f"Existing agenda:\n{_agenda_digest(session)}\n\n"
-        f"Recent packets:\n{_research_packet_digest(session, limit=4)}"
+        f"Outstanding Gaps for this Question: {gap_summary}"
     )
     parsed = _extract_json_object(await _query_expert_fast_model(
         prompt,
-        "You are a bounded research subagent. Return only compact JSON.",
+        system_prompt,
     )) or {}
     queries = parsed.get("search_queries") if isinstance(parsed.get("search_queries"), list) else []
     clean_queries = [str(query).strip() for query in queries if str(query).strip()][:6]
@@ -1513,25 +1531,26 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         else "You may include critical_questions only when a user preference would materially change the research path."
     )
     prompt = (
-        f"You are {_model_display_name()}. Evaluate whether {_assistant_display_name()} answered the assigned question. "
-        "Return strict JSON with keys: status, confidence, answer_summary, gap_summary, new_questions, critical_questions, stop_now. "
-        "status must be exactly one of: answered, needs_more, sufficient_with_gaps, exhausted. "
-        "Use answered when the question is substantively answered with no material unresolved gaps. "
-        "Use needs_more only when an important gap remains and another assistant pass is worthwhile. "
-        "Use sufficient_with_gaps when the answer is good enough to continue or synthesize, but uncertainties should be noted in the report. "
-        "Use exhausted when more research is unlikely to improve the answer or the available evidence is too limited. "
-        "You own the agenda. Add new_questions only if new information materially changes the final answer. "
+        f"You are {_model_display_name()}. Evaluate whether {_assistant_display_name()} answered the assigned question.\n"
+        "Return strict JSON with keys: status, confidence, answer_summary, gap_summary, new_questions, critical_questions, stop_now.\n"
+        "status must be exactly one of: answered, needs_more, sufficient_with_gaps, exhausted.\n"
+        "Use answered when the question is substantively answered with no material unresolved gaps.\n"
+        "Use needs_more only when an important gap remains and another assistant pass is worthwhile.\n"
+        "Use sufficient_with_gaps when the answer is good enough to continue or synthesize, but uncertainties should be noted in the report.\n"
+        "Use exhausted when more research is unlikely to improve the answer or the available evidence is too limited.\n"
+        "You own the agenda. Add new_questions only if new information materially changes the final answer.\n"
         "Do not add rabbit holes or background-only questions. Each new question must include question, priority "
-        "(core/supporting/optional), and why. Respect the remaining budgets. "
+        "(core/supporting/optional), and why. Respect the remaining budgets.\n"
         f"{question_instruction}\n\n"
-        f"User topic: {session.topic}\n"
+        f"User topic: {session.topic}\n\n"
+        f"Existing agenda & answered status:\n{_agenda_digest(session)}\n\n"
+        "### CURRENT TASK FOR EVALUATION (DYNAMIC SUFFIX) ###\n"
         f"Remaining new-question budget: {remaining_new}\n"
         f"Remaining total agenda slots: {remaining_total}\n"
         f"Assigned question: {question.get('id')} - {question.get('question')}\n"
         f"Question priority: {question.get('priority')}\n"
         f"Attempt: {question.get('attempts')}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n\n"
-        f"Agenda:\n{_agenda_digest(session)}\n\n"
-        f"Research packet:\n{json.dumps(packet, ensure_ascii=True, indent=2)}"
+        f"Research packet to evaluate:\n{json.dumps(packet, ensure_ascii=True, indent=2)}"
     )
     parsed = _extract_json_object(await _query_main_model(
         prompt,
@@ -1641,25 +1660,79 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str], question
     seen = {source.get("normalized_url") for source in session.sources}
     fetches_this_round = 0
 
+    # 1. Parallelize web searches for all queries
+    search_tasks = []
+    queries_to_run = []
     for query in queries:
-        if _source_count(session) >= session.max_sources or fetches_this_round >= FETCHES_PER_ROUND:
+        if _source_count(session) >= session.max_sources:
             break
         if query not in session.search_queries:
             session.search_queries.append(query)
+        queries_to_run.append(query)
         logging.info("🔧 EXPERT TOOL: web_search | Args: %s", format_logging_payload({"query": query}))
-        results = await _search_web(query)
+        search_tasks.append(_search_web(query))
+
+    if search_tasks:
+        search_results_list = await asyncio.gather(*search_tasks)
+    else:
+        search_results_list = []
+
+    # 2. Record search events and collect all results
+    all_results = []
+    for query, results in zip(queries_to_run, search_results_list):
         session.search_results.extend(results)
         _record_event(session, "search", f"Search query: {query}", results=len(results))
+        all_results.extend(results)
 
-        for result in results:
-            if _source_count(session) >= session.max_sources or fetches_this_round >= FETCHES_PER_ROUND:
-                break
-            normalized = result.get("normalized_url")
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            fetched = await _fetch_expert_source_content(result)
-            source = await _summarize_source(session, result, fetched)
+    # 3. Filter unique, unseen targets up to limits
+    targets = []
+    max_to_fetch = min(session.max_sources - _source_count(session), FETCHES_PER_ROUND - fetches_this_round)
+    for result in all_results:
+        if len(targets) >= max_to_fetch:
+            break
+        normalized = result.get("normalized_url")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        targets.append(result)
+
+    # 4. Fetch and summarize targets concurrently (bounded by a semaphore)
+    if targets:
+        llm_semaphore = asyncio.Semaphore(3)
+
+        async def process_target(res: dict) -> tuple[dict, dict]:
+            fetched = await _fetch_expert_source_content(res)
+            if fetched.get("success") or fetched.get("fetch_success"):
+                async with llm_semaphore:
+                    source = await _summarize_source(session, res, fetched)
+            else:
+                # Bypass LLM summarization for failed fetches
+                source = {
+                    "id": "",  # To be assigned sequentially during commit
+                    "title": fetched.get("title") or res.get("title") or "Untitled",
+                    "url": fetched.get("url") or res.get("url"),
+                    "normalized_url": res.get("normalized_url") or _normalize_url(fetched.get("url") or res.get("url")),
+                    "domain": res.get("domain") or _source_domain(fetched.get("url") or res.get("url")),
+                    "snippet": res.get("snippet", ""),
+                    "fetch_success": False,
+                    "fetch_error": fetched.get("error", "Fetch failed"),
+                    "content": "",
+                    "summary": f"Fetch failed: {fetched.get('error', 'Fetch failed')}",
+                    "key_claims": [],
+                    "dates": [],
+                    "actors": [],
+                    "perspective": "Unlabeled",
+                    "reliability_label": "Unlabeled",
+                    "useful_followups": [],
+                }
+            return fetched, source
+
+        tasks = [process_target(t) for t in targets]
+        completed = await asyncio.gather(*tasks)
+
+        # 5. Commit completed sources sequentially to maintain state/ID order and trigger notifications
+        for fetched, source in completed:
+            source["id"] = f"S{len(session.sources) + 1}"
             session.sources.append(source)
             fetches_this_round += 1
             label = source["id"] if source.get("fetch_success") else "failed"
