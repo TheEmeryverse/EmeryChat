@@ -7,7 +7,6 @@ import requests
 
 import emery.globals as globals
 from emery.config import ENABLE_DOCLING, DOCLING_URL, DOCLING_BEARER_TOKEN
-from emery.helpers import query_fast_model
 from emery.logging_utils import safe_preview
 
 
@@ -257,49 +256,22 @@ async def convert_document_url(url: str, filename: str | None = None, content_ty
         return _fallback_docling_result(source_name, document_type, f"Docling conversion failed: {exc}")
 
 
-async def summarize_document_result(result: dict, max_input_chars: int = 12000) -> str:
+def build_extracted_text_preview(result: dict, max_len: int = 2000) -> str:
     content = str(result.get("plain_text") or result.get("markdown") or "").strip()
     if not content:
         logging.warning(
-            "⚠️ DOCLING: no extracted content to summarize source=%s status=%s",
+            "⚠️ DOCLING: no extracted content available for preview source=%s status=%s",
             result.get("source_name"),
             result.get("docling_status"),
         )
         return ""
-
-    prompt = (
-        "Summarize this extracted document for a downstream assistant. "
-        "State the document's purpose or topic first, then capture key facts, dates, numbers, tables, decisions, "
-        "and explicit action items or asks if present. If extraction quality seems partial, mention that briefly. "
-        "Stay objective and keep the summary under 350 words.\n\n"
-        f"Document name: {result.get('source_name', 'document')}\n"
-        f"Document type: {result.get('source_type', 'unknown')}\n"
-        f"Docling status: {result.get('docling_status', 'unknown')}\n"
-        f"Docling errors: {', '.join(result.get('errors') or []) or 'none'}\n\n"
-        f"Extracted content:\n{content[:max_input_chars]}"
-    )
-
-    summary = await query_fast_model(
-        prompt,
-        system_prompt="You summarize extracted documents for another model. Be concise, factual, and complete enough to preserve important decisions and data.",
-        max_tokens=700,
-        temperature=0.2,
-        top_p=0.9,
-        enable_thinking=False,
-    )
-    if summary:
-        logging.info(
-            "📄 DOCLING: summary success source=%s summary_chars=%s",
-            result.get("source_name"),
-            len(summary.strip()),
-        )
-        return summary.strip()
-
-    logging.warning(
-        "⚠️ DOCLING: summary model returned empty source=%s falling_back_to_preview",
+    preview = safe_preview(content, max_len=max_len)
+    logging.info(
+        "📄 DOCLING: preview built source=%s preview_chars=%s",
         result.get("source_name"),
+        len(preview),
     )
-    return safe_preview(content, max_len=1500)
+    return preview
 
 
 def build_document_context_text(
@@ -309,7 +281,7 @@ def build_document_context_text(
     mime_type: str | None = None,
     caption: str | None = None,
     docling_status: str | None = None,
-    summary: str | None = None,
+    extracted_preview: str | None = None,
     error: str | None = None,
     origin_label: str = "sent a document.",
 ) -> str:
@@ -324,6 +296,6 @@ def build_document_context_text(
         lines.append(f"Docling Status: {docling_status}")
     if error:
         lines.append(f"Docling Note: {error}")
-    if summary:
-        lines.append(f"Document Summary: {summary}")
+    if extracted_preview:
+        lines.append(f"Extracted Text Preview: {extracted_preview}")
     return "\n".join(lines)

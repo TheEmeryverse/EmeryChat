@@ -30,7 +30,7 @@ from emery.telegram_delivery import send_rich_or_split_html_message, send_split_
 from emery.docling import (
     detect_supported_document_type,
     convert_document_bytes,
-    summarize_document_result,
+    build_extracted_text_preview,
     build_document_context_text,
 )
 from emery.tools import get_noaa_weather_alerts, get_voice_audio
@@ -92,13 +92,15 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         extraction.get("docling_status"),
         len(extraction.get("errors") or []),
     )
-    summary = await summarize_document_result(extraction) if extraction.get("success") else ""
+    extracted_preview = ""
+    if extraction.get("success"):
+        extracted_preview = build_extracted_text_preview(extraction, max_len=2000)
     error = None if extraction.get("success") else "; ".join(extraction.get("errors") or []) or "Document extraction failed."
-    if summary:
+    if extracted_preview:
         logging.info(
-            "📄 TELEGRAM DOC: summary attached filename=%s summary_chars=%s",
+            "📄 TELEGRAM DOC: extracted preview attached filename=%s preview_chars=%s",
             fallback_name,
-            len(summary),
+            len(extracted_preview),
         )
     elif error:
         logging.warning(
@@ -112,7 +114,7 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         mime_type=document.mime_type,
         caption=caption,
         docling_status=extraction.get("docling_status"),
-        summary=summary,
+        extracted_preview=extracted_preview,
         error=error,
     )
 

@@ -36,7 +36,7 @@ from emery.config import (
 from emery.docling import (
     detect_supported_document_type,
     convert_document_url,
-    summarize_document_result,
+    build_extracted_text_preview,
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
@@ -1188,22 +1188,18 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                     content_type=content_type,
                 )
                 if extraction.get("success"):
-                    summary = await summarize_document_result(extraction)
+                    preview_text = build_extracted_text_preview(extraction, max_len=max_chars)
                     logging.info(
-                        "📄 FETCH: docling success source=%s summary_chars=%s",
+                        "📄 FETCH: docling success source=%s preview_chars=%s",
                         extraction.get("source_name"),
-                        len(summary or ""),
-                    )
-                    summary_text = summary or safe_preview(
-                        extraction.get("plain_text") or extraction.get("markdown") or "",
-                        max_len=max_chars,
+                        len(preview_text or ""),
                     )
                     content = (
-                        f"[Docling document summary]\n"
+                        f"[Docling extracted document]\n"
                         f"Name: {extraction.get('source_name')}\n"
                         f"Type: {extraction.get('source_type')}\n"
                         f"Docling Status: {extraction.get('docling_status')}\n"
-                        f"Summary: {summary_text}"
+                        f"Extracted Text Preview: {preview_text}"
                     )
                     if len(content) > max_chars:
                         content = content[:max_chars] + "... [Content truncated for length]"
