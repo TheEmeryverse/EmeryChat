@@ -38,6 +38,8 @@ DEFAULT_ENV = {
     "STT_URL": "http://localhost:3000/api/v1/audio/transcriptions",
     "TTS_URL": "http://localhost:8880/v1/audio/speech",
     "TTS_VOICE": "af_heart",
+    "DOCLING_URL": "",
+    "DOCLING_BEARER_TOKEN": "",
     "ENABLE_CALENDAR": "true",
     "ENABLE_WEATHER": "true",
     "ENABLE_NEWS": "true",
@@ -48,6 +50,7 @@ DEFAULT_ENV = {
     "ENABLE_IMAGEGEN": "true",
     "ENABLE_SEARCH": "true",
     "ENABLE_WEB_SCRAPING": "true",
+    "ENABLE_DOCLING": "true",
     "ENABLE_YOUTUBE_TRANSCRIPT": "true",
     "ENABLE_FINANCE": "false",
     "ENABLE_SYSTEM_STATS": "true",
@@ -604,6 +607,8 @@ def build_env_content(env_data):
         "STT_URL=" + maybe_quote(env_data["STT_URL"]),
         "TTS_URL=" + maybe_quote(env_data["TTS_URL"]),
         "TTS_VOICE=" + maybe_quote(env_data["TTS_VOICE"]),
+        "DOCLING_URL=" + maybe_quote(env_data["DOCLING_URL"]),
+        "DOCLING_BEARER_TOKEN=" + maybe_quote(env_data["DOCLING_BEARER_TOKEN"]),
         "",
         "# Feature flags",
     ]
@@ -612,6 +617,7 @@ def build_env_content(env_data):
         "ENABLE_CALENDAR", "ENABLE_WEATHER", "ENABLE_NEWS", "ENABLE_NASA",
         "ENABLE_SEERR", "ENABLE_HISTORY", "ENABLE_VOICE", "ENABLE_IMAGEGEN",
         "ENABLE_SEARCH", "ENABLE_WEB_SCRAPING", "ENABLE_YOUTUBE_TRANSCRIPT",
+        "ENABLE_DOCLING",
         "ENABLE_FINANCE", "ENABLE_SYSTEM_STATS", "ENABLE_NEST", "ENABLE_REOLINK",
         "ENABLE_SCHEDULER", "ENABLE_HEARTBEAT", "ENABLE_MEMORY", "ENABLE_PORTAINER",
     ]
@@ -891,6 +897,7 @@ def ask_features(env_seed):
         "ENABLE_IMAGEGEN": "Enable image generation",
         "ENABLE_SEARCH": "Enable web search",
         "ENABLE_WEB_SCRAPING": "Enable web content fetch",
+        "ENABLE_DOCLING": "Enable Docling document extraction",
         "ENABLE_YOUTUBE_TRANSCRIPT": "Enable YouTube transcript fetch",
         "ENABLE_FINANCE": "Enable finance tools",
         "ENABLE_SYSTEM_STATS": "Enable system stats tool",
@@ -968,6 +975,10 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
 
     if parse_bool(env_seed["ENABLE_WEB_SCRAPING"]):
         env_seed["ALLOW_PRIVATE_WEB_FETCH"] = bool_to_env(prompt_yes_no("Allow web fetches to private/local network addresses", parse_bool(env_seed.get("ALLOW_PRIVATE_WEB_FETCH"), False)))
+
+    if parse_bool(env_seed["ENABLE_DOCLING"]):
+        env_seed["DOCLING_URL"] = prompt_text("Docling URL", env_seed.get("DOCLING_URL"), required=True, validator=validate_url_prompt)
+        env_seed["DOCLING_BEARER_TOKEN"] = prompt_text("Optional Docling bearer token", env_seed.get("DOCLING_BEARER_TOKEN"))
 
     if parse_bool(env_seed["ENABLE_VOICE"]):
         env_seed["OPEN_WEBUI_KEY"] = prompt_text("Open WebUI / STT auth key", env_seed.get("OPEN_WEBUI_KEY"))

@@ -446,6 +446,8 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
 | `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Embedding endpoint |
+| `DOCLING_URL` | empty | Optional Docling Serve base URL for PDF, DOCX, and PPTX extraction |
+| `DOCLING_BEARER_TOKEN` | empty | Optional bearer token for Docling Serve |
 | `NOAA_EMAIL` | `example@example.com` | Required for NOAA weather requests |
 | `GOOGLE_TOKEN_PATH` | `secrets/google/token.json` | Google Calendar token file |
 | `NEST_TOKEN_PATH` | `secrets/google/nest_token.json` | Google Nest token file |
@@ -505,6 +507,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_NASA`, `NASA_API_KEY` | NASA APOD |
 | `ENABLE_SEARCH`, `SEARXNG_URL` | Web search |
 | `ENABLE_WEB_SCRAPING`, `ALLOW_PRIVATE_WEB_FETCH` | Web content fetch |
+| `ENABLE_DOCLING`, `DOCLING_URL`, `DOCLING_BEARER_TOKEN` | Docling-backed document extraction for Telegram uploads and fetched PDF/DOCX/PPTX URLs |
 | `ENABLE_YOUTUBE_TRANSCRIPT` | YouTube transcript fetch for normal chat and `/expert` YouTube sources |
 | `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, archive resume/open behavior, and expert-specific model tuning |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |

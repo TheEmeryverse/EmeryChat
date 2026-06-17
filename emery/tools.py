@@ -33,6 +33,11 @@ from emery.config import (
     TELEGRAM_GROUP_CHAT_ID, ENABLE_REOLINK_THREADING, REOLINK_THREAD_WINDOW_MINUTES,
     ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY, ALLOW_PRIVATE_WEB_FETCH
 )
+from emery.docling import (
+    detect_supported_document_type,
+    convert_document_url,
+    summarize_document_result,
+)
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
 from emery.logging_utils import safe_preview
@@ -1163,6 +1168,52 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                     "success": False, 
                     "status": response.status_code, 
                     "error": f"Site returned status code {response.status_code}. It might be blocking scrapers or require a subscription."
+                }
+
+            content_type = response.headers.get("content-type", "")
+            resolved_document_type = detect_supported_document_type(
+                content_type=content_type,
+                url=current_url,
+            )
+            if resolved_document_type:
+                extraction = await convert_document_url(
+                    current_url,
+                    filename=None,
+                    content_type=content_type,
+                )
+                if extraction.get("success"):
+                    summary = await summarize_document_result(extraction)
+                    summary_text = summary or safe_preview(
+                        extraction.get("plain_text") or extraction.get("markdown") or "",
+                        max_len=max_chars,
+                    )
+                    content = (
+                        f"[Docling document summary]\n"
+                        f"Name: {extraction.get('source_name')}\n"
+                        f"Type: {extraction.get('source_type')}\n"
+                        f"Docling Status: {extraction.get('docling_status')}\n"
+                        f"Summary: {summary_text}"
+                    )
+                    if len(content) > max_chars:
+                        content = content[:max_chars] + "... [Content truncated for length]"
+                    return {
+                        "success": True,
+                        "title": extraction.get("source_name") or "Document",
+                        "url": current_url,
+                        "content": content,
+                    }
+                error_text = "; ".join(extraction.get("errors") or []) or "Document extraction failed."
+                return {
+                    "success": True,
+                    "title": extraction.get("source_name") or "Document",
+                    "url": current_url,
+                    "content": (
+                        f"[Document fetch fallback]\n"
+                        f"Name: {extraction.get('source_name')}\n"
+                        f"Type: {extraction.get('source_type')}\n"
+                        f"Docling Status: {extraction.get('docling_status')}\n"
+                        f"Docling Note: {error_text}"
+                    ),
                 }
 
             soup = BeautifulSoup(response.text, 'html.parser')

@@ -27,6 +27,12 @@ from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.engine import emery_engine
 from emery.telegram_delivery import send_rich_or_split_html_message, send_split_html_message
+from emery.docling import (
+    detect_supported_document_type,
+    convert_document_bytes,
+    summarize_document_result,
+    build_document_context_text,
+)
 from emery.tools import get_noaa_weather_alerts, get_voice_audio
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -48,6 +54,35 @@ _HEARTBEAT_EXCLUDED_CONTEXT_RE = re.compile(
     r"\b(security|camera|reolink|motion alert|snapshot|news|headline|reuters|fox news)\b",
     re.IGNORECASE,
 )
+
+
+async def _build_supported_document_content_text(document, caption: str = "") -> str:
+    document_type = detect_supported_document_type(
+        filename=document.file_name,
+        mime_type=document.mime_type,
+    )
+    fallback_name = document.file_name or f"upload.{document_type or 'bin'}"
+    if not document_type:
+        return caption or "[Non-text message]"
+
+    doc_file = await document.get_file()
+    file_bytes = await doc_file.download_as_bytearray()
+    extraction = await convert_document_bytes(
+        bytes(file_bytes),
+        filename=fallback_name,
+        mime_type=document.mime_type,
+    )
+    summary = await summarize_document_result(extraction) if extraction.get("success") else ""
+    error = None if extraction.get("success") else "; ".join(extraction.get("errors") or []) or "Document extraction failed."
+    return build_document_context_text(
+        source_name=fallback_name,
+        source_type=document_type,
+        mime_type=document.mime_type,
+        caption=caption,
+        docling_status=extraction.get("docling_status"),
+        summary=summary,
+        error=error,
+    )
 
 def is_user_allowed(update: Update) -> bool:
     """Checks if the user interacting with the bot is whitelisted in TELEGRAM_ALLOWED_USERS."""
@@ -284,6 +319,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc = update.message.document
         file_id = doc.file_id
         content_text = f"sent a GIF / Animation (File ID: {file_id})"
+    elif update.message.document:
+        content_text = await _build_supported_document_content_text(
+            update.message.document,
+            update.message.caption or "",
+        )
     else:
         content_text = update.message.text or "[Non-text message]"
 
