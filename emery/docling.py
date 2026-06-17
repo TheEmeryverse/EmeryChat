@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import re
 from urllib.parse import urlparse, unquote
 
 import requests
@@ -70,6 +71,8 @@ def _build_docling_options(document_type: str) -> dict[str, object]:
         "ocr_lang": ["en"],
         "pdf_backend": "dlparse_v2",
         "table_mode": "fast",
+        "include_images": False,
+        "image_export_mode": "placeholder",
         "abort_on_error": False,
     }
 
@@ -88,6 +91,17 @@ def _post_docling_file_sync(url: str, headers: dict[str, str], data: list[tuple[
     return requests.post(url, headers=headers, data=data, files=files, timeout=300, verify=False)
 
 
+def _clean_extracted_content(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r'!\[[^\]]*\]\(data:image/[^)]*\)', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'!\[[^\]]*\]\([^)]*\)', ' ', cleaned)
+    cleaned = re.sub(r'<img\b[^>]*>', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    return cleaned.strip()
+
+
 def _normalize_docling_result(
     payload: dict,
     source_name: str,
@@ -96,8 +110,8 @@ def _normalize_docling_result(
     document = payload.get("document") or {}
     status = str(payload.get("status") or "failure").strip().lower()
     errors = payload.get("errors") or []
-    markdown = str(document.get("md_content") or "").strip()
-    plain_text = str(document.get("text_content") or "").strip()
+    markdown = _clean_extracted_content(document.get("md_content") or "")
+    plain_text = _clean_extracted_content(document.get("text_content") or "")
     success = status in {"success", "partial_success"} and bool(markdown or plain_text)
 
     return {
@@ -257,7 +271,7 @@ async def convert_document_url(url: str, filename: str | None = None, content_ty
 
 
 def build_extracted_text_preview(result: dict, max_len: int = 2000) -> str:
-    content = str(result.get("plain_text") or result.get("markdown") or "").strip()
+    content = _clean_extracted_content(result.get("plain_text") or result.get("markdown") or "")
     if not content:
         logging.warning(
             "⚠️ DOCLING: no extracted content available for preview source=%s status=%s",
