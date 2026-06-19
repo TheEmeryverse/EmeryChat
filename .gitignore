@@ -34,3 +34,9 @@ tests
 
 # Local idea sketches
 project_ideas/
+
+# Local Codex planner-implementer workflow
+AGENTS.md
+plan.md
+planner.prompt.md
+implementer.prompt.md

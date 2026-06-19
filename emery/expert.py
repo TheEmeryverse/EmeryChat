@@ -337,6 +337,7 @@ def _normalize_agenda_questions(raw_questions, *, existing_count: int = 0, limit
             "confidence": "",
             "source_ids": [],
             "econ_result_ids": [],
+            "research_need_level": 0,
         })
     return normalized
 
@@ -376,6 +377,7 @@ def _select_next_agenda_question(session: ExpertSession) -> dict | None:
         item for item in session.research_agenda
         if item.get("status") in {"pending", "needs_more"}
         and int(item.get("attempts") or 0) < max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION)
+        and int(item.get("research_need_level") or 0) != 2
     ]
     if not candidates:
         return None
@@ -383,6 +385,7 @@ def _select_next_agenda_question(session: ExpertSession) -> dict | None:
         candidates,
         key=lambda item: (
             AGENDA_PRIORITY_ORDER.get(item.get("priority"), 1),
+            int(item.get("research_need_level") or 0),
             int(item.get("attempts") or 0),
             str(item.get("id") or ""),
         ),
@@ -394,6 +397,7 @@ def _agenda_has_open_core_questions(session: ExpertSession) -> bool:
         item.get("priority") == "core"
         and item.get("status") in {"pending", "needs_more", "in_progress"}
         and int(item.get("attempts") or 0) < max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION)
+        and int(item.get("research_need_level") or 0) != 2
         for item in session.research_agenda
     )
 
@@ -410,6 +414,66 @@ def _normalize_evaluation_status(evaluation: dict, question: dict) -> str:
     if status == "needs_more" and int(question.get("attempts") or 0) >= max(1, EXPERT_MAX_SUBTASKS_PER_QUESTION):
         return "exhausted"
     return status
+
+
+
+def _apply_agenda_coverage(session: ExpertSession, agenda_coverage: list, active_question_id: str) -> None:
+    """Apply cross-question coverage updates from a research packet evaluation.
+
+    Each entry in agenda_coverage must contain question_id, research_need_level,
+    answer_summary, gap_summary, source_ids, and econ_result_ids.
+    Malformed entries are silently skipped to degrade safely.
+    """
+    if not isinstance(agenda_coverage, list):
+        return
+
+    # Build a lookup of agenda items by ID for efficient matching
+    agenda_by_id = {str(item.get("id") or ""): item for item in session.research_agenda}
+
+    for entry in agenda_coverage:
+        if not isinstance(entry, dict):
+            continue
+        qid = str(entry.get("question_id") or "").strip()
+        if not qid:
+            continue
+        item = agenda_by_id.get(qid)
+        if item is None:
+            continue
+
+        # research_need_level must be a valid integer in {0, 1, 2}
+        rnl = entry.get("research_need_level")
+        if not isinstance(rnl, int) or rnl not in (0, 1, 2):
+            try:
+                rnl = int(rnl)
+                if rnl not in (0, 1, 2):
+                    continue
+            except (ValueError, TypeError):
+                continue
+        item["research_need_level"] = rnl
+
+        # Refresh answer_summary when a newer value is supplied
+        summary = str(entry.get("answer_summary") or "").strip()
+        if summary:
+            item["answer_summary"] = summary[:2000]
+
+        # Refresh gap_summary when a newer value is supplied
+        gap = str(entry.get("gap_summary") or "").strip()
+        if gap:
+            item["gap_summary"] = gap[:1000]
+
+        # Merge source_ids without duplicating
+        new_source_ids = entry.get("source_ids")
+        if isinstance(new_source_ids, list):
+            current = set(item.get("source_ids") or [])
+            current.update(str(sid) for sid in new_source_ids if sid)
+            item["source_ids"] = sorted(current)
+
+        # Merge econ_result_ids without duplicating
+        new_econ_ids = entry.get("econ_result_ids")
+        if isinstance(new_econ_ids, list):
+            current = set(item.get("econ_result_ids") or [])
+            current.update(str(eid) for eid in new_econ_ids if eid)
+            item["econ_result_ids"] = sorted(current)
 
 
 def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dict, evaluation: dict) -> list[dict]:
@@ -457,6 +521,14 @@ def _apply_agenda_evaluation(session: ExpertSession, question: dict, packet: dic
             priority=item.get("priority"),
             why=item.get("why"),
         )
+
+    # Step 4: Apply cross-question coverage updates from the evaluation
+    _apply_agenda_coverage(
+        session,
+        evaluation.get("agenda_coverage", []) if isinstance(evaluation, dict) else [],
+        question.get("id", ""),
+    )
+
     return added_items
 
 
@@ -1240,9 +1312,23 @@ def _source_digest(session: ExpertSession, limit: int = 24) -> str:
     return "\n\n".join(chunks)
 
 
-def _source_items_digest(sources: list[dict], limit: int = 12) -> str:
+def _source_items_digest(
+    sources: list[dict],
+    limit: int | None = None,
+    include_failed: bool = True,
+) -> str:
+    """Return a human-readable digest of source summaries.
+
+    Args:
+        sources: list of source dicts (as stored in session.sources).
+        limit: optional cap on number of items; ``None`` means no cap.
+        include_failed: when ``False`` skip sources whose ``fetch_success`` is
+            falsy — useful for the cumulative-evidence block in agenda scoring.
+    """
+    filtered = sources if include_failed else [s for s in sources if s.get("fetch_success")]
+    items = filtered[-limit:] if limit is not None else filtered
     chunks = []
-    for source in sources[:limit]:
+    for source in items:
         claims = "; ".join(str(claim) for claim in source.get("key_claims", [])[:4])
         chunks.append(
             f"{source.get('id')} | {source.get('title')} | {source.get('domain')} | "
@@ -1251,6 +1337,7 @@ def _source_items_digest(sources: list[dict], limit: int = 12) -> str:
             f"Claims: {claims}"
         )
     return "\n\n".join(chunks)
+
 
 
 def _econ_digest(session: ExpertSession, limit: int = 12) -> str:
@@ -1266,9 +1353,23 @@ def _econ_digest(session: ExpertSession, limit: int = 12) -> str:
     return "\n\n".join(chunks)
 
 
-def _econ_items_digest(results: list[dict], limit: int = 8) -> str:
+def _econ_items_digest(
+    results: list[dict],
+    limit: int | None = None,
+    include_failed: bool = True,
+) -> str:
+    """Return a human-readable digest of econ/finance tool results.
+
+    Args:
+        results: list of econ result dicts (as stored in session.econ_results).
+        limit: optional cap on number of items; ``None`` means no cap.
+        include_failed: when ``False`` skip results whose ``success`` is
+            falsy — useful for the cumulative-evidence block in agenda scoring.
+    """
+    filtered = results if include_failed else [r for r in results if r.get("success")]
+    items = filtered[-limit:] if limit is not None else filtered
     chunks = []
-    for result in results[:limit]:
+    for result in items:
         chunks.append(
             f"{result.get('id')} | {result.get('tool')} | {result.get('reason')} | "
             f"success={result.get('success')}\n"
@@ -1408,46 +1509,81 @@ async def _plan_subagent_research(session: ExpertSession, question: dict) -> dic
     attempted_queries = ", ".join(f'"{q}"' for q in session.search_queries[-15:]) if session.search_queries else "None"
     existing_domains = ", ".join(sorted(list(set(s.get("domain") for s in session.sources if s.get("domain"))))) if session.sources else "None"
     gap_summary = question.get("gap_summary") or "None recorded yet."
+    research_need_level = int(question.get("research_need_level") or 0)
 
     system_prompt = (
         "You are a highly efficient research assistant that generates precise, keyword-based search query plans. "
         "Return only a compact JSON object. Avoid conversational filler."
     )
 
-    prompt = (
-        f"You are {_assistant_display_name()}. Plan one bounded research pass for the assigned question.\n"
-        "Return strict JSON with keys: search_queries, econ_requests, focus.\n"
-        "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question.\n"
-        "Use econ_requests only if structured read-only economic/financial data materially helps.\n"
-        f"{econ_instruction}\n\n"
-        "### Search Query Rules:\n"
-        "1. Generate 3-6 distinct keyword search queries. Do NOT ask natural language questions (e.g., write 'company X CEO 2026' instead of 'Who is the CEO of company X in 2026?').\n"
-        "2. Diversify search angles (e.g., use synonyms, target primary press releases, or search for reports/PDFs).\n"
-        "3. Do NOT repeat search queries that have already been attempted.\n"
-        "4. Target any outstanding gaps from prior attempts if applicable.\n\n"
-        f"User topic: {session.topic}\n"
-        f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
-        f"Already Fetched Source Domains: {existing_domains}\n\n"
-        f"Existing agenda:\n{_agenda_digest(session)}\n\n"
-        f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
-        "### CURRENT ASSIGNED TASK (DYNAMIC SUFFIX) ###\n"
-        f"Assigned question: {question.get('id')} - {question.get('question')}\n"
-        f"Why it matters: {question.get('why')}\n"
-        f"Attempt: {int(question.get('attempts') or 0) + 1}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n"
-        f"Outstanding Gaps for this Question: {gap_summary}"
-    )
+    if research_need_level == 1:
+        # Reduced-pass: target only unresolved gaps, avoid already-covered broad angles
+        prompt = (
+            f"You are {_assistant_display_name()}. Plan a focused, gap-targeted research pass for the assigned question.\n"
+            "Return strict JSON with keys: search_queries, econ_requests, focus.\n"
+            "Do not decide the broader agenda. Generate 2-3 precise, narrow search queries that target ONLY the unresolved gaps.\n"
+            "Use econ_requests only if structured read-only economic/financial data materially helps.\n"
+            f"{econ_instruction}\n\n"
+            "### Reduced-Pass Search Query Rules:\n"
+            "1. Generate 2-3 distinct keyword search queries. Do NOT ask natural language questions.\n"
+            "2. Target ONLY the specific unresolved gaps listed below. Do NOT re-search topics already covered by existing sources.\n"
+            "3. Do NOT repeat search queries that have already been attempted.\n"
+            "4. Avoid broad angles that have already been explored. Focus narrowly on what is missing.\n\n"
+            f"User topic: {session.topic}\n"
+            f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
+            f"Already Fetched Source Domains: {existing_domains}\n\n"
+            f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+            f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
+            "### CURRENT ASSIGNED TASK (REDUCED PASS) ###\n"
+            f"Assigned question: {question.get('id')} - {question.get('question')}\n"
+            f"Why it matters: {question.get('why')}\n"
+            f"Attempt: {int(question.get('attempts') or 0) + 1}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n"
+            f"Outstanding Gaps for this Question: {gap_summary}\n"
+            f"NOTE: This is a reduced research pass. Only address gaps, do not re-search covered topics."
+        )
+        max_queries = 3
+        fallback_queries = [
+            f"{question.get('question')} {gap_summary[:60]}",
+        ]
+    else:
+        # Full-pass (level 0): standard behavior
+        prompt = (
+            f"You are {_assistant_display_name()}. Plan one bounded research pass for the assigned question.\n"
+            "Return strict JSON with keys: search_queries, econ_requests, focus.\n"
+            "Do not decide the broader agenda. Generate 3-6 precise search queries that can answer this question.\n"
+            "Use econ_requests only if structured read-only economic/financial data materially helps.\n"
+            f"{econ_instruction}\n\n"
+            "### Search Query Rules:\n"
+            "1. Generate 3-6 distinct keyword search queries. Do NOT ask natural language questions (e.g., write 'company X CEO 2026' instead of 'Who is the CEO of company X in 2026?').\n"
+            "2. Diversify search angles (e.g., use synonyms, target primary press releases, or search for reports/PDFs).\n"
+            "3. Do NOT repeat search queries that have already been attempted.\n"
+            "4. Target any outstanding gaps from prior attempts if applicable.\n\n"
+            f"User topic: {session.topic}\n"
+            f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
+            f"Already Fetched Source Domains: {existing_domains}\n\n"
+            f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+            f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
+            "### CURRENT ASSIGNED TASK (DYNAMIC SUFFIX) ###\n"
+            f"Assigned question: {question.get('id')} - {question.get('question')}\n"
+            f"Why it matters: {question.get('why')}\n"
+            f"Attempt: {int(question.get('attempts') or 0) + 1}/{EXPERT_MAX_SUBTASKS_PER_QUESTION}\n"
+            f"Outstanding Gaps for this Question: {gap_summary}"
+        )
+        max_queries = 6
+        fallback_queries = [
+            f"{session.topic} {question.get('question')}",
+            f"{question.get('question')} latest sources",
+            f"{question.get('question')} timeline actors",
+        ]
+
     parsed = _extract_json_object(await _query_expert_fast_model(
         prompt,
         system_prompt,
     )) or {}
     queries = parsed.get("search_queries") if isinstance(parsed.get("search_queries"), list) else []
-    clean_queries = [str(query).strip() for query in queries if str(query).strip()][:6]
+    clean_queries = [str(query).strip() for query in queries if str(query).strip()][:max_queries]
     if not clean_queries:
-        clean_queries = [
-            f"{session.topic} {question.get('question')}",
-            f"{question.get('question')} latest sources",
-            f"{question.get('question')} timeline actors",
-        ]
+        clean_queries = fallback_queries[:max_queries]
     return {
         "search_queries": clean_queries,
         "econ_requests": _normalize_econ_requests(parsed.get("econ_requests")),
@@ -1495,7 +1631,11 @@ async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> 
     econ_start = len(session.econ_results)
     if plan.get("econ_requests"):
         await _run_econ_requests(bot, session, plan["econ_requests"], question_id)
-    await _fetch_round(bot, session, plan["search_queries"], question_id)
+
+    # Reduced fetch budget for level 1: cap at 3 new sources instead of full pass
+    research_need_level = int(question.get("research_need_level") or 0)
+    reduced_fetch = 3 if research_need_level == 1 else None
+    await _fetch_round(bot, session, plan["search_queries"], question_id, max_fetches=reduced_fetch)
     new_sources = session.sources[source_start:]
     new_econ = session.econ_results[econ_start:]
     packet_notes = await _summarize_research_packet(session, question, new_sources, new_econ)
@@ -1532,7 +1672,7 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
     )
     prompt = (
         f"You are {_model_display_name()}. Evaluate whether {_assistant_display_name()} answered the assigned question.\n"
-        "Return strict JSON with keys: status, confidence, answer_summary, gap_summary, new_questions, critical_questions, stop_now.\n"
+        "Return strict JSON with keys: status, confidence, answer_summary, gap_summary, new_questions, critical_questions, stop_now, agenda_coverage.\n"
         "status must be exactly one of: answered, needs_more, sufficient_with_gaps, exhausted.\n"
         "Use answered when the question is substantively answered with no material unresolved gaps.\n"
         "Use needs_more only when an important gap remains and another assistant pass is worthwhile.\n"
@@ -1542,8 +1682,26 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         "Do not add rabbit holes or background-only questions. Each new question must include question, priority "
         "(core/supporting/optional), and why. Respect the remaining budgets.\n"
         f"{question_instruction}\n\n"
+        "### FULL AGENDA COVERAGE ###\n"
+        "Score every question in the agenda based on all sources gathered so far (including this packet).\n"
+        "Return agenda_coverage as a JSON array where each entry has: question_id (string), research_need_level (int), answer_summary (string), gap_summary (string), source_ids (array of strings), econ_result_ids (array of strings).\n"
+        "research_need_level must be exactly 0, 1, or 2:\n"
+        "- 0: no relevant sources gathered so far; run the full research loop\n"
+        "- 1: current sources partially answer the question; run a reduced research loop targeting only unresolved gaps\n"
+        "- 2: current sources fully answer the question; skip further research for this question\n"
+        "For level 2 entries, you may omit answer_summary, gap_summary, and IDs.\n"
+        "Only include agenda items that exist in the current agenda. Do not invent new question_ids.\n\n"
         f"User topic: {session.topic}\n\n"
         f"Existing agenda & answered status:\n{_agenda_digest(session)}\n\n"
+        "### CUMULATIVE EVIDENCE GATHERED SO FAR ###\n"
+        "Use the full evidence inventory below to score every agenda question. Do not base coverage decisions on only the latest packet.\n"
+        f"Total sources fetched: {_source_count(session)}\n"
+        f"Total structured data results: {len(session.econ_results)}\n\n"
+        "All source summaries (titles, summaries, key claims):\n"
+        # Bounded to most-recent successful evidence; prevents prompt bloat on large sessions
+        f"{_source_items_digest(session.sources, limit=20, include_failed=False)}\n\n"
+        "All structured data summaries:\n"
+        f"{_econ_items_digest(session.econ_results, limit=10, include_failed=False)}\n\n"
         "### CURRENT TASK FOR EVALUATION (DYNAMIC SUFFIX) ###\n"
         f"Remaining new-question budget: {remaining_new}\n"
         f"Remaining total agenda slots: {remaining_total}\n"
@@ -1568,6 +1726,7 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         "new_questions": parsed.get("new_questions") if isinstance(parsed.get("new_questions"), list) else [],
         "critical_questions": _normalize_questions(parsed.get("critical_questions") if isinstance(parsed.get("critical_questions"), list) else []),
         "stop_now": bool(parsed.get("stop_now")),
+        "agenda_coverage": parsed.get("agenda_coverage") if isinstance(parsed.get("agenda_coverage"), list) else [],
     }
 
 def _normalize_questions(raw_questions: list) -> list[dict]:
@@ -1656,7 +1815,7 @@ async def _ask_pending_questions(bot, session: ExpertSession) -> None:
     await _send_status(bot, session, "\n".join(lines).strip(), reply_markup=_question_markup(session))
 
 
-async def _fetch_round(bot, session: ExpertSession, queries: list[str], question_id: str | None = None) -> None:
+async def _fetch_round(bot, session: ExpertSession, queries: list[str], question_id: str | None = None, *, max_fetches: int | None = None) -> None:
     seen = {source.get("normalized_url") for source in session.sources}
     fetches_this_round = 0
 
@@ -1686,7 +1845,10 @@ async def _fetch_round(bot, session: ExpertSession, queries: list[str], question
 
     # 3. Filter unique, unseen targets up to limits
     targets = []
-    max_to_fetch = min(session.max_sources - _source_count(session), FETCHES_PER_ROUND - fetches_this_round)
+    if max_fetches is not None:
+        max_to_fetch = min(max_fetches, session.max_sources - _source_count(session), FETCHES_PER_ROUND - fetches_this_round)
+    else:
+        max_to_fetch = min(session.max_sources - _source_count(session), FETCHES_PER_ROUND - fetches_this_round)
     for result in all_results:
         if len(targets) >= max_to_fetch:
             break
