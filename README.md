@@ -127,7 +127,7 @@ Recommended local model roles:
 - `gpt-oss:20b`: excellent primary model, especially strong at tool calling and routine orchestration.
 - `qwen3.6:35b-a3b`: capable larger primary model option for richer conversational turns and final synthesis.
 - `gemma4:e4b`: good vision model and great fast text model for delegated cleanup, summarization, and lightweight extraction.
-- `lfm2.5:8b`: excellent fast text model for coprocessor work and read-only tool preflight when you want speed with strong instruction following.
+- `lfm2.5:8b`: excellent fast text model for coprocessor work when you want speed with strong instruction following.
 - `minicpm4.5:8b`: vision model for image descriptions and camera/security image analysis.
 - `nomic-embed-text`: embedding model for semantic memory retrieval.
 
@@ -138,7 +138,7 @@ By default the app expects a primary OpenAI-compatible chat-completions endpoint
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
 - `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
 
-The fast text coprocessor uses an OpenAI-compatible chat-completions endpoint. For a local llama.cpp server, point it at `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`. When `AGENTIC_FAST_TOOLS_ENABLED=true`, the fast model gets a read-only subset of the tool schema before each main-model turn and may prefetch useful context, such as web results, transcripts, weather, market data, camera lists, or camera security logs. Mutating tools and tools that send chat media are explicitly denied in this path.
+The fast text coprocessor uses an OpenAI-compatible chat-completions endpoint. For a local llama.cpp server, point it at `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`. It is used for delegated text processing and lightweight helper tasks, but it does not inspect or execute tool calls before the main-model turn.
 
 #### llama.cpp main-model backend
 
@@ -438,11 +438,8 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FAST_MODEL_ID` | `gemma4:e4b` | Fast text coprocessor model; `lfm2.5:8b` is recommended for fast tool preflight |
+| `FAST_MODEL_ID` | `gemma4:e4b` | Fast text coprocessor model; `lfm2.5:8b` is recommended for delegated text work |
 | `FAST_MODEL_URL` | `http://127.0.0.1:8082/v1/chat/completions` | Fast text coprocessor endpoint |
-| `AGENTIC_FAST_TOOLS_ENABLED` | `true` | Allows the fast model to pre-call useful read-only tools before the main model turn |
-| `AGENTIC_FAST_MAX_TOOL_CALLS` | `3` | Max read-only tool calls the fast model can prefetch in one turn |
-| `AGENTIC_FAST_ALLOWED_TOOLS` | read-only built-ins | Optional comma-separated override for fast preflight tools |
 | `VISION_MODEL_ID` | `gemma4:e4b` | Vision/multimodal model; use your local `minicpm4.5:8b` tag if that is your vision server model |
 | `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |

@@ -345,42 +345,6 @@ VISION_MODEL_ID = os.getenv("VISION_MODEL_ID", "gemma4:e2b")
 VISION_OLLAMA_URL = os.getenv("VISION_OLLAMA_URL", "http://192.168.1.129:11434/api/chat")
 FAST_MODEL_ID = os.getenv("FAST_MODEL_ID", VISION_MODEL_ID)
 FAST_MODEL_URL = os.getenv("FAST_MODEL_URL", "http://127.0.0.1:8082/v1/chat/completions")
-AGENTIC_FAST_TOOLS_ENABLED = _to_bool(os.getenv("AGENTIC_FAST_TOOLS_ENABLED"), True)
-AGENTIC_FAST_MAX_TOOL_CALLS = _to_int(os.getenv("AGENTIC_FAST_MAX_TOOL_CALLS"), 3)
-AGENTIC_FAST_ALLOWED_TOOLS = _to_csv_tuple(
-    os.getenv("AGENTIC_FAST_ALLOWED_TOOLS"),
-    (
-        "get_calendar_events",
-        "get_nest_thermostats",
-        "get_noaa_weather",
-        "list_weather_location_aliases",
-        "get_news_headlines",
-        "get_nasa_apod",
-        "get_today_in_history",
-        "web_search",
-        "fetch_web_content",
-        "get_youtube_transcript",
-        "get_system_stats",
-        "search_fred_series",
-        "get_fred_series_observations",
-        "search_imf_indicators",
-        "get_imf_datamapper_series",
-        "get_stock_snapshot",
-        "get_stock_price_history",
-        "get_bond_market_dashboard",
-        "get_inflation_dashboard",
-        "get_us_macro_dashboard",
-        "get_equity_market_dashboard",
-        "get_global_macro_dashboard",
-        "get_housing_consumer_dashboard",
-        "get_labor_market_dashboard",
-        "get_available_cameras",
-        "get_camera_security_log",
-        "list_scheduled_jobs",
-        "list_portainer_environments",
-        "list_portainer_containers",
-    ),
-)
 EXPERT_MAIN_MAX_TOKENS = _to_int(os.getenv("EXPERT_MAIN_MAX_TOKENS"), 32768)
 EXPERT_FAST_MAX_TOKENS = _to_int(os.getenv("EXPERT_FAST_MAX_TOKENS"), 8192)
 EXPERT_DEFAULT_TARGET_SOURCES = _to_int(os.getenv("EXPERT_DEFAULT_TARGET_SOURCES"), 24)

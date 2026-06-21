@@ -8,11 +8,6 @@ from urllib.parse import urlparse
 from telegram.error import BadRequest
 
 from emery.config import (
-    AGENTIC_FAST_ALLOWED_TOOLS,
-    AGENTIC_FAST_MAX_TOOL_CALLS,
-    AGENTIC_FAST_TOOLS_ENABLED,
-    FAST_MODEL_ID,
-    FAST_MODEL_URL,
     MAIN_MODEL_URL,
     MODEL_ID,
     TOOL_LOOP,
@@ -506,32 +501,6 @@ def _normalize_tool_arguments(arguments):
     return arguments or {}
 
 
-def _extract_json_object(text: str):
-    text = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
-        try:
-            return json.loads(fenced.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
@@ -625,241 +594,6 @@ def _build_main_model_payload(
     return payload, ollama_history
 
 
-FAST_AGENTIC_DENYLIST = {
-    "set_nest_thermostat_mode",
-    "set_nest_thermostat_temperature",
-    "set_weather_location_alias",
-    "remove_weather_location_alias",
-    "overseer_request_movie",
-    "overseer_request_tv_season",
-    "generate_image",
-    "get_reolink_snapshot",
-    "speak_message",
-    "save_user_memory",
-    "react_to_message",
-    "reply_to_message",
-    "send_sticker",
-    "send_gif",
-    "add_scheduled_job",
-    "remove_scheduled_job",
-    "update_portainer_container",
-}
-
-
-def _tool_schema_by_name() -> dict[str, dict]:
-    schemas = {}
-    for schema in tools_schema:
-        function = schema.get("function", {}) if isinstance(schema, dict) else {}
-        name = function.get("name")
-        if name:
-            schemas[name] = schema
-    return schemas
-
-
-def _fast_agentic_tool_names() -> list[str]:
-    if not AGENTIC_FAST_TOOLS_ENABLED or AGENTIC_FAST_MAX_TOOL_CALLS <= 0:
-        return []
-
-    configured = set(AGENTIC_FAST_ALLOWED_TOOLS or ())
-    schemas = _tool_schema_by_name()
-    names = []
-    for schema in tools_schema:
-        function = schema.get("function", {}) if isinstance(schema, dict) else {}
-        name = function.get("name")
-        if (
-            name
-            and name in configured
-            and name in AVAILABLE_TOOLS
-            and name in schemas
-            and name not in FAST_AGENTIC_DENYLIST
-        ):
-            names.append(name)
-    return names
-
-
-def _compact_tool_schema(schema: dict) -> dict:
-    function = schema.get("function", {}) if isinstance(schema, dict) else {}
-    parameters = function.get("parameters") or {"type": "object", "properties": {}}
-    return {
-        "name": function.get("name", ""),
-        "description": function.get("description", ""),
-        "parameters": parameters,
-    }
-
-
-def _compact_agentic_history(history_buffer, limit: int = 8) -> list[dict]:
-    compact = []
-    recent_messages = list(history_buffer)[-limit:]
-    for msg in recent_messages:
-        role = msg.get("role", "")
-        if role not in {"system", "user", "assistant", "tool"}:
-            continue
-
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            text_parts = [
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ]
-            content = " ".join(text_parts) if text_parts else "[Sent an image]"
-        elif content is None:
-            content = ""
-        else:
-            content = str(content)
-
-        compact.append({
-            "role": role,
-            "name": msg.get("name", ""),
-            "content": clean_thinking_tags(content)[:1600],
-        })
-    return compact
-
-
-def _validate_fast_tool_call(call: dict, allowed_names: set[str], schemas: dict[str, dict]) -> dict | None:
-    if not isinstance(call, dict):
-        return None
-
-    name = str(call.get("name") or call.get("function", {}).get("name") or "").strip()
-    if name not in allowed_names or name not in AVAILABLE_TOOLS:
-        return None
-
-    raw_args = call.get("arguments")
-    if raw_args is None and isinstance(call.get("function"), dict):
-        raw_args = call["function"].get("arguments")
-    args = _normalize_tool_arguments(raw_args)
-    if not isinstance(args, dict):
-        return None
-
-    function = schemas.get(name, {}).get("function", {})
-    parameters = function.get("parameters") or {}
-    properties = parameters.get("properties") or {}
-    allowed_arg_names = set(properties.keys())
-    if allowed_arg_names:
-        args = {key: value for key, value in args.items() if key in allowed_arg_names}
-    else:
-        args = {}
-
-    missing = [
-        required
-        for required in parameters.get("required", [])
-        if required not in args or args.get(required) in (None, "")
-    ]
-    if missing:
-        logging.info("⚡ HELPER: Skipping %s because required args are missing: %s", name, missing)
-        return None
-
-    return {"name": name, "arguments": args}
-
-
-def _parse_fast_agentic_calls(message: dict, allowed_names: set[str], schemas: dict[str, dict]) -> list[dict]:
-    calls = []
-    for tool_call in message.get("tool_calls") or []:
-        function = tool_call.get("function") or {}
-        parsed = _validate_fast_tool_call(
-            {"name": function.get("name"), "arguments": function.get("arguments")},
-            allowed_names,
-            schemas,
-        )
-        if parsed:
-            calls.append(parsed)
-
-    if calls:
-        return calls
-
-    content = message.get("content") or ""
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
-    data = _extract_json_object(content)
-    if not isinstance(data, dict):
-        return []
-
-    raw_calls = data.get("calls") or data.get("tool_calls") or []
-    if isinstance(raw_calls, dict):
-        raw_calls = [raw_calls]
-    if not isinstance(raw_calls, list):
-        return []
-
-    for raw_call in raw_calls:
-        parsed = _validate_fast_tool_call(raw_call, allowed_names, schemas)
-        if parsed:
-            calls.append(parsed)
-    return calls
-
-
-async def _query_fast_agentic_tool_calls(history_buffer, user_query: str, allowed_names: list[str]) -> list[dict]:
-    parsed_url = urlparse((FAST_MODEL_URL or "").strip())
-    if not parsed_url.path.rstrip("/").endswith("/chat/completions"):
-        logging.warning("⚡ HELPER: FAST_MODEL_URL is not an OpenAI-compatible chat-completions endpoint: %s", FAST_MODEL_URL)
-        return []
-
-    schemas = _tool_schema_by_name()
-    allowed_set = set(allowed_names)
-    selected_schemas = [schemas[name] for name in allowed_names if name in schemas]
-    max_calls = max(1, min(AGENTIC_FAST_MAX_TOOL_CALLS, 6))
-    tool_catalog = [_compact_tool_schema(schema) for schema in selected_schemas]
-    history = _compact_agentic_history(history_buffer)
-
-    system_prompt = (
-        "You are Emery's fast tool strategist. Decide whether read-only tool calls would materially help "
-        "answer the latest user request before the main model writes. Use zero calls for ordinary chat, "
-        "opinion, creative writing, or requests already answerable from context. Never call tools that change "
-        "state, send messages, save memory, schedule work, request media, or modify devices. Prefer one precise "
-        f"call; use at most {max_calls}. If using native tool calls, call the provided tools directly. If not, "
-        'return strict JSON: {"calls":[{"name":"tool_name","arguments":{}}]}.'
-    )
-    user_prompt = json.dumps(
-        {
-            "latest_user_request": user_query,
-            "recent_conversation": history,
-            "allowed_read_only_tools": tool_catalog,
-            "max_calls": max_calls,
-        },
-        ensure_ascii=False,
-    )
-
-    payload = {
-        "model": FAST_MODEL_ID,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "tools": selected_schemas,
-        "tool_choice": "auto",
-        "stream": False,
-        "temperature": 0.0,
-        "max_tokens": 1200,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-
-    try:
-        logging.info("⚡ HELPER: Asking %s for read-only tool preflight...", FAST_MODEL_ID)
-        request_started = time.perf_counter()
-        async with globals.fast_model_lock:
-            response = await globals.http_client.post(FAST_MODEL_URL.rstrip("/"), json=payload, timeout=120)
-        wall_seconds = time.perf_counter() - request_started
-        if response.status_code != 200:
-            logging.warning(
-                "⚡ HELPER: Fast tool preflight returned HTTP %s: %s",
-                response.status_code,
-                safe_preview(response.text, max_len=240),
-            )
-            return []
-
-        data = response.json()
-        logging.info(format_llama_perf_line("FAST-HELPER", data, wall_seconds))
-        message = _extract_response_message(data)
-        calls = _parse_fast_agentic_calls(message, allowed_set, schemas)
-        return calls[:max_calls]
-    except Exception as exc:
-        logging.warning("⚡ HELPER: Fast tool preflight failed: %s", exc, exc_info=True)
-        return []
-
-
 async def _send_tool_status(fn: str, args: dict) -> None:
     if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
         return
@@ -897,60 +631,6 @@ async def _send_tool_status(fn: str, args: dict) -> None:
 async def _execute_tool_call(fn: str, args: dict):
     logging.info("🔧 TOOL: %s | Args: %s", fn, format_logging_payload(args))
     return await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
-
-
-async def _run_fast_agentic_preflight(history_buffer, ollama_history, user_query: str, thinking_timeline: list[str]) -> bool:
-    if not user_query or not AGENTIC_FAST_TOOLS_ENABLED or not tools_schema:
-        return False
-
-    allowed_names = _fast_agentic_tool_names()
-    if not allowed_names:
-        return False
-
-    calls = await _query_fast_agentic_tool_calls(history_buffer, user_query, allowed_names)
-    if not calls:
-        return False
-
-    tool_calls = []
-    for index, call in enumerate(calls, start=1):
-        tool_calls.append({
-            "id": f"fast_agentic_{int(time.time() * 1000)}_{index}",
-            "type": "function",
-            "function": {
-                "name": call["name"],
-                "arguments": json.dumps(call.get("arguments", {})),
-            },
-        })
-
-    assistant_tool_msg = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": tool_calls,
-    }
-    history_buffer.append(assistant_tool_msg)
-    ollama_history.append(assistant_tool_msg)
-
-    for tool_call, call in zip(tool_calls, calls):
-        fn = call["name"]
-        args = call.get("arguments", {})
-        await _send_tool_status(fn, args)
-        thinking_timeline.append(f"{FAST_MODEL_ID} preflight used {fn}")
-        try:
-            result = await _execute_tool_call(fn, args)
-        except Exception as exc:
-            logging.error("❌ TOOL: %s failed during fast preflight: %s", fn, exc, exc_info=True)
-            result = f"Tool {fn} failed during fast preflight: {exc}"
-
-        tool_response = {
-            "role": "tool",
-            "content": str(result),
-            "name": fn,
-            "tool_call_id": tool_call["id"],
-        }
-        history_buffer.append(tool_response)
-        ollama_history.append(tool_response)
-
-    return True
 
 
 async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: str = "") -> bool:
@@ -1010,6 +690,7 @@ TOOL_STATUS_MESSAGES = {
     "overseer_search_tv": f"{MODEL_NAME} is searching for a TV show...",
     "overseer_request_tv_season": f"{MODEL_NAME} is requesting a TV season...",
     "fetch_web_content": f"{MODEL_NAME} is fetching a website...",
+    "import_recipe_to_mealie": f"{MODEL_NAME} is importing a recipe to Mealie...",
     "search_fred_series": f"{MODEL_NAME} is searching the FRED database...",
     "get_fred_series_observations": f"{MODEL_NAME} is pulling FRED economic data...",
     "search_imf_indicators": f"{MODEL_NAME} is searching IMF indicators...",
@@ -1038,12 +719,10 @@ TOOL_STATUS_MESSAGES = {
 # --- THE UNIFIED ENGINE ---
 async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
     url = MAIN_MODEL_URL
-    # Find the latest user query and sender info from the history buffer
-    user_query = ""
+    # Find the latest sender info from the history buffer.
     sender_user_id = None
     for msg in reversed(history_buffer):
         if msg.get("role") == "user" and not msg.get("is_heartbeat_trigger") and not msg.get("is_reaction_trigger"):
-            user_query = msg.get("content", "")
             sender_user_id = msg.get("user_id")
             break
             
@@ -1059,9 +738,6 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         model_to_use=model_to_use,
         allow_tools=allow_tools,
     )
-    if allow_tools:
-        await _run_fast_agentic_preflight(history_buffer, ollama_history, user_query, thinking_timeline)
-    
     for loop_count in range(TOOL_LOOP):
         payload["messages"] = [{"role": "system", "content": get_stable_system_prompt()}] + ollama_history
  
