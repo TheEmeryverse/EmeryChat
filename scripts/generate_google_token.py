@@ -88,11 +88,11 @@ def _find_credentials_file(choice):
     for name in search_names:
         # Check secrets/google/
         path_secrets = GOOGLE_SECRETS_DIR / name
-        if path_secrets.exists():
+        if path_secrets.is_file():
             return path_secrets
         # Check repo root
         path_root = REPO_DIR / name
-        if path_root.exists():
+        if path_root.is_file():
             return path_root
     return None
 
