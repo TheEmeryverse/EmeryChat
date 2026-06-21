@@ -1,53 +1,159 @@
 import os
 import json
-import sys
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-if str(REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(REPO_DIR))
-
-from emery.config import GOOGLE_TOKEN_PATH, NEST_PROJECT_ID, NEST_TOKEN_PATH
-
 GOOGLE_SECRETS_DIR = REPO_DIR / "secrets" / "google"
 CALENDAR_CREDENTIALS_PATH = GOOGLE_SECRETS_DIR / "credentials.json"
 NEST_CREDENTIALS_PATH = GOOGLE_SECRETS_DIR / "nest_credentials.json"
+
+
+def _load_env_file(path):
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _repo_path(value):
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else REPO_DIR / path
+
+
+def _load_nest_project_id():
+    env_value = os.getenv("NEST_PROJECT_ID", "").strip()
+    if env_value:
+        return env_value
+
+    integrations_path = REPO_DIR / "config" / "integrations.json"
+    try:
+        integrations = json.loads(integrations_path.read_text(encoding="utf-8"))
+        return str(integrations.get("nest", {}).get("project_id", "")).strip()
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
+def _load_client_credentials(creds_file):
+    with open(creds_file, "r", encoding="utf-8") as file_handle:
+        creds_data = json.load(file_handle)
+
+    client_config = creds_data.get("installed") or creds_data.get("web")
+    if not client_config:
+        raise ValueError("Unsupported credentials format; expected 'installed' or 'web'.")
+    return client_config["client_id"], client_config["client_secret"]
+
+
+def _extract_authorization_code(raw_code):
+    if "code=" not in raw_code:
+        return urllib.parse.unquote(raw_code)
+    parsed_url = urllib.parse.urlparse(raw_code)
+    query_params = urllib.parse.parse_qs(parsed_url.query)
+    return urllib.parse.unquote(query_params.get("code", [raw_code])[0])
+
+
+def _exchange_authorization_code(client_id, client_secret, code, redirect_uri):
+    token_data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    request = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=urllib.parse.urlencode(token_data).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(request) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+_load_env_file(REPO_DIR / ".env")
+GOOGLE_TOKEN_PATH = _repo_path(os.getenv("GOOGLE_TOKEN_PATH", "secrets/google/token.json"))
+NEST_TOKEN_PATH = _repo_path(os.getenv("NEST_TOKEN_PATH", "secrets/google/nest_token.json"))
+NEST_PROJECT_ID = _load_nest_project_id()
 
 
 def generate_calendar_token(creds_file):
     print("\n========================================================")
     print("      Google Calendar Token Generator (Desktop Flow)    ")
     print("========================================================\n")
-    try:
-        from google_auth_oauthlib.flow import InstalledAppFlow
-    except ImportError:
-        print("❌ Error: google-auth-oauthlib is not installed.")
-        print("Please install dependencies first: pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client")
-        return
-
     scopes = ['https://www.googleapis.com/auth/calendar.readonly']
     print(f"Loading credentials from: {creds_file}")
-    print("Starting authentication flow...")
-    print("A browser window should open. If it doesn't, please click the link provided below.")
-    
+
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(creds_file, scopes)
-        creds = flow.run_local_server(port=0)
-        
+        client_id, client_secret = _load_client_credentials(creds_file)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"❌ Error loading Calendar credentials: {exc}")
+        return
+
+    redirect_uri = "http://localhost"
+    auth_params = {
+        "access_type": "offline",
+        "client_id": client_id,
+        "prompt": "consent",
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(scopes),
+    }
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(auth_params)
+
+    print("\nStep 1: Copy and open this URL in your browser:")
+    print(f"\n👉 {auth_url}\n")
+    print("Step 2: Approve Calendar access. The final localhost page may fail to load.")
+    print("Step 3: Copy the full URL from the browser address bar and paste it below.")
+    raw_code = input("\nPaste the authorization code or full redirect URL here: ").strip()
+    if not raw_code:
+        print("❌ Error: Code cannot be empty.")
+        return
+
+    try:
+        token_data = _exchange_authorization_code(
+            client_id,
+            client_secret,
+            _extract_authorization_code(raw_code),
+            redirect_uri,
+        )
+        expires_in = token_data.get("expires_in", 3600)
+        expiry_time = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat().replace("+00:00", "Z")
+        token_json = {
+            "token": token_data.get("access_token"),
+            "refresh_token": token_data.get("refresh_token"),
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": scopes,
+            "universe_domain": "googleapis.com",
+            "account": "",
+            "expiry": expiry_time,
+        }
+
         Path(GOOGLE_TOKEN_PATH).parent.mkdir(parents=True, exist_ok=True)
-        with open(GOOGLE_TOKEN_PATH, 'w') as token_file:
-            token_file.write(creds.to_json())
+        with open(GOOGLE_TOKEN_PATH, 'w', encoding="utf-8") as token_file:
+            json.dump(token_json, token_file)
             
         print(f"\n✅ Successfully generated {GOOGLE_TOKEN_PATH}!")
         print("Your Google Calendar integration is now ready to use.")
         print("\nNote: If your Google Cloud app's Publishing Status is set to 'Testing',")
         print("this token will expire in 7 days and you will need to run this script again.")
         print("To fix this permanently, change the status to 'In production' in the OAuth consent screen.")
-    except Exception as e:
-        print(f"\n❌ An error occurred during Calendar authentication: {e}")
+    except Exception as exc:
+        print(f"\n❌ An error occurred during Calendar authentication: {exc}")
+        if hasattr(exc, "read"):
+            print("Response details:", exc.read().decode("utf-8"))
 
 def generate_nest_token(creds_file):
     print("\n========================================================")
