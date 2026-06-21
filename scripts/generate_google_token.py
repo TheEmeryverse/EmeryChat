@@ -81,6 +81,22 @@ def _exchange_authorization_code(client_id, client_secret, code, redirect_uri):
         return json.loads(response.read().decode("utf-8"))
 
 
+def _find_credentials_file(choice):
+    # If choice is 1, search for credentials.json
+    # If choice is 2, search for nest_credentials.json first, then fallback to credentials.json
+    search_names = ["credentials.json"] if choice == "1" else ["nest_credentials.json", "credentials.json"]
+    for name in search_names:
+        # Check secrets/google/
+        path_secrets = GOOGLE_SECRETS_DIR / name
+        if path_secrets.exists():
+            return path_secrets
+        # Check repo root
+        path_root = REPO_DIR / name
+        if path_root.exists():
+            return path_root
+    return None
+
+
 _load_env_file(REPO_DIR / ".env")
 GOOGLE_TOKEN_PATH = _repo_path(os.getenv("GOOGLE_TOKEN_PATH", "secrets/google/token.json"))
 NEST_TOKEN_PATH = _repo_path(os.getenv("NEST_TOKEN_PATH", "secrets/google/nest_token.json"))
@@ -286,19 +302,17 @@ def main():
         print("❌ Invalid selection. Exiting.")
         return
         
-    creds_file = str(CALENDAR_CREDENTIALS_PATH)
-    if choice == "2" and NEST_CREDENTIALS_PATH.exists():
-        creds_file = str(NEST_CREDENTIALS_PATH)
-        
-    if not os.path.exists(creds_file):
-        print(f"❌ Error: Credentials file '{creds_file}' not found.")
-        print("Please place your credentials JSON file under the secrets/ directory.")
+    creds_file = _find_credentials_file(choice)
+    if not creds_file:
+        expected = "nest_credentials.json or credentials.json" if choice == "2" else "credentials.json"
+        print(f"❌ Error: Credentials file ({expected}) not found.")
+        print("Please place your credentials JSON file in the repository root or under the secrets/google/ directory.")
         return
         
     if choice == "1":
-        generate_calendar_token(creds_file)
+        generate_calendar_token(str(creds_file))
     else:
-        generate_nest_token(creds_file)
+        generate_nest_token(str(creds_file))
 
 if __name__ == '__main__':
     main()
