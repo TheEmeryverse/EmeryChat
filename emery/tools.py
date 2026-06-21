@@ -3242,6 +3242,35 @@ def _normalize_url(url: str) -> str | None:
     return normalized
 
 
+def _mealie_log_url(url: str) -> str:
+    """Return a URL suitable for logs without credentials, query values, or fragments."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<invalid-url>"
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        query_marker = "?<redacted>" if parsed.query else ""
+        return f"{parsed.scheme}://{host}{parsed.path}{query_marker}"
+    except (TypeError, ValueError):
+        return "<invalid-url>"
+
+
+def _mealie_log_response(value: str, max_len: int) -> str:
+    """Bound a response excerpt and sanitize any URLs it contains."""
+    def sanitize_match(match: re.Match) -> str:
+        full_match = match.group(0)
+        raw_url = match.group(1)
+        prefix = full_match[: -len(raw_url)]
+        return prefix + _mealie_log_url(raw_url)
+
+    sanitized = _URL_RE.sub(sanitize_match, value or "")
+    return safe_preview(sanitized, max_len=max_len) or "<empty>"
+
+
 def _validate_mealie_config() -> str | None:
     """Return None when config is ready; otherwise a human-readable error."""
     if not _to_bool(ENABLE_MEALIE):
@@ -3263,25 +3292,45 @@ async def import_recipe_to_mealie(url: str) -> str:
     from the input, validates them, and sends each to Mealie's
     single-import endpoint (POST /api/recipes/create/url).
     """
+    logging.info(
+        "MEALIE TOOL: Import requested (enabled=%s, base_url=%s, api_key_configured=%s, input_chars=%d)",
+        _to_bool(ENABLE_MEALIE),
+        _mealie_log_url(MEALIE_URL) if MEALIE_URL else "<unset>",
+        bool(MEALIE_API_KEY),
+        len(url or ""),
+    )
+
     config_error = _validate_mealie_config()
     if config_error is not None:
+        logging.warning("MEALIE TOOL: Configuration rejected request: %s", config_error)
         return config_error
 
     urls = _extract_urls_from_text(url)
     if not urls:
+        logging.warning("MEALIE TOOL: No HTTP/HTTPS URL found in tool arguments")
         return f"No valid URL found in input. Please provide an HTTP or HTTPS URL to import."
+
+    logging.info("MEALIE TOOL: Extracted %d URL(s) from tool arguments", len(urls))
 
     normalized = []
     for raw in urls:
         n = _normalize_url(raw)
         if n is not None:
             normalized.append(n)
+        else:
+            logging.warning("MEALIE TOOL: Rejected invalid URL during normalization")
 
     if not normalized:
+        logging.warning("MEALIE TOOL: No extracted URLs passed normalization")
         return "None of the provided URLs are valid HTTP/HTTPS recipe links."
 
     max_urls = max(1, int(MEALIE_MAX_URLS_PER_MESSAGE))
     if len(normalized) > max_urls:
+        logging.warning(
+            "MEALIE TOOL: Rejected %d URLs because configured limit is %d",
+            len(normalized),
+            max_urls,
+        )
         return (
             f"Found {len(normalized)} URLs but the per-message limit is {max_urls}. "
             f"Please send at most {max_urls} URL(s) at a time."
@@ -3297,18 +3346,39 @@ async def import_recipe_to_mealie(url: str) -> str:
     }
 
     results: list[str] = []
+    success_count = 0
     try:
         async with httpx.AsyncClient(verify=True, timeout=60.0) as client:
             for idx, target_url in enumerate(normalized, start=1):
                 payload = {"url": target_url, "includeTags": True, "includeCategories": True}
+                log_url = _mealie_log_url(target_url)
+                started_at = asyncio.get_running_loop().time()
+                logging.info(
+                    "MEALIE TOOL: Sending import %d/%d for %s to %s",
+                    idx,
+                    len(normalized),
+                    log_url,
+                    _mealie_log_url(api_url),
+                )
                 try:
                     r = await client.post(api_url, json=payload, headers=headers)
                 except httpx.HTTPError as exc:
+                    elapsed = asyncio.get_running_loop().time() - started_at
+                    logging.error(
+                        "MEALIE TOOL: Import %d/%d connection failure for %s after %.2fs: %s",
+                        idx,
+                        len(normalized),
+                        log_url,
+                        elapsed,
+                        exc,
+                        exc_info=True,
+                    )
                     results.append(
                         f"[{idx}/{len(normalized)}] {target_url}: Connection error — {exc}"
                     )
                     continue
 
+                elapsed = asyncio.get_running_loop().time() - started_at
                 body_excerpt = ""
                 try:
                     body_excerpt = r.text[:300]
@@ -3316,11 +3386,30 @@ async def import_recipe_to_mealie(url: str) -> str:
                     pass
 
                 if r.status_code == 200 or r.status_code == 201:
+                    success_count += 1
+                    logging.info(
+                        "MEALIE TOOL: Import %d/%d succeeded for %s (HTTP %d, %.2fs, response=%s)",
+                        idx,
+                        len(normalized),
+                        log_url,
+                        r.status_code,
+                        elapsed,
+                        _mealie_log_response(body_excerpt, max_len=200),
+                    )
                     results.append(
                         f"[{idx}/{len(normalized)}] {target_url}: Import successful (HTTP {r.status_code})."
                     )
                 else:
                     status = r.status_code
+                    logging.warning(
+                        "MEALIE TOOL: Import %d/%d failed for %s (HTTP %d, %.2fs, response=%s)",
+                        idx,
+                        len(normalized),
+                        log_url,
+                        status,
+                        elapsed,
+                        _mealie_log_response(body_excerpt, max_len=300),
+                    )
                     if body_excerpt:
                         results.append(
                             f"[{idx}/{len(normalized)}] {target_url}: Import failed (HTTP {status}). Response: {body_excerpt}"
@@ -3331,6 +3420,13 @@ async def import_recipe_to_mealie(url: str) -> str:
                         )
 
     except Exception as exc:
+        logging.exception("MEALIE TOOL: Unexpected failure while communicating with Mealie")
         return f"Error communicating with Mealie: {exc}"
 
+    logging.info(
+        "MEALIE TOOL: Import request complete (processed=%d, succeeded=%d, failed=%d)",
+        len(normalized),
+        success_count,
+        len(normalized) - success_count,
+    )
     return "\n".join(results) if results else "No URLs were processed."
