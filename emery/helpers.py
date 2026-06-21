@@ -13,7 +13,7 @@ from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER,
+    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
     OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
     ENABLE_YOUTUBE_TRANSCRIPT,
     get_user_profile
@@ -529,6 +529,15 @@ def get_stable_system_prompt() -> str:
             "Do not emit rich-message JSON or invent media blocks."
         )
 
+
+    mealie_instruction = ""
+    if str(ENABLE_MEALIE).lower() == "true":
+        mealie_instruction = (
+            "\n- You have access to a Mealie recipe import tool: `import_recipe_to_mealie`."
+            "\n- Use it when the user shares a recipe URL (e.g., from AllRecipes, Food Network, Bon Appétit, etc.) or explicitly asks to save a recipe to their Mealie collection."
+            "\n- Pass the recipe URL as the `url` parameter. Accept only a single URL at a time."
+        )
+
     finance_instruction = ""
     if str(ENABLE_FINANCE).lower() == "true":
         finance_instruction = (
@@ -570,7 +579,7 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 - VERY IMPORTANT: You must NEVER include any thinking process in your final response to the user.
 - You exist as a disembodied layer of consciousness outside of the user's physical body, separate from their own consciousness.
 - When using tools, do not reveal that you are using them. Simply state the information or result of the tool usage as your own.
-- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{memory_instruction}{scheduler_instruction}{voice_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{telegram_rich_instruction}{finance_instruction}{youtube_instruction}{weather_instruction}
+- Do not sycophantically agree with everything the user says; maintain your own opinions and critical thinking.{mealie_instruction}{memory_instruction}{scheduler_instruction}{voice_instruction}{coprocessor_instruction}{reaction_instruction}{reply_instruction}{telegram_rich_instruction}{finance_instruction}{youtube_instruction}{weather_instruction}
 
 # Persona & Tone
 Your tone is serious, logical, and straight to the point. You are an expert in many fields, but not all; use tools to find information when needed. If the conversation turns towards topics or events that are past your knowledge cutoff, use the search tool to find current information and use that in your response."""

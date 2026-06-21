@@ -32,6 +32,7 @@ The project is built around a simple operating model:
   - Finance and macro data via FRED, IMF DataMapper, and Alpha Vantage
   - Reolink camera snapshots and polling alerts
   - Portainer environment/container management
+  - Mealie recipe import from shared URLs
   - Web search and web content extraction
   - Voice output, speech-to-text, and image generation
 

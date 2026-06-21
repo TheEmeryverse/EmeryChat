@@ -23,7 +23,8 @@ from emery.tools import (
     get_reolink_snapshot, get_available_cameras,
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
-    list_portainer_environments, list_portainer_containers, update_portainer_container
+    list_portainer_environments, list_portainer_containers, update_portainer_container,
+    import_recipe_to_mealie
 )
 
 # Helper to check if a feature is enabled
@@ -677,6 +678,26 @@ if is_enabled("ENABLE_PORTAINER"):
             }
         }
     ])
+
+if is_enabled("ENABLE_MEALIE"):
+    AVAILABLE_TOOLS["import_recipe_to_mealie"] = import_recipe_to_mealie
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "import_recipe_to_mealie",
+            "description": "Import a recipe from a web URL into the Mealie recipe manager. Pass the recipe URL as a string. Accepts a single URL at a time. Use when the user shares a recipe link or explicitly asks to save a recipe to their Mealie collection.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The HTTP or HTTPS URL of the recipe to import into Mealie."
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    })
 
 
 if is_enabled("ENABLE_SCHEDULER"):

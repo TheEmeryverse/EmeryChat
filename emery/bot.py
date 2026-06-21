@@ -250,7 +250,7 @@ def _help_text() -> str:
         "Typed replies like \"move on\" or \"archive this\" close and archive the active expert session.",
         "",
         "<b>Natural language tools</b>",
-        "You can also ask normally for reminders/routines, weather, web research, news, finance/econ data, images, voice replies, memory updates, smart-home actions, and infrastructure checks when those integrations are enabled.",
+        "You can also ask normally for reminders/routines, weather, web research, news, finance/econ data, images, voice replies, memory updates, smart-home actions, infrastructure checks, and recipe imports when those integrations are enabled.",
     ])
 
 

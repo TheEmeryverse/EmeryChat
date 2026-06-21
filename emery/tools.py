@@ -31,7 +31,9 @@ from emery.config import (
     NEST_PROJECT_ID, REOLINK_SILENT_ALERTS, SECURITY_TOPIC_ID, REOLINK_HOST,
     REOLINK_USER, REOLINK_PASSWORD, REOLINK_CAMERAS, REOLINK_CAMERA_DESCRIPTIONS,
     TELEGRAM_GROUP_CHAT_ID, ENABLE_REOLINK_THREADING, REOLINK_THREAD_WINDOW_MINUTES,
-    ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY, ALLOW_PRIVATE_WEB_FETCH
+    ENABLE_REOLINK_POLLING, GIPHY_API_KEY, TENOR_API_KEY, ALLOW_PRIVATE_WEB_FETCH,
+    ENABLE_MEALIE, MEALIE_URL, MEALIE_API_KEY, MEALIE_MAX_URLS_PER_MESSAGE,
+    _to_bool
 )
 from emery.docling import (
     detect_supported_document_type,
@@ -3198,3 +3200,137 @@ async def update_portainer_container(environment_name: str, container_name: str)
             
     except Exception as e:
         return f"Error updating container: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# Mealie recipe import
+# ---------------------------------------------------------------------------
+
+_URL_RE = re.compile(
+    r"(?:^|[\s(，《【\[{])(https?://[^\s)》】\]}]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_urls_from_text(text: str) -> list[str]:
+    """Extract all http/https URLs from a text block."""
+    if not text:
+        return []
+    found: list[str] = []
+    for match in _URL_RE.finditer(text):
+        raw = match.group(1).rstrip(").,;:!?」）」")
+        if raw.lower().startswith(("http://", "https://")):
+            found.append(raw)
+    return found
+
+
+def _normalize_url(url: str) -> str | None:
+    """Return a validated http/https URL or None if invalid."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not parsed.hostname:
+        return None
+    normalized = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        normalized += f":{parsed.port}"
+    path = parsed.path.rstrip("/")
+    if path:
+        normalized += path
+    if parsed.query:
+        normalized += f"?{parsed.query}"
+    return normalized
+
+
+def _validate_mealie_config() -> str | None:
+    """Return None when config is ready; otherwise a human-readable error."""
+    if not _to_bool(ENABLE_MEALIE):
+        return (
+            "Mealie integration is not enabled. "
+            "Set ENABLE_MEALIE=true, MEALIE_URL, and MEALIE_API_KEY to activate."
+        )
+    if not MEALIE_URL:
+        return "Mealie URL is not configured. Set MEALIE_URL to activate recipe import."
+    if not MEALIE_API_KEY:
+        return "Mealie API key is not configured. Set MEALIE_API_KEY to activate recipe import."
+    return None
+
+
+async def import_recipe_to_mealie(url: str) -> str:
+    """
+    Import a recipe from the given URL into the Mealie recipe manager.
+    Accepts a single URL string. The function extracts http/https URLs
+    from the input, validates them, and sends each to Mealie's
+    single-import endpoint (POST /api/recipes/create/url).
+    """
+    config_error = _validate_mealie_config()
+    if config_error is not None:
+        return config_error
+
+    urls = _extract_urls_from_text(url)
+    if not urls:
+        return f"No valid URL found in input. Please provide an HTTP or HTTPS URL to import."
+
+    normalized = []
+    for raw in urls:
+        n = _normalize_url(raw)
+        if n is not None:
+            normalized.append(n)
+
+    if not normalized:
+        return "None of the provided URLs are valid HTTP/HTTPS recipe links."
+
+    max_urls = max(1, int(MEALIE_MAX_URLS_PER_MESSAGE))
+    if len(normalized) > max_urls:
+        return (
+            f"Found {len(normalized)} URLs but the per-message limit is {max_urls}. "
+            f"Please send at most {max_urls} URL(s) at a time."
+        )
+
+    import httpx
+
+    api_url = f"{MEALIE_URL}/api/recipes/create/url"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {MEALIE_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    results: list[str] = []
+    try:
+        async with httpx.AsyncClient(verify=True, timeout=60.0) as client:
+            for idx, target_url in enumerate(normalized, start=1):
+                payload = {"url": target_url, "includeTags": True, "includeCategories": True}
+                try:
+                    r = await client.post(api_url, json=payload, headers=headers)
+                except httpx.HTTPError as exc:
+                    results.append(
+                        f"[{idx}/{len(normalized)}] {target_url}: Connection error — {exc}"
+                    )
+                    continue
+
+                body_excerpt = ""
+                try:
+                    body_excerpt = r.text[:300]
+                except Exception:
+                    pass
+
+                if r.status_code == 200 or r.status_code == 201:
+                    results.append(
+                        f"[{idx}/{len(normalized)}] {target_url}: Import successful (HTTP {r.status_code})."
+                    )
+                else:
+                    status = r.status_code
+                    if body_excerpt:
+                        results.append(
+                            f"[{idx}/{len(normalized)}] {target_url}: Import failed (HTTP {status}). Response: {body_excerpt}"
+                        )
+                    else:
+                        results.append(
+                            f"[{idx}/{len(normalized)}] {target_url}: Import failed (HTTP {status})."
+                        )
+
+    except Exception as exc:
+        return f"Error communicating with Mealie: {exc}"
+
+    return "\n".join(results) if results else "No URLs were processed."

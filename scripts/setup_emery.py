@@ -59,6 +59,10 @@ DEFAULT_ENV = {
     "ENABLE_SCHEDULER": "true",
     "ENABLE_HEARTBEAT": "true",
     "ENABLE_MEMORY": "true",
+    "ENABLE_PORTAINER": "false",
+    "ENABLE_TELEGRAM_RICH_MESSAGES": "true",
+    "ENABLE_ROUTINE_CACHE_WARMUP": "true",
+    "ENABLE_MEALIE": "false",
     "ALLOW_UNRESTRICTED_TELEGRAM_ACCESS": "false",
     "NASA_API_KEY": "YOUR_NASA_API_KEY",
     "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
@@ -76,6 +80,8 @@ DEFAULT_ENV = {
     "REOLINK_HOST": "",
     "REOLINK_USER": "",
     "REOLINK_PASSWORD": "",
+    "MEALIE_URL": "",
+    "MEALIE_API_KEY": "",
     "GIPHY_API_KEY": "YOUR_GIPHY_API_KEY",
     "TENOR_API_KEY": "YOUR_TENOR_API_KEY",
     "MEMORY_STORE_PATH": "data/memory/memory_store.json",
@@ -906,6 +912,7 @@ def ask_features(env_seed):
         "ENABLE_SCHEDULER": "Enable scheduler",
         "ENABLE_HEARTBEAT": "Enable inactivity heartbeat",
         "ENABLE_MEMORY": "Enable persistent memory",
+        "ENABLE_MEALIE": "Enable Mealie recipe import",
     }
     for key, label in feature_prompts.items():
         env_seed[key] = bool_to_env(prompt_yes_no(label, parse_bool(env_seed.get(key), DEFAULT_ENV.get(key, "false") == "true")))
@@ -1040,6 +1047,19 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
             print(f"  Added '{normalized_name}' on channel {cameras[normalized_name]}.")
         integrations_seed["reolink"]["cameras"] = cameras
         integrations_seed["reolink"]["camera_descriptions"] = descriptions
+
+    if parse_bool(env_seed["ENABLE_MEALIE"]):
+        env_seed["MEALIE_URL"] = prompt_text(
+            "Mealie base URL (e.g. http://192.168.1.118:9000)",
+            env_seed.get("MEALIE_URL"),
+            required=True,
+            validator=validate_url_prompt,
+        )
+        env_seed["MEALIE_API_KEY"] = prompt_text(
+            "Mealie API key",
+            env_seed.get("MEALIE_API_KEY"),
+            required=True,
+        )
 
     return env_seed, integrations_seed, news_seed, weather_locations
 

@@ -18,8 +18,13 @@ from emery.config import (
     TOOL_LOOP,
     MODEL_NAME,
     THINK,
+    ENABLE_MEALIE,
+    MEALIE_MAX_URLS_PER_MESSAGE,
 )
 from emery import tool_registry
+from emery.tools import (
+    import_recipe_to_mealie,
+)
 import emery.globals as globals
 from emery.helpers import (
     get_stable_system_prompt,
@@ -899,6 +904,66 @@ async def _execute_tool_call(fn: str, args: dict):
     return await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
 
 
+
+_URL_RE = re.compile(
+    r"(?:^|[\s(，《【\[\{])(https?://[^\s)》】\]\}]+)",
+    re.IGNORECASE,
+)
+
+
+async def _try_auto_import_recipe_url(
+    history_buffer, ollama_history, user_query: str, thinking_timeline: list[str]
+) -> bool:
+    """Auto-import recipe URLs when the user sends a bare URL or short imperative.
+
+    Only triggers for URL-only or very short (<=5 word) imperative messages
+    when Mealie is enabled. Does NOT trigger for arbitrary conversation content.
+
+    Reuses the tool's validation, URL normalization, per-message cap enforcement,
+    and HTTP logic — no inline HTTP calls.
+    """
+    if not str(ENABLE_MEALIE).lower() == "true":
+        return False
+
+    if not user_query or not user_query.strip():
+        return False
+
+    # Quick URL extraction
+    urls = _URL_RE.findall(user_query)
+    if not urls:
+        return False
+
+    # Clean URLs of trailing punctuation
+    cleaned_urls = []
+    for u in urls:
+        u = u.rstrip(").,;:!?」）」")
+        if u.lower().startswith(("http://", "https://")):
+            cleaned_urls.append(u)
+    if not cleaned_urls:
+        return False
+
+    # Only auto-import if the message is URL-only or very short imperative
+    words = user_query.strip().split()
+    is_url_only = len(cleaned_urls) >= 1 and len(words) <= 3
+    is_short_imperative = len(words) <= 5 and any(
+        w.lower() in ("import", "add", "save", "fetch") for w in words
+    )
+
+    if not (is_url_only or is_short_imperative):
+        return False
+
+    # Delegate to the tool for config validation, URL normalization, cap enforcement,
+    # and HTTP import. The tool returns a string result (success messages or error).
+    result = await import_recipe_to_mealie(user_query)
+
+    # Auto-import handled the message — always surface the result (success or error)
+    auto_msg = {"role": "assistant", "content": result}
+    history_buffer.append(auto_msg)
+    ollama_history.append(auto_msg)
+    thinking_timeline.append("Auto-imported recipe URL(s) via Mealie")
+    return True
+
+
 async def _run_fast_agentic_preflight(history_buffer, ollama_history, user_query: str, thinking_timeline: list[str]) -> bool:
     if not user_query or not AGENTIC_FAST_TOOLS_ENABLED or not tools_schema:
         return False
@@ -1060,6 +1125,16 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
         allow_tools=allow_tools,
     )
     if allow_tools:
+        # Try auto-importing recipe URLs before the LLM sees the message
+        if await _try_auto_import_recipe_url(history_buffer, ollama_history, user_query, thinking_timeline):
+            # Short-circuit: auto-import handled the message — return directly
+            auto_result = history_buffer[-1]["content"]
+            thinking_payload = "\n\n".join(entry for entry in thinking_timeline if entry)
+            if thinking_payload:
+                start_think_tag = "<" + "think" + ">"
+                end_think_tag = "</" + "think" + ">"
+                return f"{start_think_tag}\n{thinking_payload}\n{end_think_tag}\n{auto_result}", False
+            return auto_result, False
         await _run_fast_agentic_preflight(history_buffer, ollama_history, user_query, thinking_timeline)
     
     for loop_count in range(TOOL_LOOP):
