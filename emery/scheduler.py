@@ -3,6 +3,8 @@ import json
 import uuid
 import logging
 import re
+import asyncio
+import copy
 from datetime import datetime, time, timedelta
 from collections import deque
 from pathlib import Path
@@ -37,6 +39,8 @@ _ROUTINE_HISTORY_FLUSH_JOB_PREFIX = "routine_history_flush"
 _ROUTINE_HISTORY_RESULT_CHARS = 1800
 _ROUTINE_HISTORY_PROMPT_CHARS = 500
 _ROUTINE_HISTORY_MAX_PENDING_ENTRIES = 5
+_PENDING_SCHEDULED_RUNS: deque[dict] = deque()
+_PENDING_SCHEDULED_DRAIN_TASK: asyncio.Task | None = None
 
 
 def _truncate_for_history(text: str, max_chars: int) -> str:
@@ -330,6 +334,72 @@ def _record_routine_history(
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _foreground_loop_active() -> bool:
+    return globals.has_active_foreground_loops()
+
+
+def _defer_scheduled_job(job_data: dict, *, reason: str) -> None:
+    payload = copy.deepcopy(job_data or {})
+    payload["_deferred_enqueued_at"] = _now_iso()
+    payload["_deferred_reason"] = reason
+    _PENDING_SCHEDULED_RUNS.append(payload)
+    logging.info(
+        "📅 SCHEDULER: Deferred job '%s' (%s) because %s. Pending scheduled runs=%s",
+        payload.get("description"),
+        payload.get("id"),
+        reason,
+        len(_PENDING_SCHEDULED_RUNS),
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(USER_TIMEZONE).replace(microsecond=0).isoformat()
+
+
+def trigger_deferred_job_drain(*, reason: str = "") -> bool:
+    global _PENDING_SCHEDULED_DRAIN_TASK
+
+    if _foreground_loop_active():
+        return False
+    if not _PENDING_SCHEDULED_RUNS:
+        return False
+    if _PENDING_SCHEDULED_DRAIN_TASK and not _PENDING_SCHEDULED_DRAIN_TASK.done():
+        return False
+    if globals.application_bot is None:
+        logging.warning(
+            "⚠️ SCHEDULER: Deferred scheduled jobs are waiting, but application_bot is unavailable."
+        )
+        return False
+
+    _PENDING_SCHEDULED_DRAIN_TASK = asyncio.create_task(
+        _drain_deferred_scheduled_jobs(reason=reason or "foreground loop idle")
+    )
+    return True
+
+
+async def _drain_deferred_scheduled_jobs(*, reason: str) -> None:
+    global _PENDING_SCHEDULED_DRAIN_TASK
+
+    try:
+        logging.info(
+            "📅 SCHEDULER: Starting deferred scheduled-job drain (%s pending, reason=%s)",
+            len(_PENDING_SCHEDULED_RUNS),
+            reason,
+        )
+        while _PENDING_SCHEDULED_RUNS:
+            if _foreground_loop_active():
+                logging.info(
+                    "📅 SCHEDULER: Pausing deferred scheduled-job drain because a foreground loop became active again."
+                )
+                return
+            job_data = _PENDING_SCHEDULED_RUNS.popleft()
+            await _execute_custom_job(globals.application_bot, job_data, deferred_reason=reason)
+    finally:
+        _PENDING_SCHEDULED_DRAIN_TASK = None
+        if _PENDING_SCHEDULED_RUNS and not _foreground_loop_active():
+            trigger_deferred_job_drain(reason="deferred drain follow-up")
 
 
 def _combined_job_text(prompt: str, description: str) -> str:
@@ -743,22 +813,19 @@ async def _send_scheduled_voice_memo(bot, chat_id: int, text: str, message_threa
     return True
 
 
-async def run_custom_job(context):
-    """Callback triggered by APScheduler/JobQueue when a job fires."""
-    job = context.job
-    job_data = job.data
+async def _execute_custom_job(bot, job_data: dict, *, deferred_reason: str | None = None):
     job_id = job_data.get("id")
-    
+
     # Restore user context for this task
     user_id = job_data.get("user_id")
     target_user_id = job_data.get("target_user_id")
     target_user_name = job_data.get("target_user_name")
-    
+
     if target_user_id is not None and target_user_id != -1:
         globals.current_user_id.set(target_user_id)
     elif user_id is not None:
         globals.current_user_id.set(user_id)
-        
+
     prompt = job_data.get("prompt")
     description = job_data.get("description")
     source_request = job_data.get("source_request")
@@ -769,7 +836,7 @@ async def run_custom_job(context):
     delivery_scope = job_data.get("delivery_scope")
     schedule_type = job_data.get("schedule_type")
     route_to_routines = job_data.get("route_to_routines", True)
-    
+
     if delivery_scope:
         chat_id = chat_id or origin_chat_id
         if chat_id is None:
@@ -803,25 +870,23 @@ async def run_custom_job(context):
                     job_id,
                     message_thread_id,
                 )
-        else:
-            if message_thread_id is None and CHAT_TOPIC_ID is not None:
-                message_thread_id = CHAT_TOPIC_ID
+        elif message_thread_id is None and CHAT_TOPIC_ID is not None:
+            message_thread_id = CHAT_TOPIC_ID
 
     if not chat_id:
         chat_id = globals.TARGET_CHAT_ID.get()
-        
+
     if not chat_id:
-        logging.warning(f"⚠️ Custom job '{description}' ({job_id}) triggered without chat_id.")
+        logging.warning("⚠️ Custom job '%s' (%s) triggered without chat_id.", description, job_id)
         return
 
-    # Set context variables for target chat and thread/topic
     globals.TARGET_CHAT_ID.set(chat_id)
     message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
     globals.CURRENT_THREAD_ID.set(message_thread_id)
 
     logging.info(
         "📅 SCHEDULER: Resolved destination for job '%s' (%s) -> chat_id=%s thread_id=%s "
-        "[schedule_type=%s route_to_routines=%s delivery_scope=%s origin_chat_id=%s origin_thread_id=%s]",
+        "[schedule_type=%s route_to_routines=%s delivery_scope=%s origin_chat_id=%s origin_thread_id=%s deferred_reason=%s]",
         description,
         job_id,
         chat_id,
@@ -831,31 +896,41 @@ async def run_custom_job(context):
         delivery_scope or "legacy",
         origin_chat_id,
         origin_message_thread_id,
+        deferred_reason or "immediate",
     )
-        
+
     if schedule_type == "yearly":
         try:
-            # schedule_value format: "MM-DD HH:MM", e.g., "12-19 08:30"
             parts = job_data.get("schedule_value", "").split()
             if parts:
                 target_month = int(parts[0].split("-")[0])
                 now = datetime.now(USER_TIMEZONE)
                 if now.month != target_month:
-                    logging.info(f"📅 SCHEDULER: Skipping yearly job '{job_id}' (month mismatch: {now.month} != {target_month})")
+                    logging.info(
+                        "📅 SCHEDULER: Skipping yearly job '%s' (month mismatch: %s != %s)",
+                        job_id,
+                        now.month,
+                        target_month,
+                    )
                     return
         except Exception as e:
-            logging.error(f"❌ SCHEDULER: Error filtering month for yearly job {job_id}: {e}", exc_info=True)
-        
-    logging.info(f"📅 SCHEDULER: Running custom job '{description}' ({job_id})")
+            logging.error("❌ SCHEDULER: Error filtering month for yearly job %s: %s", job_id, e, exc_info=True)
+
+    logging.info(
+        "📅 SCHEDULER: Running custom job '%s' (%s)%s",
+        description,
+        job_id,
+        f" after deferral ({deferred_reason})" if deferred_reason else "",
+    )
     from emery.engine import emery_engine
-    from emery.helpers import clean_thinking_tags, emery_format, telegram_escape
-    
+    from emery.helpers import clean_thinking_tags, emery_format, telegram_escape, get_current_system_prompt
+
     try:
         active_user_id = globals.current_user_id.get() or user_id
         from emery.config import get_user_profile
         profile = get_user_profile(active_user_id)
         user_name = profile["name"]
-        
+
         mention_prefix = ""
         rich_mention_prefix = ""
         if target_user_id == -1:
@@ -875,7 +950,7 @@ async def run_custom_job(context):
         elif target_user_id and target_user_id != 0:
             mention_prefix = f"<a href=\"tg://user?id={target_user_id}\">{telegram_escape(target_user_name)}</a>: "
             rich_mention_prefix = f"{_markdown_link(target_user_name, f'tg://user?id={target_user_id}')}: "
-            
+
         voice_memo_requested = _requests_voice_memo(prompt, description, source_request)
         exec_prompt = build_scheduled_execution_prompt(
             prompt,
@@ -892,11 +967,9 @@ async def run_custom_job(context):
                 user_name=user_name,
                 target_user_id=target_user_id,
             )
-            
+
         if chat_id not in globals.chat_histories:
             globals.chat_histories[chat_id] = deque()
-
-        from emery.helpers import get_current_system_prompt
 
         use_compact_routine_history = _is_routine_history_candidate(
             delivery_scope=delivery_scope,
@@ -923,18 +996,16 @@ async def run_custom_job(context):
         }
         job_history = deque([scheduled_trigger])
 
-        # Keep scheduled jobs isolated from prior chat turns so each run produces one fresh report.
         res_text, voice_sent_via_tool = await emery_engine(job_history)
         if not use_compact_routine_history:
             globals.chat_histories[chat_id].extend(job_history)
         clean_res_text = clean_thinking_tags(res_text).strip()
         job_html_text = f"🛡️ <b>EMERYCHAT JOB: {telegram_escape(description)}</b>\n\n{mention_prefix}{emery_format(res_text)}"
         job_rich_text = f"# 🛡️ EMERYCHAT JOB: {_markdown_escape(description)}\n\n{rich_mention_prefix}{clean_res_text}"
-        # Send formatted reply
         delivered_chat_id = chat_id
         delivered_thread_id = message_thread_id
         sent_ok = await send_safe_job_message(
-            context.bot,
+            bot,
             chat_id=chat_id,
             text=job_html_text,
             message_thread_id=message_thread_id,
@@ -957,7 +1028,7 @@ async def run_custom_job(context):
                 fallback_thread_id,
             )
             sent_ok = await send_safe_job_message(
-                context.bot,
+                bot,
                 chat_id=origin_chat_id,
                 text=job_html_text,
                 message_thread_id=fallback_thread_id,
@@ -977,13 +1048,17 @@ async def run_custom_job(context):
         if voice_memo_requested and not voice_sent_via_tool:
             try:
                 voice_ok = await _send_scheduled_voice_memo(
-                    context.bot,
+                    bot,
                     delivered_chat_id if sent_ok else (origin_chat_id or chat_id),
                     res_text,
                     delivered_thread_id if sent_ok else (origin_message_thread_id or message_thread_id),
                 )
                 if not voice_ok:
-                    logging.warning("⚠️ SCHEDULER: Job '%s' (%s) requested a voice memo, but none was sent.", description, job_id)
+                    logging.warning(
+                        "⚠️ SCHEDULER: Job '%s' (%s) requested a voice memo, but none was sent.",
+                        description,
+                        job_id,
+                    )
             except Exception as e:
                 logging.error("❌ SCHEDULER: Failed to send voice memo for job %s: %s", job_id, e, exc_info=True)
         if use_compact_routine_history:
@@ -1009,11 +1084,19 @@ async def run_custom_job(context):
                 "timestamp": datetime.now(USER_TIMEZONE),
             })
     except Exception as e:
-        logging.error(f"❌ CUSTOM JOB Error executing job {job_id}: {e}", exc_info=True)
-        
-    # If it is a one-off run, clean it up from persistent store
+        logging.error("❌ CUSTOM JOB Error executing job %s: %s", job_id, e, exc_info=True)
+
     if schedule_type == "once":
         remove_job_from_store(job_id)
+
+
+async def run_custom_job(context):
+    """Callback triggered by APScheduler/JobQueue when a job fires."""
+    job_data = context.job.data or {}
+    if _foreground_loop_active():
+        _defer_scheduled_job(job_data, reason="foreground agent loop active")
+        return
+    await _execute_custom_job(context.bot, job_data)
 
 def remove_job_from_queue(job_id: str):
     """Removes a job from the active Telegram JobQueue."""

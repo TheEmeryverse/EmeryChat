@@ -2035,6 +2035,12 @@ async def _deliver_final_report(bot, session: ExpertSession) -> None:
 async def _run_research_session(session: ExpertSession, bot) -> None:
     current_task = asyncio.current_task()
     typing_stop, typing_task = _start_expert_typing(bot, session)
+    globals.register_foreground_loop(
+        session.id,
+        loop_type="expert",
+        chat_id=session.chat_id,
+        message_thread_id=session.message_thread_id,
+    )
     try:
         ACTIVE_SESSIONS[session.key()] = session
         if session.round == 0 and not session.search_queries and not session.research_agenda:
@@ -2139,6 +2145,7 @@ async def _run_research_session(session: ExpertSession, bot) -> None:
         await _send_model_notice(bot, session, "research failed", [str(exc)])
     finally:
         await _stop_expert_typing(typing_stop, typing_task)
+        globals.unregister_foreground_loop(session.id)
         if SESSION_TASKS.get(session.id) is current_task:
             SESSION_TASKS.pop(session.id, None)
 
