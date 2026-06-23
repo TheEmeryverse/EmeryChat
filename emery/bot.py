@@ -250,7 +250,7 @@ def _help_text() -> str:
         "Typed replies like \"move on\" or \"archive this\" close and archive the active expert session.",
         "",
         "<b>Debate mode</b>",
-        "/debate &lt;topic&gt; - Start a four-role debate with Moderator, Pro-side, Anti-side, and Clerk.",
+        "/debate &lt;topic&gt; - Start a four-role debate with Moderator, two named sides, and Clerk.",
         "/debate status - Show the active debate status for this chat/thread.",
         "/debate list - Show archived debates.",
         "/debate open &lt;id&gt; - Send an archived debate memo.",

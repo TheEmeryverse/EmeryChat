@@ -339,7 +339,7 @@ Routing behavior:
 - `/expert status` shows the current active expert session state
 - `/expert clear` deletes all archived expert reports and clears the archive index
 - `/expert cancel` cancels the active expert session in the current chat/thread
-- `/debate <topic>` starts a foreground four-role debate with Moderator, Pro-side, Anti-side, and Clerk research
+- `/debate <topic>` starts a foreground four-role debate with Moderator, two named sides, and Clerk research
 - `/debate status`, `/debate cancel`, `/debate list`, `/debate open <id>`, and `/debate clear` manage active and archived debates
 - Web search via SearXNG
 - Web content extraction and summarization

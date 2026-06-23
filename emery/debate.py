@@ -69,6 +69,7 @@ class DebateSession:
     created_at: str = field(default_factory=lambda: _now_iso())
     updated_at: str = field(default_factory=lambda: _now_iso())
     positions: dict = field(default_factory=dict)
+    side_names: dict = field(default_factory=dict)
     position_framing: str = ""
     user_inputs: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
@@ -161,6 +162,24 @@ def _clean_thinking_tags(text: str) -> str:
 
 def _telegram_escape(text: str) -> str:
     return html.escape(str(text or ""), quote=False)
+
+
+def _clean_side_name(raw: str, fallback: str) -> str:
+    clean = re.sub(r"\s+", " ", str(raw or "")).strip()
+    clean = re.sub(r"[^\w\s&+/-]", "", clean).strip()
+    if not clean:
+        return fallback
+    words = clean.split()
+    return " ".join(words[:4])[:40].strip() or fallback
+
+
+def _side_name(session: DebateSession, side: str) -> str:
+    fallback = "Pro-side" if side == "pro" else "Anti-side"
+    return _clean_side_name((session.side_names or {}).get(side), fallback)
+
+
+def _side_label(session: DebateSession, side: str) -> str:
+    return f"{_side_name(session, side)} ({side})"
 
 
 async def _query_chat_model(
@@ -401,7 +420,9 @@ def _formal_transcript(session: DebateSession) -> str:
     lines = []
     for turn in session.formal_turns:
         round_label = f"Round {turn.get('round')}: " if turn.get("round") else ""
-        lines.append(f"{round_label}{turn.get('speaker')} ({turn.get('kind')}): {turn.get('content')}")
+        speaker = turn.get("speaker")
+        speaker_label = _side_label(session, speaker) if speaker in {"pro", "anti"} else str(speaker)
+        lines.append(f"{round_label}{speaker_label} ({turn.get('kind')}): {turn.get('content')}")
     return "\n\n".join(lines)
 
 
@@ -417,8 +438,8 @@ def _packet_digest(packets: list[dict]) -> str:
 def _build_moderator_context(session: DebateSession) -> str:
     return (
         f"Topic: {session.topic}\n"
-        f"Pro position: {session.positions.get('pro')}\n"
-        f"Anti position: {session.positions.get('anti')}\n\n"
+        f"{_side_label(session, 'pro')} position: {session.positions.get('pro')}\n"
+        f"{_side_label(session, 'anti')} position: {session.positions.get('anti')}\n\n"
         "Formal transcript only:\n"
         f"{_formal_transcript(session)}\n\n"
         f"Round results: {json.dumps(session.round_results, ensure_ascii=True)}"
@@ -427,9 +448,10 @@ def _build_moderator_context(session: DebateSession) -> str:
 
 def _build_side_context(session: DebateSession, side: str) -> str:
     position = session.positions.get(side, "")
+    side_label = _side_label(session, side)
     return (
         f"Topic: {session.topic}\n"
-        f"Your side: {side}\n"
+        f"Your side: {side_label}\n"
         f"Your position: {position}\n"
         f"Your private role brief: {session.role_briefs.get(side, '')}\n\n"
         "Your private research packets:\n"
@@ -462,10 +484,16 @@ async def _define_positions(session: DebateSession) -> None:
     )
     prompt = (
         "You are the neutral Moderator. Define two debate positions for the user to approve. "
-        "Return strict JSON with keys: pro, anti, framing. The positions must be opposed and debate-ready.\n\n"
+        "Return strict JSON with keys: pro_name, anti_name, pro, anti, framing. "
+        "pro_name and anti_name must be short, concise labels that clearly identify each position, not generic labels like Pro-side or Anti-side. "
+        "The positions must be opposed and debate-ready.\n\n"
         f"Topic: {session.topic}\n\nClerk packet:\n{packet.get('summary')}"
     )
     parsed = _extract_json_object(await _query_main_model(prompt, "You are a neutral debate Moderator. Return only JSON.")) or {}
+    session.side_names = {
+        "pro": _clean_side_name(parsed.get("pro_name"), "Affirmative"),
+        "anti": _clean_side_name(parsed.get("anti_name"), "Opposition"),
+    }
     session.positions = {
         "pro": str(parsed.get("pro") or f"In favor of {session.topic}").strip(),
         "anti": str(parsed.get("anti") or f"Opposed to {session.topic}").strip(),
@@ -477,13 +505,18 @@ async def _define_positions(session: DebateSession) -> None:
 
 async def _revise_positions(session: DebateSession, instruction: str) -> None:
     prompt = (
-        "Revise the debate positions according to the user's instruction. Return strict JSON with keys: pro, anti, framing.\n\n"
+        "Revise the debate positions according to the user's instruction. Return strict JSON with keys: pro_name, anti_name, pro, anti, framing. "
+        "pro_name and anti_name must be short, concise labels that clearly identify each position.\n\n"
         f"Topic: {session.topic}\n"
-        f"Current pro: {session.positions.get('pro')}\n"
-        f"Current anti: {session.positions.get('anti')}\n"
+        f"Current {_side_label(session, 'pro')}: {session.positions.get('pro')}\n"
+        f"Current {_side_label(session, 'anti')}: {session.positions.get('anti')}\n"
         f"User instruction: {instruction}"
     )
     parsed = _extract_json_object(await _query_main_model(prompt, "You are a neutral debate Moderator. Return only JSON.")) or {}
+    session.side_names = {
+        "pro": _clean_side_name(parsed.get("pro_name"), _side_name(session, "pro")),
+        "anti": _clean_side_name(parsed.get("anti_name"), _side_name(session, "anti")),
+    }
     if parsed.get("pro"):
         session.positions["pro"] = str(parsed.get("pro")).strip()
     if parsed.get("anti"):
@@ -631,7 +664,7 @@ async def _build_final_memo(session: DebateSession) -> str:
     pro_wins = sum(1 for result in session.round_results if result.get("winner") == "pro")
     anti_wins = sum(1 for result in session.round_results if result.get("winner") == "anti")
     tie_count = sum(1 for result in session.round_results if result.get("winner") == "tie")
-    score_line = f"Score: Pro {pro_wins}, Anti {anti_wins}, Ties {tie_count}"
+    score_line = f"Score: {_side_name(session, 'pro')} {pro_wins}, {_side_name(session, 'anti')} {anti_wins}, Ties {tie_count}"
     prompt = (
         "Write the final debate decision memo. Include: positions, round winners, strongest arguments, strongest objections, "
         "winner by round count, nuanced synthesized verdict that accounts for the losing side, confidence, and practical next step. "
@@ -699,15 +732,15 @@ def _archive_action_markup(session_id: str) -> InlineKeyboardMarkup:
 
 def _position_text(session: DebateSession) -> str:
     lines = [
-        "<b>Debate positions proposed</b>",
+        "⚖️ <b>Debate positions proposed</b>",
         "",
         f"<b>Topic:</b> {_telegram_escape(session.topic)}",
-        f"<b>Pro-side:</b> {_telegram_escape(session.positions.get('pro', ''))}",
-        f"<b>Anti-side:</b> {_telegram_escape(session.positions.get('anti', ''))}",
+        f"🟢 <b>{_telegram_escape(_side_name(session, 'pro'))}:</b> {_telegram_escape(session.positions.get('pro', ''))}",
+        f"🔴 <b>{_telegram_escape(_side_name(session, 'anti'))}:</b> {_telegram_escape(session.positions.get('anti', ''))}",
     ]
     if session.position_framing:
         lines.extend(["", _telegram_escape(session.position_framing)])
-    lines.extend(["", "Tap <b>Begin Debate</b> or reply with revisions."])
+    lines.extend(["", "▶️ Tap <b>Begin Debate</b> or reply with revisions."])
     return "\n".join(lines)
 
 
@@ -718,13 +751,13 @@ async def _send_position_prompt(bot, session: DebateSession) -> None:
 async def _run_position_definition(session: DebateSession, bot) -> None:
     try:
         ACTIVE_DEBATES[session.key()] = session
-        await _send_status(bot, session, f"{MODEL_NAME} is defining debate positions for: {session.topic}")
+        await _send_status(bot, session, f"⚖️ {MODEL_NAME} is opening debate court and defining positions for: {session.topic}")
         await _define_positions(session)
         await _send_position_prompt(bot, session)
     except Exception as exc:
         session.status = "error"
         logging.error("DEBATE: Position definition failed for %s: %s", session.id, exc, exc_info=True)
-        await _send_status(bot, session, f"Debate setup failed: {exc}")
+        await _send_status(bot, session, f"⚠️ Debate setup failed: {exc}")
 
 
 async def _run_debate_session(session: DebateSession, bot) -> None:
@@ -739,15 +772,15 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         ACTIVE_DEBATES[session.key()] = session
         session.status = "running"
         session.touch()
-        await _send_status(bot, session, f"Debate started: {session.topic}")
-        await _send_status(bot, session, "Pro-side is researching and preparing its opening thesis.")
+        await _send_status(bot, session, f"🎙️ Debate started: {session.topic}")
+        await _send_status(bot, session, f"🟢 {_side_name(session, 'pro')} is researching and preparing its opening thesis.")
         await _prepare_side(session, "pro")
-        await _send_status(bot, session, "Anti-side is researching and preparing its opening thesis.")
+        await _send_status(bot, session, f"🔴 {_side_name(session, 'anti')} is researching and preparing its opening thesis.")
         await _prepare_side(session, "anti")
         session.debate_questions = await _moderator_questions(session)
-        await _send_status(bot, session, "Moderator has set the formal question rounds.")
+        await _send_status(bot, session, "🧑‍⚖️ Moderator has set the formal question rounds.")
         for index, question in enumerate(session.debate_questions, start=1):
-            await _send_status(bot, session, f"Round {index}: {question}")
+            await _send_status(bot, session, f"🥊 Round {index}: {question}")
             await _run_question_round(session, index, question)
         await _final_side_thesis(session, "pro")
         await _final_side_thesis(session, "anti")
@@ -764,7 +797,7 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
     except Exception as exc:
         session.status = "error"
         logging.error("DEBATE: Session %s failed: %s", session.id, exc, exc_info=True)
-        await _send_status(bot, session, f"Debate failed: {exc}")
+        await _send_status(bot, session, f"⚠️ Debate failed: {exc}")
     finally:
         globals.unregister_foreground_loop(session.id)
         if DEBATE_TASKS.get(session.id) is current_task:
@@ -802,7 +835,7 @@ async def _cancel_session_object(bot, session: DebateSession) -> None:
     session.status = "cancelled"
     ACTIVE_DEBATES.pop(session.key(), None)
     globals.unregister_foreground_loop(session.id)
-    await _send_status(bot, session, "Debate cancelled.")
+    await _send_status(bot, session, "🛑 Debate cancelled.")
 
 
 def _archive_root() -> Path:
@@ -882,9 +915,9 @@ def clear_debate_archives() -> dict:
 
 async def _send_debate_help(update) -> None:
     await update.message.reply_text("\n".join([
-        "<b>Debate commands</b>",
+        "⚖️ <b>Debate commands</b>",
         "",
-        "/debate &lt;topic&gt; - Start a structured four-role debate.",
+        "/debate &lt;topic&gt; - Start a structured four-role debate with named sides.",
         "/debate status - Show the active debate status.",
         "/debate cancel - Cancel the active debate.",
         "/debate list - Show archived debates.",
@@ -973,7 +1006,7 @@ async def handle_debate_command(update, context) -> None:
     if subcommand == "clear":
         result = clear_debate_archives()
         await update.message.reply_text(
-            f"Deleted archived debates.\nArchived sessions cleared: {result['archived_sessions']}\nArchive items removed: {result['removed_items']}"
+            f"🧹 Deleted archived debates.\nArchived sessions cleared: {result['archived_sessions']}\nArchive items removed: {result['removed_items']}"
         )
         return
     if subcommand == "open" and len(args) >= 2:
@@ -985,12 +1018,12 @@ async def handle_debate_command(update, context) -> None:
 
     key = _session_key(chat_id, thread_id)
     if key in ACTIVE_DEBATES and ACTIVE_DEBATES[key].status in {"preparing_positions", "defining_positions", "running"}:
-        await update.message.reply_text("A debate is already active here. Use /debate status or /debate cancel.")
+        await update.message.reply_text("⚖️ A debate is already active here. Use /debate status or /debate cancel.")
         return
 
     topic = " ".join(args).strip()
     if not _topic_has_enough_substance(topic):
-        await update.message.reply_text("Give me a debate topic with enough substance, for example: /debate A progressive tax rate")
+        await update.message.reply_text("⚖️ Give me a debate topic with enough substance, for example: /debate A progressive tax rate")
         return
 
     session = DebateSession(
@@ -1018,7 +1051,7 @@ async def handle_debate_message(update, context, content_text: str) -> bool:
         return False
     if _looks_like_acceptance(text):
         _start_debate_task(session, context.bot)
-        await update.message.reply_text("Beginning the formal debate.")
+        await update.message.reply_text("🎙️ Beginning the formal debate.")
         return True
     if any(word in text.lower() for word in ("cancel", "stop", "discard")):
         await _cancel_session_object(context.bot, session)
@@ -1055,4 +1088,4 @@ async def handle_debate_callback(update, context) -> None:
             await query.message.reply_text(f"That debate is currently {session.status}.")
             return
         _start_debate_task(session, context.bot)
-        await query.message.reply_text("Beginning the formal debate.")
+        await query.message.reply_text("🎙️ Beginning the formal debate.")
