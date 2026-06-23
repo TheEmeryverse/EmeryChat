@@ -81,6 +81,8 @@ WEATHER_LOCATIONS_FILE_PATH = os.getenv("WEATHER_LOCATIONS_FILE_PATH", str(CONFI
 JOBS_FILE_PATH = os.getenv("JOBS_FILE_PATH", str(CONFIG_DIR / "custom_jobs.json"))
 EXPERT_ARCHIVE_DIR = os.getenv("EXPERT_ARCHIVE_DIR", "data/expert")
 EXPERT_INDEX_PATH = os.getenv("EXPERT_INDEX_PATH", str(CONFIG_DIR / "expert_sessions.json"))
+DEBATE_ARCHIVE_DIR = os.getenv("DEBATE_ARCHIVE_DIR", "data/debate")
+DEBATE_INDEX_PATH = os.getenv("DEBATE_INDEX_PATH", str(CONFIG_DIR / "debate_sessions.json"))
 
 
 DEFAULT_NEWS_FEEDS = [

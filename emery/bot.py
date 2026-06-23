@@ -249,6 +249,14 @@ def _help_text() -> str:
         "Use the inline buttons to continue researching, refine the report, close/archive, or cancel.",
         "Typed replies like \"move on\" or \"archive this\" close and archive the active expert session.",
         "",
+        "<b>Debate mode</b>",
+        "/debate &lt;topic&gt; - Start a four-role debate with Moderator, Pro-side, Anti-side, and Clerk.",
+        "/debate status - Show the active debate status for this chat/thread.",
+        "/debate list - Show archived debates.",
+        "/debate open &lt;id&gt; - Send an archived debate memo.",
+        "/debate clear - Delete archived debates.",
+        "/debate cancel - Cancel the active debate.",
+        "",
         "<b>Natural language tools</b>",
         "You can also ask normally for reminders/routines, weather, web research, news, finance/econ data, images, voice replies, memory updates, smart-home actions, infrastructure checks, and recipe imports when those integrations are enabled.",
     ])
@@ -364,6 +372,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Expert sessions own their chat/thread while waiting for user direction.
     # Route typed answers and close/archive intents there before normal chat handling.
     if update.message.text:
+        from emery.debate import handle_debate_message
+        if await handle_debate_message(update, context, content_text):
+            return
         from emery.expert import handle_expert_message
         if await handle_expert_message(update, context, content_text):
             return

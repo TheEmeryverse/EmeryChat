@@ -339,6 +339,8 @@ Routing behavior:
 - `/expert status` shows the current active expert session state
 - `/expert clear` deletes all archived expert reports and clears the archive index
 - `/expert cancel` cancels the active expert session in the current chat/thread
+- `/debate <topic>` starts a foreground four-role debate with Moderator, Pro-side, Anti-side, and Clerk research
+- `/debate status`, `/debate cancel`, `/debate list`, `/debate open <id>`, and `/debate clear` manage active and archived debates
 - Web search via SearXNG
 - Web content extraction and summarization
 - YouTube transcript extraction when `ENABLE_YOUTUBE_TRANSCRIPT=true`; expert mode uses transcripts for YouTube sources and does not count transcript failures as gathered sources
@@ -489,6 +491,7 @@ EmeryChat now generates and persists these files under `config/` on startup:
 - `config/weather_locations.json`: saved weather aliases like `home` and `work`
 - `config/custom_jobs.json`: scheduled jobs
 - `config/expert_sessions.json`: index of archived `/expert` research sessions
+- `config/debate_sessions.json`: index of archived `/debate` sessions
 
 These files are app-managed and should survive restarts and rebuilds when `config/` is bind-mounted in Docker.
 
@@ -508,6 +511,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_DOCLING`, `DOCLING_URL`, `DOCLING_BEARER_TOKEN` | Docling-backed document extraction for Telegram uploads and fetched PDF/DOCX/PPTX URLs |
 | `ENABLE_YOUTUBE_TRANSCRIPT` | YouTube transcript fetch for normal chat and `/expert` YouTube sources |
 | `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, archive resume/open behavior, and expert-specific model tuning |
+| `DEBATE_ARCHIVE_DIR`, `DEBATE_INDEX_PATH` | `/debate` memo, transcript, source appendix, and archive index paths |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |

@@ -18,6 +18,7 @@ from emery.bot import (
     bot_post_init,
     validate_telegram_access_policy
 )
+from emery.debate import handle_debate_callback, handle_debate_command
 from emery.expert import handle_expert_callback, handle_expert_command
 
 
@@ -65,7 +66,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("clear", handle_clear_command))
     application.add_handler(CommandHandler("wipe", handle_wipe_command))
     application.add_handler(CommandHandler("expert", handle_expert_command))
+    application.add_handler(CommandHandler("debate", handle_debate_command))
     application.add_handler(CallbackQueryHandler(handle_expert_callback, pattern=r"^expert:"))
+    application.add_handler(CallbackQueryHandler(handle_debate_callback, pattern=r"^debate:"))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION | filters.Document.ALL, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))
 
