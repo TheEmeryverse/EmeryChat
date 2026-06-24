@@ -74,6 +74,7 @@ class DebateSession:
     position_framing: str = ""
     user_inputs: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
+    search_queries: list[dict] = field(default_factory=list)
     research_packets: list[dict] = field(default_factory=list)
     role_briefs: dict = field(default_factory=dict)
     formal_turns: list[dict] = field(default_factory=list)
@@ -318,8 +319,11 @@ async def _summarize_source(session: DebateSession, result: dict, fetched: dict)
     content = str(fetched.get("content") or "")
     prompt = (
         "Summarize this source for a structured debate clerk packet. Return strict JSON with keys: "
-        "summary, key_claims, perspective, reliability_label. Keep it factual and concise.\n\n"
+        "summary, key_claims, perspective, reliability_label, relevance_note. Keep it factual and concise. "
+        "Focus on why this source is relevant to the debate topic and the research request; if relevance is weak, say so in relevance_note.\n\n"
         f"Debate topic: {session.topic}\n"
+        f"Search query: {result.get('query')}\n"
+        f"Search snippet: {result.get('snippet')}\n"
         f"Title: {fetched.get('title') or result.get('title')}\n"
         f"URL: {fetched.get('url') or result.get('url')}\n\n"
         f"Content:\n{content[:8000]}"
@@ -339,42 +343,190 @@ async def _summarize_source(session: DebateSession, result: dict, fetched: dict)
         "key_claims": parsed.get("key_claims") if isinstance(parsed.get("key_claims"), list) else [],
         "perspective": str(parsed.get("perspective") or "Unlabeled"),
         "reliability_label": str(parsed.get("reliability_label") or "Unlabeled"),
+        "relevance_note": str(parsed.get("relevance_note") or "").strip(),
     }
 
 
-async def _plan_clerk_queries(session: DebateSession, requester: str, phase: str, question: str, limit: int) -> list[str]:
+def _recent_search_query_text(session: DebateSession, limit: int = 12) -> str:
+    if not session.search_queries:
+        return "None yet."
+    recent = session.search_queries[-limit:]
+    return "\n".join(
+        f"- {item.get('requester')} [{item.get('phase')}]: {item.get('query')}"
+        for item in recent
+    )
+
+
+async def _refine_side_search_queries(
+    session: DebateSession,
+    side: str,
+    phase: str,
+    research_need: str,
+    max_queries: int,
+) -> list[str]:
+    prompt = (
+        "You are preparing research search terms for your debate position. Return strict JSON with key queries. "
+        "Generate precise search-engine queries that will find sources directly relevant to your assigned position and the specific research need. "
+        "Use concrete policy terms, comparison terms, likely source types, and disambiguating nouns. Avoid vague one-word searches. "
+        "Do not repeat prior queries.\n\n"
+        f"Topic: {session.topic}\n"
+        f"Your side: {_side_label(session, side)}\n"
+        f"Your position: {session.positions.get(side)}\n"
+        f"Phase: {phase}\n"
+        f"Research need: {research_need}\n\n"
+        f"Prior search queries:\n{_recent_search_query_text(session)}\n\n"
+        f"Return {max_queries} or fewer queries."
+    )
+    parsed = _extract_json_object(await _query_main_model(prompt, f"You are {_advocate_name(session, side)}, refining search terms for your debate side. Return only JSON.")) or {}
+    raw_queries = parsed.get("queries") if isinstance(parsed.get("queries"), list) else []
+    queries = [str(query).strip() for query in raw_queries if str(query).strip()]
+    if not queries:
+        queries = [f"{session.topic} {session.positions.get(side)} {research_need}".strip()]
+    return queries[:max_queries]
+
+
+async def _plan_clerk_queries(
+    session: DebateSession,
+    requester: str,
+    phase: str,
+    question: str,
+    limit: int,
+    seed_queries: list[str] | None = None,
+) -> list[str]:
+    side_context = ""
+    if requester in {"pro", "anti"}:
+        side_context = (
+            f"\nRequesting side: {_side_label(session, requester)}"
+            f"\nPosition represented: {session.positions.get(requester)}"
+        )
     prompt = (
         "Generate precise web search queries for the Clerk in a formal debate. Return strict JSON with key queries. "
-        "Use keyword-style queries, not natural-language questions.\n\n"
-        f"Topic: {session.topic}\nRequester: {requester}\nPhase: {phase}\nQuestion: {question}\n"
+        "Use keyword-style queries, not natural-language questions. "
+        "Queries must be directly relevant to the debate topic, the requesting side's position when present, and the specific research question. "
+        "Prefer sources likely to contain evidence, data, primary claims, expert analysis, or reputable summaries. "
+        "Do not drift into adjacent topics, generic definitions, or unrelated news.\n\n"
+        f"Topic: {session.topic}\nRequester: {requester}{side_context}\nPhase: {phase}\nQuestion: {question}\n"
+        f"Side-refined seed queries: {json.dumps(seed_queries or [], ensure_ascii=True)}\n"
+        f"Prior search queries:\n{_recent_search_query_text(session)}\n"
         f"Max queries: {min(4, max(1, limit))}"
     )
     parsed = _extract_json_object(await _query_clerk_model(prompt, "You generate compact debate research queries. Return only JSON.")) or {}
     raw_queries = parsed.get("queries") if isinstance(parsed.get("queries"), list) else []
-    queries = [str(query).strip() for query in raw_queries if str(query).strip()]
+    queries = [str(query).strip() for query in (seed_queries or []) if str(query).strip()]
+    queries.extend(str(query).strip() for query in raw_queries if str(query).strip())
+    deduped = []
+    seen = set()
+    for query in queries:
+        key = query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(query)
+    queries = deduped
     if not queries:
         queries = [f"{session.topic} {question}".strip()]
     return queries[: min(4, max(1, limit))]
 
 
-async def _clerk_research(session: DebateSession, requester: str, phase: str, question: str, max_sources: int, bot=None) -> dict:
+async def _filter_relevant_search_results(
+    session: DebateSession,
+    requester: str,
+    phase: str,
+    question: str,
+    results: list[dict],
+    max_results: int,
+) -> list[dict]:
+    if not results:
+        return []
+    side_context = ""
+    if requester in {"pro", "anti"}:
+        side_context = (
+            f"\nRequesting side: {_side_label(session, requester)}"
+            f"\nPosition represented: {session.positions.get(requester)}"
+        )
+    candidates = [
+        {
+            "index": index,
+            "title": result.get("title"),
+            "url": result.get("url"),
+            "domain": result.get("domain"),
+            "snippet": result.get("snippet"),
+            "query": result.get("query"),
+        }
+        for index, result in enumerate(results[:24])
+    ]
+    prompt = (
+        "Select only search results that are relevant enough to fetch for a formal debate research packet. "
+        "Return strict JSON with key selected_indexes, an array of integer indexes. "
+        "A result is relevant only if its title/snippet/domain indicate it can help answer the research need for this debate topic and side. "
+        "Reject generic, tangential, unrelated, stale-looking, or clickbait results. "
+        "If fewer than the requested maximum are relevant, return fewer. If none are clearly relevant, return an empty array.\n\n"
+        f"Topic: {session.topic}\nRequester: {requester}{side_context}\nPhase: {phase}\nResearch need: {question}\n"
+        f"Maximum selected results: {max_results}\n\n"
+        f"Candidates JSON:\n{json.dumps(candidates, ensure_ascii=True)[:12000]}"
+    )
+    parsed = _extract_json_object(await _query_clerk_model(prompt, "You are the Clerk. Filter debate search results for relevance. Return only JSON."))
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("selected_indexes"), list):
+        return results[:max_results]
+
+    selected = parsed.get("selected_indexes")
+    selected_indexes = []
+    for raw in selected:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(results) and index not in selected_indexes:
+            selected_indexes.append(index)
+        if len(selected_indexes) >= max_results:
+            break
+    if selected_indexes:
+        return [results[index] for index in selected_indexes]
+    return []
+
+
+async def _clerk_research(
+    session: DebateSession,
+    requester: str,
+    phase: str,
+    question: str,
+    max_sources: int,
+    bot=None,
+    seed_queries: list[str] | None = None,
+) -> dict:
     max_sources = max(0, int(max_sources))
-    queries = await _plan_clerk_queries(session, requester, phase, question, max_sources or 1)
+    queries = await _plan_clerk_queries(session, requester, phase, question, max_sources or 1, seed_queries=seed_queries)
     seen = {source.get("normalized_url") for source in session.sources if source.get("normalized_url")}
-    targets = []
+    candidates = []
+    candidate_limit = max(max_sources * 4, max_sources)
 
     for query in queries:
-        if len(targets) >= max_sources:
+        if len(candidates) >= candidate_limit:
             break
+        session.search_queries.append({
+            "requester": requester,
+            "phase": phase,
+            "query": query,
+            "created_at": _now_label(),
+        })
         results = await _search_web(query)
         for result in results:
             normalized = result.get("normalized_url")
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            targets.append(result)
-            if len(targets) >= max_sources:
+            candidates.append(result)
+            if len(candidates) >= candidate_limit:
                 break
+
+    targets = await _filter_relevant_search_results(
+        session,
+        requester,
+        phase,
+        question,
+        candidates,
+        max_sources,
+    )
 
     new_sources = []
     for target in targets[:max_sources]:
@@ -391,6 +543,7 @@ async def _clerk_research(session: DebateSession, requester: str, phase: str, qu
         "phase": phase,
         "question": question,
         "queries": queries,
+        "candidate_count": len(candidates),
         "source_ids": [source["id"] for source in new_sources],
         "summary": packet_summary,
         "created_at": _now_label(),
@@ -566,6 +719,13 @@ async def _generate_side_questions(session: DebateSession, side: str, light_pack
 
 async def _prepare_side(bot, session: DebateSession, side: str) -> str:
     position = session.positions.get(side, "")
+    light_queries = await _refine_side_search_queries(
+        session,
+        side,
+        "side_light",
+        f"Find initial evidence for this position: {position}",
+        max_queries=3,
+    )
     light_packet = await _clerk_research(
         session,
         requester=side,
@@ -573,15 +733,25 @@ async def _prepare_side(bot, session: DebateSession, side: str) -> str:
         question=f"Find initial evidence for this position: {position}",
         max_sources=SIDE_LIGHT_SOURCE_LIMIT,
         bot=bot,
+        seed_queries=light_queries,
     )
     questions = await _generate_side_questions(session, side, light_packet)
+    deep_research_need = "; ".join(questions)
+    deep_queries = await _refine_side_search_queries(
+        session,
+        side,
+        "side_deep",
+        deep_research_need,
+        max_queries=4,
+    )
     deep_packet = await _clerk_research(
         session,
         requester=side,
         phase="side_deep",
-        question="; ".join(questions),
+        question=deep_research_need,
         max_sources=SIDE_DEEP_SOURCE_LIMIT,
         bot=bot,
+        seed_queries=deep_queries,
     )
     prompt = (
         "Build this side's private debate brief. Return concise prose with thesis, best evidence, likely objections, and response strategy. "
@@ -625,6 +795,13 @@ async def _moderator_questions(session: DebateSession) -> list[str]:
 
 async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, question: str, round_number: int, opponent_text: str = "") -> str:
     if kind == "answer":
+        round_queries = await _refine_side_search_queries(
+            session,
+            side,
+            f"round_{round_number}",
+            f"{question}\nPosition: {session.positions.get(side)}",
+            max_queries=2,
+        )
         await _clerk_research(
             session,
             requester=side,
@@ -632,6 +809,7 @@ async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, qu
             question=f"{question}\nPosition: {session.positions.get(side)}",
             max_sources=ROUND_SOURCE_LIMIT,
             bot=bot,
+            seed_queries=round_queries,
         )
     prompt = (
         f"Write the {kind} for this debate round. Stay in role. Cite source IDs only if they appear in your private packets. "
