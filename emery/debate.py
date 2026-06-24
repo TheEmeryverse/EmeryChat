@@ -152,6 +152,18 @@ def _extract_json_object(text: str):
         return None
 
 
+def _extract_query_list(parsed) -> list[str]:
+    if isinstance(parsed, dict):
+        raw_queries = parsed.get("queries")
+    elif isinstance(parsed, list):
+        raw_queries = parsed
+    else:
+        raw_queries = []
+    if not isinstance(raw_queries, list):
+        return []
+    return [str(query).strip() for query in raw_queries if str(query).strip()]
+
+
 def _message_content_to_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -392,9 +404,8 @@ async def _refine_side_search_queries(
         f"Prior search queries:\n{_recent_search_query_text(session)}\n\n"
         f"Return {max_queries} or fewer queries."
     )
-    parsed = _extract_json_object(await _query_main_model(prompt, f"You are {_advocate_name(session, side)}, refining search terms for your debate side. Return only JSON.")) or {}
-    raw_queries = parsed.get("queries") if isinstance(parsed.get("queries"), list) else []
-    queries = [str(query).strip() for query in raw_queries if str(query).strip()]
+    parsed = _extract_json_object(await _query_main_model(prompt, f"You are {_advocate_name(session, side)}, refining search terms for your debate side. Return only JSON."))
+    queries = _extract_query_list(parsed)
     if not queries:
         queries = [f"{session.topic} {session.positions.get(side)} {research_need}".strip()]
     logging.info(
@@ -432,10 +443,9 @@ async def _plan_clerk_queries(
         f"Prior search queries:\n{_recent_search_query_text(session)}\n"
         f"Max queries: {min(4, max(1, limit))}"
     )
-    parsed = _extract_json_object(await _query_clerk_model(prompt, "You generate compact debate research queries. Return only JSON.")) or {}
-    raw_queries = parsed.get("queries") if isinstance(parsed.get("queries"), list) else []
+    parsed = _extract_json_object(await _query_clerk_model(prompt, "You generate compact debate research queries. Return only JSON."))
     queries = [str(query).strip() for query in (seed_queries or []) if str(query).strip()]
-    queries.extend(str(query).strip() for query in raw_queries if str(query).strip())
+    queries.extend(_extract_query_list(parsed))
     deduped = []
     seen = set()
     for query in queries:
