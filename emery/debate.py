@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -205,7 +206,16 @@ async def _query_chat_model(
     repetition_penalty: float,
     enable_thinking: bool,
     lock,
+    endpoint_label: str,
 ) -> str:
+    logging.info(
+        "DEBATE MODE: querying %s %s endpoint with max_tokens=%s temp=%s top_p=%s",
+        model_id,
+        endpoint_label,
+        max_tokens,
+        temperature,
+        top_p,
+    )
     payload = {
         "model": model_id,
         "messages": [
@@ -226,13 +236,13 @@ async def _query_chat_model(
         async with lock:
             response = await globals.http_client.post(url, json=payload, timeout=900)
         if response.status_code != 200:
-            logging.error("DEBATE: model endpoint returned HTTP %s: %s", response.status_code, safe_preview(response.text))
+            logging.error("DEBATE: %s endpoint returned HTTP %s: %s", endpoint_label, response.status_code, safe_preview(response.text))
             return ""
         data = response.json()
         message = ((data.get("choices") or [{}])[0]).get("message", {})
         return _clean_thinking_tags(_message_content_to_text(message.get("content"))).strip()
     except Exception as exc:
-        logging.error("DEBATE: model query failed: %s", exc, exc_info=True)
+        logging.error("DEBATE: %s endpoint query failed: %s", endpoint_label, exc, exc_info=True)
         return ""
 
 
@@ -251,6 +261,7 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
         repetition_penalty=EXPERT_MAIN_REPETITION_PENALTY,
         enable_thinking=EXPERT_MAIN_ENABLE_THINKING,
         lock=globals.main_model_lock,
+        endpoint_label="primary",
     )
 
 
@@ -269,10 +280,12 @@ async def _query_clerk_model(prompt: str, system_prompt: str) -> str:
         repetition_penalty=EXPERT_FAST_REPETITION_PENALTY,
         enable_thinking=EXPERT_FAST_ENABLE_THINKING,
         lock=globals.fast_model_lock,
+        endpoint_label="clerk",
     )
 
 
 async def _search_web(query: str) -> list[dict]:
+    logging.info("🔧 DEBATE TOOL: web_search | Args: %s", format_logging_payload({"query": query}))
     try:
         response = await globals.http_client.get(SEARXNG_URL, params={"q": query, "format": "json"}, timeout=40)
         results = response.json().get("results") or []
@@ -294,6 +307,7 @@ async def _search_web(query: str) -> list[dict]:
             "domain": _source_domain(url),
             "snippet": str(item.get("content") or item.get("snippet") or "").strip(),
         })
+    logging.info("DEBATE: Search query returned %d usable result(s): %r", len(clean), query)
     return clean
 
 
@@ -305,14 +319,14 @@ def _is_youtube_url(url: str) -> bool:
 async def _fetch_source_content(result: dict) -> dict:
     url = str(result.get("url") or "").strip()
     if ENABLE_YOUTUBE_TRANSCRIPT and _is_youtube_url(url):
-        logging.info("DEBATE TOOL: get_youtube_transcript | Args: %s", format_logging_payload({"video_url_or_id": url}))
+        logging.info("🔧 DEBATE TOOL: get_youtube_transcript | Args: %s", format_logging_payload({"video_url_or_id": url}))
         transcript = await get_youtube_transcript(url, languages="en", include_timestamps=False)
         transcript_text = str(transcript or "").strip()
         if transcript_text and not transcript_text.lower().startswith("youtube transcript error"):
             return {"success": True, "title": result.get("title") or "YouTube transcript", "url": url, "content": transcript_text}
         return {"success": False, "title": result.get("title") or "YouTube video", "url": url, "error": transcript_text or "Transcript unavailable.", "content": ""}
 
-    logging.info("DEBATE TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": url}))
+    logging.info("🔧 DEBATE TOOL: fetch_web_content | Args: %s", format_logging_payload({"url": url}))
     return await fetch_web_content(url, max_chars=10000, summarize_long=False)
 
 
@@ -383,6 +397,13 @@ async def _refine_side_search_queries(
     queries = [str(query).strip() for query in raw_queries if str(query).strip()]
     if not queries:
         queries = [f"{session.topic} {session.positions.get(side)} {research_need}".strip()]
+    logging.info(
+        "DEBATE: %s refined %d search query/queries for phase=%s session=%s",
+        _side_label(session, side),
+        min(len(queries), max_queries),
+        phase,
+        session.id,
+    )
     return queries[:max_queries]
 
 
@@ -426,6 +447,14 @@ async def _plan_clerk_queries(
     queries = deduped
     if not queries:
         queries = [f"{session.topic} {question}".strip()]
+    logging.info(
+        "DEBATE: Clerk planned %d query/queries for session=%s requester=%s phase=%s seeds=%d",
+        min(len(queries), min(4, max(1, limit))),
+        session.id,
+        requester,
+        phase,
+        len(seed_queries or []),
+    )
     return queries[: min(4, max(1, limit))]
 
 
@@ -468,6 +497,13 @@ async def _filter_relevant_search_results(
     )
     parsed = _extract_json_object(await _query_clerk_model(prompt, "You are the Clerk. Filter debate search results for relevance. Return only JSON."))
     if not isinstance(parsed, dict) or not isinstance(parsed.get("selected_indexes"), list):
+        logging.warning(
+            "DEBATE: Clerk relevance filter returned malformed output; using top %d candidate(s) for session=%s requester=%s phase=%s",
+            max_results,
+            session.id,
+            requester,
+            phase,
+        )
         return results[:max_results]
 
     selected = parsed.get("selected_indexes")
@@ -482,7 +518,22 @@ async def _filter_relevant_search_results(
         if len(selected_indexes) >= max_results:
             break
     if selected_indexes:
+        logging.info(
+            "DEBATE: Clerk relevance filter selected %d/%d candidate(s) for session=%s requester=%s phase=%s",
+            len(selected_indexes),
+            len(results),
+            session.id,
+            requester,
+            phase,
+        )
         return [results[index] for index in selected_indexes]
+    logging.info(
+        "DEBATE: Clerk relevance filter rejected all %d candidate(s) for session=%s requester=%s phase=%s",
+        len(results),
+        session.id,
+        requester,
+        phase,
+    )
     return []
 
 
@@ -496,6 +547,14 @@ async def _clerk_research(
     seed_queries: list[str] | None = None,
 ) -> dict:
     max_sources = max(0, int(max_sources))
+    logging.info(
+        "DEBATE: Clerk research starting session=%s requester=%s phase=%s max_sources=%d seed_queries=%d",
+        session.id,
+        requester,
+        phase,
+        max_sources,
+        len(seed_queries or []),
+    )
     queries = await _plan_clerk_queries(session, requester, phase, question, max_sources or 1, seed_queries=seed_queries)
     seen = {source.get("normalized_url") for source in session.sources if source.get("normalized_url")}
     candidates = []
@@ -535,6 +594,15 @@ async def _clerk_research(
         source = await _summarize_source(session, target, fetched)
         session.sources.append(source)
         new_sources.append(source)
+        logging.info(
+            "DEBATE: Clerk added source %s for session=%s requester=%s phase=%s domain=%s fetch_success=%s",
+            source.get("id"),
+            session.id,
+            requester,
+            phase,
+            source.get("domain"),
+            source.get("fetch_success"),
+        )
         await _send_clerk_source_notice(bot, session, source)
 
     packet_summary = await _summarize_research_packet(session, requester, phase, question, new_sources)
@@ -552,6 +620,16 @@ async def _clerk_research(
     }
     session.research_packets.append(packet)
     session.touch()
+    logging.info(
+        "DEBATE: Clerk research completed session=%s packet=%s requester=%s phase=%s queries=%d candidates=%d sources=%d",
+        session.id,
+        packet["id"],
+        requester,
+        phase,
+        len(queries),
+        len(candidates),
+        len(new_sources),
+    )
     return packet
 
 
@@ -636,6 +714,7 @@ def _record_formal_turn(session: DebateSession, speaker: str, kind: str, content
 
 
 async def _moderator_initial_research_brief(session: DebateSession) -> dict:
+    logging.info("DEBATE: Moderator creating initial Clerk research brief for session=%s topic=%r", session.id, session.topic)
     prompt = (
         "You are the neutral Moderator preparing to call a debate. Before the Clerk researches, give the Clerk a narrow research brief. "
         "Return strict JSON with keys: research_question, scope, relevance_criteria, seed_queries. "
@@ -661,7 +740,7 @@ async def _moderator_initial_research_brief(session: DebateSession) -> dict:
     if not seed_queries:
         seed_queries = [f"{session.topic} opposing positions debate"]
 
-    return {
+    brief = {
         "research_question": (
             f"{research_question}\n\n"
             f"Moderator scope: {scope}\n"
@@ -672,9 +751,12 @@ async def _moderator_initial_research_brief(session: DebateSession) -> dict:
         "seed_queries": seed_queries,
         "created_at": _now_label(),
     }
+    logging.info("DEBATE: Moderator initial Clerk brief ready for session=%s seed_queries=%d", session.id, len(seed_queries))
+    return brief
 
 
 async def _define_positions(session: DebateSession, bot=None) -> None:
+    logging.info("DEBATE: Position definition starting for session=%s topic=%r", session.id, session.topic)
     brief = await _moderator_initial_research_brief(session)
     session.initial_research_brief = brief
     packet = await _clerk_research(
@@ -710,9 +792,16 @@ async def _define_positions(session: DebateSession, bot=None) -> None:
     session.position_framing = str(parsed.get("framing") or "").strip()
     session.status = "defining_positions"
     session.touch()
+    logging.info(
+        "DEBATE: Position definition completed for session=%s pro=%r anti=%r",
+        session.id,
+        _side_label(session, "pro"),
+        _side_label(session, "anti"),
+    )
 
 
 async def _revise_positions(session: DebateSession, instruction: str) -> None:
+    logging.info("DEBATE: Position revision requested for session=%s instruction_chars=%d", session.id, len(str(instruction or "")))
     prompt = (
         "Revise the debate positions according to the user's instruction. Return strict JSON with keys: "
         "pro_name, anti_name, pro_advocate_name, anti_advocate_name, pro, anti, framing. "
@@ -740,6 +829,12 @@ async def _revise_positions(session: DebateSession, instruction: str) -> None:
         session.position_framing = str(parsed.get("framing")).strip()
     session.user_inputs.append({"time": _now_label(), "text": instruction, "state": session.status})
     session.touch()
+    logging.info(
+        "DEBATE: Position revision completed for session=%s pro=%r anti=%r",
+        session.id,
+        _side_label(session, "pro"),
+        _side_label(session, "anti"),
+    )
 
 
 async def _generate_side_questions(session: DebateSession, side: str, light_packet: dict) -> list[str]:
@@ -757,10 +852,17 @@ async def _generate_side_questions(session: DebateSession, side: str, light_pack
             f"What objections to {session.positions.get(side)} must be answered?",
             f"What tradeoffs matter most for {session.topic}?",
         ]
+    logging.info(
+        "DEBATE: %s generated %d deep research question(s) for session=%s",
+        _side_label(session, side),
+        min(len(questions), 6),
+        session.id,
+    )
     return questions[:6]
 
 
 async def _prepare_side(bot, session: DebateSession, side: str) -> str:
+    logging.info("DEBATE: Preparing side session=%s side=%s label=%r", session.id, side, _side_label(session, side))
     position = session.positions.get(side, "")
     light_queries = await _refine_side_search_queries(
         session,
@@ -809,10 +911,19 @@ async def _prepare_side(bot, session: DebateSession, side: str) -> str:
     )
     thesis = await _query_main_model(thesis_prompt, f"You are the {side} side in a formal debate.")
     _record_formal_turn(session, side, "opening_thesis", thesis or session.role_briefs.get(side, ""))
+    logging.info(
+        "DEBATE: Side preparation completed session=%s side=%s research_packets=%d total_sources=%d opening_chars=%d",
+        session.id,
+        side,
+        len(_research_packets_for_side(session, side)),
+        len(session.sources),
+        len(thesis or session.role_briefs.get(side, "")),
+    )
     return thesis or session.role_briefs.get(side, "")
 
 
 async def _moderator_questions(session: DebateSession) -> list[str]:
+    logging.info("DEBATE: Moderator generating formal question rounds for session=%s", session.id)
     prompt = (
         "Create 3-5 distinct formal debate round questions based only on the positions and opening theses. "
         "Return strict JSON with key questions. Do not use private research packets. "
@@ -830,13 +941,16 @@ async def _moderator_questions(session: DebateSession) -> list[str]:
             f"Which tradeoffs matter most when comparing both positions on {session.topic}?",
             f"How should the evidence offered by both positions be weighed?",
         ]
-    return questions[:MAX_DEBATE_ROUNDS] if len(questions) >= MIN_DEBATE_ROUNDS else (questions + [
+    final_questions = questions[:MAX_DEBATE_ROUNDS] if len(questions) >= MIN_DEBATE_ROUNDS else (questions + [
         "How should implementation risks be compared across both positions?",
         "How should second-order consequences be compared across both positions?",
     ])[:MIN_DEBATE_ROUNDS]
+    logging.info("DEBATE: Moderator set %d formal question round(s) for session=%s", len(final_questions), session.id)
+    return final_questions
 
 
 async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, question: str, round_number: int, opponent_text: str = "") -> str:
+    logging.info("DEBATE: Generating %s turn session=%s round=%d side=%s", kind, session.id, round_number, side)
     if kind == "answer":
         round_queries = await _refine_side_search_queries(
             session,
@@ -861,10 +975,13 @@ async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, qu
         f"Opponent text to address: {opponent_text or 'None yet.'}\n\n"
         f"{_build_side_context(session, side)}"
     )
-    return await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
+    text = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
+    logging.info("DEBATE: Generated %s turn session=%s round=%d side=%s chars=%d", kind, session.id, round_number, side, len(text or ""))
+    return text
 
 
 async def _judge_round(session: DebateSession, round_number: int, question: str) -> dict:
+    logging.info("DEBATE: Moderator judging round session=%s round=%d", session.id, round_number)
     prompt = (
         "Judge this debate round based only on the formal transcript. Return strict JSON with keys: winner, rationale. "
         "winner must be pro, anti, or tie.\n\n"
@@ -881,10 +998,12 @@ async def _judge_round(session: DebateSession, round_number: int, question: str)
         "rationale": str(parsed.get("rationale") or "The Moderator did not return a rationale.").strip(),
     }
     session.round_results.append(result)
+    logging.info("DEBATE: Moderator judged round session=%s round=%d winner=%s", session.id, round_number, winner)
     return result
 
 
 async def _run_question_round(bot, session: DebateSession, round_number: int, question: str) -> None:
+    logging.info("DEBATE: Question round started session=%s round=%d", session.id, round_number)
     first, second = ("pro", "anti") if round_number % 2 == 1 else ("anti", "pro")
     first_answer = await _round_side_turn(bot, session, first, "answer", question, round_number)
     _record_formal_turn(session, first, "answer", first_answer, round_number=round_number)
@@ -918,9 +1037,11 @@ async def _run_question_round(bot, session: DebateSession, round_number: int, qu
             anti_full_response,
         ),
     )
+    logging.info("DEBATE: Question round completed session=%s round=%d", session.id, round_number)
 
 
 async def _final_side_thesis(session: DebateSession, side: str) -> None:
+    logging.info("DEBATE: Generating final thesis session=%s side=%s", session.id, side)
     prompt = (
         "Write this side's final thesis after all rounds. Address the formal debate record and preserve your position. "
         "Return only the formal final thesis.\n\n"
@@ -928,9 +1049,11 @@ async def _final_side_thesis(session: DebateSession, side: str) -> None:
     )
     thesis = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
     _record_formal_turn(session, side, "final_thesis", thesis, round_number=len(session.debate_questions) + 1)
+    logging.info("DEBATE: Final thesis generated session=%s side=%s chars=%d", session.id, side, len(thesis or ""))
 
 
 async def _build_final_memo(session: DebateSession) -> str:
+    logging.info("DEBATE: Moderator synthesizing final memo session=%s", session.id)
     pro_wins = sum(1 for result in session.round_results if result.get("winner") == "pro")
     anti_wins = sum(1 for result in session.round_results if result.get("winner") == "anti")
     tie_count = sum(1 for result in session.round_results if result.get("winner") == "tie")
@@ -942,6 +1065,7 @@ async def _build_final_memo(session: DebateSession) -> str:
         f"{score_line}\n\n{_build_moderator_context(session)}"
     )
     memo = await _query_main_model(prompt, "You are the neutral Moderator writing the final debate decision memo.")
+    logging.info("DEBATE: Moderator final memo generated session=%s chars=%d", session.id, len(memo or ""))
     return memo.strip() or f"Debate complete.\n\n{score_line}"
 
 
@@ -970,6 +1094,38 @@ async def _send_status(bot, session: DebateSession, text: str, *, reply_markup=N
     if parse_mode:
         kwargs["parse_mode"] = parse_mode
     return await bot.send_message(**kwargs)
+
+
+async def _send_debate_typing_once(bot, session: DebateSession) -> None:
+    try:
+        await bot.send_chat_action(
+            chat_id=session.chat_id,
+            action="typing",
+            message_thread_id=session.message_thread_id,
+        )
+    except Exception as exc:
+        logging.debug("DEBATE MODE %s: typing indicator failed: %s", session.id, exc)
+
+
+async def _debate_typing_loop(bot, session: DebateSession, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        await _send_debate_typing_once(bot, session)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=4)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _start_debate_typing(bot, session: DebateSession) -> tuple[asyncio.Event, asyncio.Task]:
+    stop_event = asyncio.Event()
+    return stop_event, asyncio.create_task(_debate_typing_loop(bot, session, stop_event))
+
+
+async def _stop_debate_typing(stop_event: asyncio.Event, task: asyncio.Task) -> None:
+    stop_event.set()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 async def _send_long_text(bot, session: DebateSession, text: str) -> None:
@@ -1035,7 +1191,10 @@ def _collapsed_argument_section(title: str, full_text: str) -> str:
 
 def _visible_summary_section(session: DebateSession, side: str, heading: str, summary: str, full_text: str) -> str:
     icon = "🔴" if side == "pro" else "🔵"
-    title = f"{icon} {_side_name(session, side)} {heading}"
+    if heading.lower() == "response":
+        title = f"{icon} {_advocate_name(session, side)} responds"
+    else:
+        title = f"{icon} {_advocate_name(session, side)} {heading}"
     return "\n\n".join([
         f"<b>{_telegram_escape(title)}:</b>",
         _telegram_escape(summary),
@@ -1111,18 +1270,24 @@ async def _send_position_prompt(bot, session: DebateSession) -> None:
 
 
 async def _run_position_definition(session: DebateSession, bot) -> None:
+    typing_stop, typing_task = _start_debate_typing(bot, session)
     try:
         ACTIVE_DEBATES[session.key()] = session
+        logging.info("DEBATE: Position setup task started session=%s", session.id)
         await _define_positions(session)
         await _send_position_prompt(bot, session)
+        logging.info("DEBATE: Position setup task ready for user approval session=%s", session.id)
     except Exception as exc:
         session.status = "error"
         logging.error("DEBATE: Position definition failed for %s: %s", session.id, exc, exc_info=True)
         await _send_status(bot, session, f"⚠️ Debate setup failed: {exc}")
+    finally:
+        await _stop_debate_typing(typing_stop, typing_task)
 
 
 async def _run_debate_session(session: DebateSession, bot) -> None:
     current_task = asyncio.current_task()
+    typing_stop, typing_task = _start_debate_typing(bot, session)
     globals.register_foreground_loop(
         session.id,
         loop_type="debate",
@@ -1133,6 +1298,13 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         ACTIVE_DEBATES[session.key()] = session
         session.status = "running"
         session.touch()
+        logging.info(
+            "DEBATE: Session started session=%s topic=%r pro=%r anti=%r",
+            session.id,
+            session.topic,
+            _side_label(session, "pro"),
+            _side_label(session, "anti"),
+        )
         await _send_status(bot, session, f"🔴 {_advocate_name(session, 'pro')} is researching in preparation for the debate.")
         pro_opening = await _prepare_side(bot, session, "pro")
         await _send_status(bot, session, f"🔵 {_advocate_name(session, 'anti')} is researching in preparation for the debate.")
@@ -1147,18 +1319,27 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         session.final_memo = await _build_final_memo(session)
         session.source_appendix = _build_source_appendix(session)
         session.status = "completed"
-        _archive_session(session)
+        archive_path = _archive_session(session)
+        logging.info(
+            "DEBATE: Session completed session=%s rounds=%d sources=%d archive=%s",
+            session.id,
+            len(session.round_results),
+            len(session.sources),
+            archive_path,
+        )
         await _send_long_text(bot, session, session.final_memo)
         await _send_long_text(bot, session, session.source_appendix)
         ACTIVE_DEBATES.pop(session.key(), None)
     except asyncio.CancelledError:
         session.status = "cancelled"
+        logging.info("DEBATE: Session cancelled session=%s", session.id)
         raise
     except Exception as exc:
         session.status = "error"
         logging.error("DEBATE: Session %s failed: %s", session.id, exc, exc_info=True)
         await _send_status(bot, session, f"⚠️ Debate failed: {exc}")
     finally:
+        await _stop_debate_typing(typing_stop, typing_task)
         globals.unregister_foreground_loop(session.id)
         if DEBATE_TASKS.get(session.id) is current_task:
             DEBATE_TASKS.pop(session.id, None)
@@ -1167,7 +1348,9 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
 def _start_debate_task(session: DebateSession, bot) -> None:
     existing = DEBATE_TASKS.get(session.id)
     if existing and not existing.done():
+        logging.info("DEBATE: Cancelling existing debate task before restart session=%s", session.id)
         existing.cancel()
+    logging.info("DEBATE: Starting formal debate task session=%s", session.id)
     task = asyncio.create_task(_run_debate_session(session, bot))
     DEBATE_TASKS[session.id] = task
 
@@ -1189,6 +1372,7 @@ def _active_session_for_update(update) -> DebateSession | None:
 
 
 async def _cancel_session_object(bot, session: DebateSession) -> None:
+    logging.info("DEBATE: Cancellation requested session=%s status=%s", session.id, session.status)
     task = DEBATE_TASKS.pop(session.id, None)
     if task and not task.done():
         task.cancel()
@@ -1224,6 +1408,7 @@ def _save_index(entries: list[dict]) -> None:
 
 
 def _archive_session(session: DebateSession) -> Path:
+    logging.info("DEBATE: Archiving session=%s topic=%r sources=%d rounds=%d", session.id, session.topic, len(session.sources), len(session.round_results))
     root = _archive_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = root / f"{datetime.now(USER_TIMEZONE).strftime('%Y%m%d-%H%M%S')}-{_slugify(session.topic)}-{session.id}"
@@ -1247,6 +1432,7 @@ def _archive_session(session: DebateSession) -> Path:
         "round_count": len(session.round_results),
     })
     _save_index(entries)
+    logging.info("DEBATE: Archived session=%s path=%s", session.id, folder)
     return folder
 
 
@@ -1394,6 +1580,14 @@ async def handle_debate_command(update, context) -> None:
         user_id=update.effective_user.id if update.effective_user else None,
     )
     ACTIVE_DEBATES[key] = session
+    logging.info(
+        "DEBATE: Command accepted session=%s chat_id=%s thread_id=%s topic=%r",
+        session.id,
+        chat_id,
+        thread_id,
+        topic,
+    )
+    await update.message.reply_text("🗣️ Debate Mode Active! 👩🏼‍⚖️ Moderator is preparing the debate.")
     await _run_position_definition(session, context.bot)
 
 
@@ -1416,8 +1610,12 @@ async def handle_debate_message(update, context, content_text: str) -> bool:
     if any(word in text.lower() for word in ("cancel", "stop", "discard")):
         await _cancel_session_object(context.bot, session)
         return True
-    await _revise_positions(session, text)
-    await _send_position_prompt(context.bot, session)
+    typing_stop, typing_task = _start_debate_typing(context.bot, session)
+    try:
+        await _revise_positions(session, text)
+        await _send_position_prompt(context.bot, session)
+    finally:
+        await _stop_debate_typing(typing_stop, typing_task)
     return True
 
 
