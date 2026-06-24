@@ -72,6 +72,7 @@ class DebateSession:
     side_names: dict = field(default_factory=dict)
     advocate_names: dict = field(default_factory=dict)
     position_framing: str = ""
+    initial_research_brief: dict = field(default_factory=dict)
     user_inputs: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
     search_queries: list[dict] = field(default_factory=list)
@@ -634,14 +635,56 @@ def _record_formal_turn(session: DebateSession, speaker: str, kind: str, content
     session.touch()
 
 
+async def _moderator_initial_research_brief(session: DebateSession) -> dict:
+    prompt = (
+        "You are the neutral Moderator preparing to call a debate. Before the Clerk researches, give the Clerk a narrow research brief. "
+        "Return strict JSON with keys: research_question, scope, relevance_criteria, seed_queries. "
+        "The brief should help identify the two most debate-ready opposing positions for the topic. "
+        "Keep the scope neutral; do not decide the winning side. "
+        "relevance_criteria must tell the Clerk what counts as on-topic evidence and what to reject. "
+        "seed_queries must be 1-3 precise web-search queries, not natural-language questions.\n\n"
+        f"Topic: {session.topic}"
+    )
+    parsed = _extract_json_object(await _query_main_model(prompt, "You are a neutral debate Moderator. Return only JSON.")) or {}
+    seed_queries = parsed.get("seed_queries") if isinstance(parsed.get("seed_queries"), list) else []
+    seed_queries = [str(query).strip() for query in seed_queries if str(query).strip()][:3]
+    research_question = str(parsed.get("research_question") or "").strip()
+    scope = str(parsed.get("scope") or "").strip()
+    relevance_criteria = str(parsed.get("relevance_criteria") or "").strip()
+
+    if not research_question:
+        research_question = f"Identify the major opposing positions in this debate topic: {session.topic}"
+    if not scope:
+        scope = "Find sources that describe mainstream opposing positions and the key disputed criteria, not advocacy for a winner."
+    if not relevance_criteria:
+        relevance_criteria = "Prefer sources that directly explain competing positions on the topic; reject generic definitions, unrelated news, and one-sided tangents."
+    if not seed_queries:
+        seed_queries = [f"{session.topic} opposing positions debate"]
+
+    return {
+        "research_question": (
+            f"{research_question}\n\n"
+            f"Moderator scope: {scope}\n"
+            f"Moderator relevance criteria: {relevance_criteria}"
+        ),
+        "scope": scope,
+        "relevance_criteria": relevance_criteria,
+        "seed_queries": seed_queries,
+        "created_at": _now_label(),
+    }
+
+
 async def _define_positions(session: DebateSession, bot=None) -> None:
+    brief = await _moderator_initial_research_brief(session)
+    session.initial_research_brief = brief
     packet = await _clerk_research(
         session,
         requester="moderator",
         phase="initial_positions",
-        question=f"Identify the major opposing positions in this debate topic: {session.topic}",
+        question=brief.get("research_question") or f"Identify the major opposing positions in this debate topic: {session.topic}",
         max_sources=INITIAL_POSITION_SOURCE_LIMIT,
         bot=bot,
+        seed_queries=brief.get("seed_queries") if isinstance(brief.get("seed_queries"), list) else None,
     )
     prompt = (
         "You are the neutral Moderator. Define two debate positions for the user to approve. "
