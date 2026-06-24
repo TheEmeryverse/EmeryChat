@@ -35,11 +35,11 @@ from emery.config import (
     FAST_MODEL_URL,
     MAIN_MODEL_URL,
     MODEL_ID,
-    MODEL_NAME,
     SEARXNG_URL,
     USER_TIMEZONE,
 )
 from emery.logging_utils import format_logging_payload, safe_preview
+from emery.telegram_delivery import send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 from emery.tools import fetch_web_content, get_youtube_transcript
 import emery.globals as globals
@@ -70,6 +70,7 @@ class DebateSession:
     updated_at: str = field(default_factory=lambda: _now_iso())
     positions: dict = field(default_factory=dict)
     side_names: dict = field(default_factory=dict)
+    advocate_names: dict = field(default_factory=dict)
     position_framing: str = ""
     user_inputs: list[dict] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
@@ -174,12 +175,17 @@ def _clean_side_name(raw: str, fallback: str) -> str:
 
 
 def _side_name(session: DebateSession, side: str) -> str:
-    fallback = "Pro-side" if side == "pro" else "Anti-side"
+    fallback = "Position 1" if side == "pro" else "Position 2"
     return _clean_side_name((session.side_names or {}).get(side), fallback)
 
 
+def _advocate_name(session: DebateSession, side: str) -> str:
+    fallback = "Jill" if side == "pro" else "Mathias"
+    return _clean_side_name((session.advocate_names or {}).get(side), fallback)
+
+
 def _side_label(session: DebateSession, side: str) -> str:
-    return f"{_side_name(session, side)} ({side})"
+    return f"{_side_name(session, side)}, argued by {_advocate_name(session, side)}"
 
 
 async def _query_chat_model(
@@ -351,7 +357,7 @@ async def _plan_clerk_queries(session: DebateSession, requester: str, phase: str
     return queries[: min(4, max(1, limit))]
 
 
-async def _clerk_research(session: DebateSession, requester: str, phase: str, question: str, max_sources: int) -> dict:
+async def _clerk_research(session: DebateSession, requester: str, phase: str, question: str, max_sources: int, bot=None) -> dict:
     max_sources = max(0, int(max_sources))
     queries = await _plan_clerk_queries(session, requester, phase, question, max_sources or 1)
     seen = {source.get("normalized_url") for source in session.sources if source.get("normalized_url")}
@@ -376,6 +382,7 @@ async def _clerk_research(session: DebateSession, requester: str, phase: str, qu
         source = await _summarize_source(session, target, fetched)
         session.sources.append(source)
         new_sources.append(source)
+        await _send_clerk_source_notice(bot, session, source)
 
     packet_summary = await _summarize_research_packet(session, requester, phase, question, new_sources)
     packet = {
@@ -474,18 +481,20 @@ def _record_formal_turn(session: DebateSession, speaker: str, kind: str, content
     session.touch()
 
 
-async def _define_positions(session: DebateSession) -> None:
+async def _define_positions(session: DebateSession, bot=None) -> None:
     packet = await _clerk_research(
         session,
         requester="moderator",
         phase="initial_positions",
         question=f"Identify the major opposing positions in this debate topic: {session.topic}",
         max_sources=INITIAL_POSITION_SOURCE_LIMIT,
+        bot=bot,
     )
     prompt = (
         "You are the neutral Moderator. Define two debate positions for the user to approve. "
-        "Return strict JSON with keys: pro_name, anti_name, pro, anti, framing. "
+        "Return strict JSON with keys: pro_name, anti_name, pro_advocate_name, anti_advocate_name, pro, anti, framing. "
         "pro_name and anti_name must be short, concise labels that clearly identify each position, not generic labels like Pro-side or Anti-side. "
+        "pro_advocate_name and anti_advocate_name must be fun short human first names for the debaters. "
         "The positions must be opposed and debate-ready.\n\n"
         f"Topic: {session.topic}\n\nClerk packet:\n{packet.get('summary')}"
     )
@@ -493,6 +502,10 @@ async def _define_positions(session: DebateSession) -> None:
     session.side_names = {
         "pro": _clean_side_name(parsed.get("pro_name"), "Affirmative"),
         "anti": _clean_side_name(parsed.get("anti_name"), "Opposition"),
+    }
+    session.advocate_names = {
+        "pro": _clean_side_name(parsed.get("pro_advocate_name"), "Jill"),
+        "anti": _clean_side_name(parsed.get("anti_advocate_name"), "Mathias"),
     }
     session.positions = {
         "pro": str(parsed.get("pro") or f"In favor of {session.topic}").strip(),
@@ -505,8 +518,10 @@ async def _define_positions(session: DebateSession) -> None:
 
 async def _revise_positions(session: DebateSession, instruction: str) -> None:
     prompt = (
-        "Revise the debate positions according to the user's instruction. Return strict JSON with keys: pro_name, anti_name, pro, anti, framing. "
-        "pro_name and anti_name must be short, concise labels that clearly identify each position.\n\n"
+        "Revise the debate positions according to the user's instruction. Return strict JSON with keys: "
+        "pro_name, anti_name, pro_advocate_name, anti_advocate_name, pro, anti, framing. "
+        "pro_name and anti_name must be short, concise labels that clearly identify each position. "
+        "pro_advocate_name and anti_advocate_name must be fun short human first names for the debaters.\n\n"
         f"Topic: {session.topic}\n"
         f"Current {_side_label(session, 'pro')}: {session.positions.get('pro')}\n"
         f"Current {_side_label(session, 'anti')}: {session.positions.get('anti')}\n"
@@ -516,6 +531,10 @@ async def _revise_positions(session: DebateSession, instruction: str) -> None:
     session.side_names = {
         "pro": _clean_side_name(parsed.get("pro_name"), _side_name(session, "pro")),
         "anti": _clean_side_name(parsed.get("anti_name"), _side_name(session, "anti")),
+    }
+    session.advocate_names = {
+        "pro": _clean_side_name(parsed.get("pro_advocate_name"), _advocate_name(session, "pro")),
+        "anti": _clean_side_name(parsed.get("anti_advocate_name"), _advocate_name(session, "anti")),
     }
     if parsed.get("pro"):
         session.positions["pro"] = str(parsed.get("pro")).strip()
@@ -545,7 +564,7 @@ async def _generate_side_questions(session: DebateSession, side: str, light_pack
     return questions[:6]
 
 
-async def _prepare_side(session: DebateSession, side: str) -> None:
+async def _prepare_side(bot, session: DebateSession, side: str) -> str:
     position = session.positions.get(side, "")
     light_packet = await _clerk_research(
         session,
@@ -553,6 +572,7 @@ async def _prepare_side(session: DebateSession, side: str) -> None:
         phase="side_light",
         question=f"Find initial evidence for this position: {position}",
         max_sources=SIDE_LIGHT_SOURCE_LIMIT,
+        bot=bot,
     )
     questions = await _generate_side_questions(session, side, light_packet)
     deep_packet = await _clerk_research(
@@ -561,6 +581,7 @@ async def _prepare_side(session: DebateSession, side: str) -> None:
         phase="side_deep",
         question="; ".join(questions),
         max_sources=SIDE_DEEP_SOURCE_LIMIT,
+        bot=bot,
     )
     prompt = (
         "Build this side's private debate brief. Return concise prose with thesis, best evidence, likely objections, and response strategy. "
@@ -575,12 +596,16 @@ async def _prepare_side(session: DebateSession, side: str) -> None:
     )
     thesis = await _query_main_model(thesis_prompt, f"You are the {side} side in a formal debate.")
     _record_formal_turn(session, side, "opening_thesis", thesis or session.role_briefs.get(side, ""))
+    return thesis or session.role_briefs.get(side, "")
 
 
 async def _moderator_questions(session: DebateSession) -> list[str]:
     prompt = (
         "Create 3-5 distinct formal debate round questions based only on the positions and opening theses. "
-        "Return strict JSON with key questions. Do not use private research packets.\n\n"
+        "Return strict JSON with key questions. Do not use private research packets. "
+        "Every question must be neutral and facilitate discussion between both positions. "
+        "Do not favor either side, do not frame a question as a trap for one side, and do not ask a question only to one side. "
+        "Each question should invite both sides to answer from their positions and respond to each other.\n\n"
         f"{_build_moderator_context(session)}"
     )
     parsed = _extract_json_object(await _query_main_model(prompt, "You are the neutral Moderator. Return only JSON.")) or {}
@@ -588,17 +613,17 @@ async def _moderator_questions(session: DebateSession) -> list[str]:
     questions = [str(question).strip() for question in raw_questions if str(question).strip()]
     if not questions:
         questions = [
-            f"What is the strongest positive case for and against {session.topic}?",
-            f"Which side better handles the largest practical tradeoff in {session.topic}?",
-            f"Which side has the more persuasive evidence base?",
+            f"What criteria should determine the strongest case on both sides of {session.topic}?",
+            f"Which tradeoffs matter most when comparing both positions on {session.topic}?",
+            f"How should the evidence offered by both positions be weighed?",
         ]
     return questions[:MAX_DEBATE_ROUNDS] if len(questions) >= MIN_DEBATE_ROUNDS else (questions + [
-        "Which side better addresses implementation risks?",
-        "Which side better accounts for second-order consequences?",
+        "How should implementation risks be compared across both positions?",
+        "How should second-order consequences be compared across both positions?",
     ])[:MIN_DEBATE_ROUNDS]
 
 
-async def _round_side_turn(session: DebateSession, side: str, kind: str, question: str, round_number: int, opponent_text: str = "") -> str:
+async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, question: str, round_number: int, opponent_text: str = "") -> str:
     if kind == "answer":
         await _clerk_research(
             session,
@@ -606,6 +631,7 @@ async def _round_side_turn(session: DebateSession, side: str, kind: str, questio
             phase=f"round_{round_number}",
             question=f"{question}\nPosition: {session.positions.get(side)}",
             max_sources=ROUND_SOURCE_LIMIT,
+            bot=bot,
         )
     prompt = (
         f"Write the {kind} for this debate round. Stay in role. Cite source IDs only if they appear in your private packets. "
@@ -637,17 +663,40 @@ async def _judge_round(session: DebateSession, round_number: int, question: str)
     return result
 
 
-async def _run_question_round(session: DebateSession, round_number: int, question: str) -> None:
+async def _run_question_round(bot, session: DebateSession, round_number: int, question: str) -> None:
     first, second = ("pro", "anti") if round_number % 2 == 1 else ("anti", "pro")
-    first_answer = await _round_side_turn(session, first, "answer", question, round_number)
+    first_answer = await _round_side_turn(bot, session, first, "answer", question, round_number)
     _record_formal_turn(session, first, "answer", first_answer, round_number=round_number)
-    second_answer = await _round_side_turn(session, second, "answer", question, round_number)
+    second_answer = await _round_side_turn(bot, session, second, "answer", question, round_number)
     _record_formal_turn(session, second, "answer", second_answer, round_number=round_number)
-    first_response = await _round_side_turn(session, first, "response", question, round_number, opponent_text=second_answer)
+    first_response = await _round_side_turn(bot, session, first, "response", question, round_number, opponent_text=second_answer)
     _record_formal_turn(session, first, "response", first_response, round_number=round_number)
-    second_response = await _round_side_turn(session, second, "response", question, round_number, opponent_text=first_answer)
+    second_response = await _round_side_turn(bot, session, second, "response", question, round_number, opponent_text=first_answer)
     _record_formal_turn(session, second, "response", second_response, round_number=round_number)
     await _judge_round(session, round_number, question)
+    pro_full_response = "\n\n".join([
+        "Initial answer:",
+        first_answer if first == "pro" else second_answer,
+        "Reply to opposing side:",
+        first_response if first == "pro" else second_response,
+    ])
+    anti_full_response = "\n\n".join([
+        "Initial answer:",
+        first_answer if first == "anti" else second_answer,
+        "Reply to opposing side:",
+        first_response if first == "anti" else second_response,
+    ])
+    await _send_html_text(
+        bot,
+        session,
+        await _round_responses_html(
+            session,
+            round_number,
+            question,
+            pro_full_response,
+            anti_full_response,
+        ),
+    )
 
 
 async def _final_side_thesis(session: DebateSession, side: str) -> None:
@@ -711,6 +760,96 @@ async def _send_long_text(bot, session: DebateSession, text: str) -> None:
         await _send_status(bot, session, clean[start:start + chunk_size])
 
 
+async def _send_html_text(bot, session: DebateSession, html_text: str) -> None:
+    if not str(html_text or "").strip():
+        return
+    await send_split_html_message(
+        bot,
+        session.chat_id,
+        html_text,
+        message_thread_id=session.message_thread_id,
+    )
+
+
+async def _send_clerk_source_notice(bot, session: DebateSession, source: dict) -> None:
+    if bot is None:
+        return
+    domain = source.get("domain") or _source_domain(source.get("url")) or "source"
+    await _send_status(bot, session, f"The Clerk found a source!\n{domain}")
+
+
+def _question_rounds_text(session: DebateSession) -> str:
+    lines = ["👩🏼‍⚖️ Moderator has set the formal question rounds!", ""]
+    for index, question in enumerate(session.debate_questions, start=1):
+        lines.extend([f"Round {index}:", question, ""])
+    return "\n".join(lines).strip()
+
+
+async def _summarize_formal_response(session: DebateSession, side: str, label: str, text: str) -> str:
+    prompt = (
+        "Summarize this formal debate response for Telegram readers. "
+        "Return 2-4 concise sentences or bullets. Do not judge the argument; only summarize what this side said.\n\n"
+        f"Topic: {session.topic}\n"
+        f"Side: {_side_label(session, side)}\n"
+        f"Section: {label}\n\n"
+        f"Formal response:\n{text[:9000]}"
+    )
+    summary = await _query_clerk_model(prompt, "You are the Clerk. Summarize formal debate responses without taking sides.")
+    clean = re.sub(r"\s+", " ", str(summary or "")).strip()
+    return clean or _short_visible_summary(text)
+
+
+def _short_visible_summary(text: str, limit: int = 500) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
+def _collapsed_argument_section(title: str, full_text: str) -> str:
+    escaped_title = _telegram_escape(title)
+    escaped_text = _telegram_escape(full_text)
+    return f"<b>{escaped_title}</b>\n<blockquote expandable>{escaped_text}</blockquote>"
+
+
+def _visible_summary_section(session: DebateSession, side: str, heading: str, summary: str, full_text: str) -> str:
+    icon = "🔴" if side == "pro" else "🔵"
+    title = f"{icon} {_side_name(session, side)} {heading}"
+    return "\n\n".join([
+        f"<b>{_telegram_escape(title)}:</b>",
+        _telegram_escape(summary),
+        _collapsed_argument_section("Full argument - expand to read", full_text),
+    ])
+
+
+async def _opening_statements_html(session: DebateSession, pro_opening: str, anti_opening: str) -> str:
+    pro_summary = await _summarize_formal_response(session, "pro", "opening statement", pro_opening)
+    anti_summary = await _summarize_formal_response(session, "anti", "opening statement", anti_opening)
+    return "\n\n".join([
+        "<b>The debate has begun!</b>",
+        "<b>Opening Statements:</b>",
+        _visible_summary_section(session, "pro", "Opening Statement", pro_summary, pro_opening),
+        _visible_summary_section(session, "anti", "Opening Statement", anti_summary, anti_opening),
+    ])
+
+
+async def _round_responses_html(
+    session: DebateSession,
+    round_number: int,
+    question: str,
+    pro_response: str,
+    anti_response: str,
+) -> str:
+    pro_summary = await _summarize_formal_response(session, "pro", f"question round {round_number}", pro_response)
+    anti_summary = await _summarize_formal_response(session, "anti", f"question round {round_number}", anti_response)
+    return "\n\n".join([
+        f"<b>Question Round {round_number}:</b>",
+        _telegram_escape(question),
+        _visible_summary_section(session, "pro", "Response", pro_summary, pro_response),
+        _visible_summary_section(session, "anti", "Response", anti_summary, anti_response),
+    ])
+
+
 def _callback(session_id: str, action: str, *parts: str) -> str:
     return ":".join([CALLBACK_PREFIX, session_id, action, *[str(part) for part in parts]])
 
@@ -732,11 +871,13 @@ def _archive_action_markup(session_id: str) -> InlineKeyboardMarkup:
 
 def _position_text(session: DebateSession) -> str:
     lines = [
-        "⚖️ <b>Debate positions proposed</b>",
+        "👩🏼‍⚖️ <b>Moderator has called a debate!</b>",
         "",
-        f"<b>Topic:</b> {_telegram_escape(session.topic)}",
-        f"🟢 <b>{_telegram_escape(_side_name(session, 'pro'))}:</b> {_telegram_escape(session.positions.get('pro', ''))}",
-        f"🔴 <b>{_telegram_escape(_side_name(session, 'anti'))}:</b> {_telegram_escape(session.positions.get('anti', ''))}",
+        _telegram_escape(session.topic),
+        "",
+        "<b>Positions:</b>",
+        f"🔴 {_telegram_escape(_side_name(session, 'pro'))}, argued by {_telegram_escape(_advocate_name(session, 'pro'))}",
+        f"🔵 {_telegram_escape(_side_name(session, 'anti'))}, argued by {_telegram_escape(_advocate_name(session, 'anti'))}",
     ]
     if session.position_framing:
         lines.extend(["", _telegram_escape(session.position_framing)])
@@ -751,7 +892,6 @@ async def _send_position_prompt(bot, session: DebateSession) -> None:
 async def _run_position_definition(session: DebateSession, bot) -> None:
     try:
         ACTIVE_DEBATES[session.key()] = session
-        await _send_status(bot, session, f"⚖️ {MODEL_NAME} is opening debate court and defining positions for: {session.topic}")
         await _define_positions(session)
         await _send_position_prompt(bot, session)
     except Exception as exc:
@@ -772,16 +912,15 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         ACTIVE_DEBATES[session.key()] = session
         session.status = "running"
         session.touch()
-        await _send_status(bot, session, f"🎙️ Debate started: {session.topic}")
-        await _send_status(bot, session, f"🟢 {_side_name(session, 'pro')} is researching and preparing its opening thesis.")
-        await _prepare_side(session, "pro")
-        await _send_status(bot, session, f"🔴 {_side_name(session, 'anti')} is researching and preparing its opening thesis.")
-        await _prepare_side(session, "anti")
+        await _send_status(bot, session, f"🔴 {_advocate_name(session, 'pro')} is researching in preparation for the debate.")
+        pro_opening = await _prepare_side(bot, session, "pro")
+        await _send_status(bot, session, f"🔵 {_advocate_name(session, 'anti')} is researching in preparation for the debate.")
+        anti_opening = await _prepare_side(bot, session, "anti")
         session.debate_questions = await _moderator_questions(session)
-        await _send_status(bot, session, "🧑‍⚖️ Moderator has set the formal question rounds.")
+        await _send_status(bot, session, _question_rounds_text(session))
+        await _send_html_text(bot, session, await _opening_statements_html(session, pro_opening, anti_opening))
         for index, question in enumerate(session.debate_questions, start=1):
-            await _send_status(bot, session, f"🥊 Round {index}: {question}")
-            await _run_question_round(session, index, question)
+            await _run_question_round(bot, session, index, question)
         await _final_side_thesis(session, "pro")
         await _final_side_thesis(session, "anti")
         session.final_memo = await _build_final_memo(session)
