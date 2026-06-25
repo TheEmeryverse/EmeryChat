@@ -1,0 +1,1063 @@
+import os
+import asyncio
+import sys
+import tempfile
+import types
+import unittest
+
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+if "telegram" not in sys.modules:
+    telegram_module = types.ModuleType("telegram")
+    telegram_error_module = types.ModuleType("telegram.error")
+
+    class InlineKeyboardButton:
+        def __init__(self, text, callback_data=None):
+            self.text = text
+            self.callback_data = callback_data
+
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+
+    class ReplyParameters:
+        def __init__(self, message_id, allow_sending_without_reply=False):
+            self.message_id = message_id
+            self.allow_sending_without_reply = allow_sending_without_reply
+
+    class BadRequest(Exception):
+        pass
+
+    telegram_module.InlineKeyboardButton = InlineKeyboardButton
+    telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup
+    telegram_module.ReplyParameters = ReplyParameters
+    telegram_error_module.BadRequest = BadRequest
+    sys.modules["telegram"] = telegram_module
+    sys.modules["telegram.error"] = telegram_error_module
+
+
+from emery import debate
+import emery.globals as globals
+
+
+class FakeBot:
+    def __init__(self):
+        self.messages = []
+
+    async def send_message(self, **kwargs):
+        self.messages.append(kwargs)
+        return types.SimpleNamespace(message_id=len(self.messages))
+
+
+class FakeMessage:
+    message_thread_id = None
+
+    def __init__(self, text=""):
+        self.text = text
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append({"text": text, **kwargs})
+        return types.SimpleNamespace(message_id=len(self.replies))
+
+
+class FakeUpdate:
+    def __init__(self, chat_id=123, text=""):
+        self.effective_chat = types.SimpleNamespace(id=chat_id)
+        self.effective_user = types.SimpleNamespace(id=456)
+        self.message = FakeMessage(text)
+        self.callback_query = None
+
+
+class FakeCallbackQuery:
+    def __init__(self, data):
+        self.data = data
+        self.message = FakeMessage()
+        self.answered = False
+
+    async def answer(self):
+        self.answered = True
+
+
+class FakeCallbackUpdate:
+    def __init__(self, data, chat_id=123):
+        self.effective_chat = types.SimpleNamespace(id=chat_id)
+        self.effective_user = types.SimpleNamespace(id=456)
+        self.message = None
+        self.callback_query = FakeCallbackQuery(data)
+
+
+class FakeContext:
+    def __init__(self, args=None):
+        self.args = args or []
+        self.bot = FakeBot()
+
+
+async def _async_return(value):
+    return value
+
+
+class TestDebateMode(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        debate.ACTIVE_DEBATES.clear()
+        for task in list(debate.DEBATE_TASKS.values()):
+            task.cancel()
+        debate.DEBATE_TASKS.clear()
+        debate.DEBATE_COMMIT_LOCKS.clear()
+        globals.active_foreground_loops.clear()
+
+    async def test_debate_command_requires_topic(self):
+        update = FakeUpdate(text="/debate")
+        await debate.handle_debate_command(update, FakeContext(args=[]))
+
+        self.assertIn("Debate commands", update.message.replies[-1]["text"])
+        self.assertEqual(debate.ACTIVE_DEBATES, {})
+
+    async def test_debate_command_creates_position_waiting_session(self):
+        original_run = debate._run_position_definition
+
+        async def fake_position_definition(session, bot):
+            session.positions = {"pro": "Pro position", "anti": "Anti position"}
+            session.status = "defining_positions"
+            await bot.send_message(chat_id=session.chat_id, text="positions ready")
+
+        try:
+            debate._run_position_definition = fake_position_definition
+            update = FakeUpdate(text="/debate progressive taxation")
+            context = FakeContext(args=["progressive", "taxation"])
+            await debate.handle_debate_command(update, context)
+        finally:
+            debate._run_position_definition = original_run
+
+        self.assertEqual(len(debate.ACTIVE_DEBATES), 1)
+        session = next(iter(debate.ACTIVE_DEBATES.values()))
+        self.assertEqual(session.status, "defining_positions")
+        self.assertEqual(session.positions["pro"], "Pro position")
+        self.assertEqual(context.bot.messages[-1]["text"], "positions ready")
+
+    async def test_position_revision_updates_positions_and_acceptance_starts_task(self):
+        session = debate.DebateSession(
+            id="deb1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            status="defining_positions",
+            positions={"pro": "Pro old", "anti": "Anti old"},
+        )
+        debate.ACTIVE_DEBATES[session.key()] = session
+
+        original_revise = debate._revise_positions
+        original_send = debate._send_position_prompt
+        original_start = debate._start_debate_task
+        started = {}
+
+        async def fake_revise(target, instruction):
+            target.positions["anti"] = instruction
+
+        async def fake_send(bot, target):
+            await bot.send_message(chat_id=target.chat_id, text=target.positions["anti"])
+
+        def fake_start(target, bot):
+            started["id"] = target.id
+
+        try:
+            debate._revise_positions = fake_revise
+            debate._send_position_prompt = fake_send
+            debate._start_debate_task = fake_start
+            await debate.handle_debate_message(FakeUpdate(text="make anti argue for flat tax"), FakeContext(), "make anti argue for flat tax")
+            await debate.handle_debate_message(FakeUpdate(text="perfect get started"), FakeContext(), "perfect get started")
+        finally:
+            debate._revise_positions = original_revise
+            debate._send_position_prompt = original_send
+            debate._start_debate_task = original_start
+
+        self.assertEqual(session.positions["anti"], "make anti argue for flat tax")
+        self.assertEqual(started["id"], "deb1")
+
+    def test_role_context_isolation(self):
+        session = debate.DebateSession(
+            id="ctx1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro progressive tax", "anti": "Anti flat tax"},
+            side_names={"pro": "Progressive Taxers", "anti": "Flat Taxers"},
+            role_briefs={"pro": "private pro brief", "anti": "private anti brief"},
+            research_packets=[
+                {"id": "P1", "requester": "pro", "phase": "side_deep", "question": "pro q", "source_ids": ["S1"], "summary": "PRIVATE PRO RESEARCH"},
+                {"id": "P2", "requester": "anti", "phase": "side_deep", "question": "anti q", "source_ids": ["S2"], "summary": "PRIVATE ANTI RESEARCH"},
+            ],
+            formal_turns=[
+                {"round": 1, "speaker": "pro", "kind": "answer", "content": "formal pro answer"},
+                {"round": 1, "speaker": "anti", "kind": "answer", "content": "formal anti answer"},
+            ],
+        )
+
+        moderator_context = debate._build_moderator_context(session)
+        pro_context = debate._build_side_context(session, "pro")
+        anti_context = debate._build_side_context(session, "anti")
+
+        self.assertIn("formal pro answer", moderator_context)
+        self.assertIn("formal anti answer", moderator_context)
+        self.assertIn("Progressive Taxers", moderator_context)
+        self.assertIn("Flat Taxers", moderator_context)
+        self.assertNotIn("PRIVATE PRO RESEARCH", moderator_context)
+        self.assertNotIn("PRIVATE ANTI RESEARCH", moderator_context)
+        self.assertIn("PRIVATE PRO RESEARCH", pro_context)
+        self.assertNotIn("PRIVATE ANTI RESEARCH", pro_context)
+        self.assertIn("PRIVATE ANTI RESEARCH", anti_context)
+        self.assertNotIn("PRIVATE PRO RESEARCH", anti_context)
+
+    async def test_define_positions_records_moderator_side_names(self):
+        session = debate.DebateSession(
+            id="names1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+        )
+        original_research = debate._clerk_research
+        original_query = debate._query_main_model
+        calls = []
+
+        async def fake_research(*args, **kwargs):
+            calls.append(("clerk", kwargs.get("question"), kwargs.get("seed_queries")))
+            return {"summary": "progressive and flat tax positions"}
+
+        async def fake_query(prompt, *args, **kwargs):
+            calls.append(("moderator", prompt, None))
+            if "Before the Clerk researches" in prompt:
+                return (
+                    '{"research_question":"Find tax-policy position spectrum",'
+                    '"scope":"Compare mainstream tax-structure positions",'
+                    '"relevance_criteria":"Only sources about progressive versus flat tax design",'
+                    '"seed_queries":["progressive tax flat tax debate"]}'
+                )
+            return (
+                '{"pro_name":"Progressive Taxers","anti_name":"Flat Taxers",'
+                '"pro_advocate_name":"Jill","anti_advocate_name":"Mathias",'
+                '"pro":"Support progressive taxation","anti":"Support flat taxation","framing":"Tax design"}'
+            )
+
+        try:
+            debate._clerk_research = fake_research
+            debate._query_main_model = fake_query
+            await debate._define_positions(session)
+        finally:
+            debate._clerk_research = original_research
+            debate._query_main_model = original_query
+
+        self.assertEqual(session.side_names["pro"], "Progressive Taxers")
+        self.assertEqual(session.side_names["anti"], "Flat Taxers")
+        self.assertEqual(session.advocate_names["pro"], "Jill")
+        self.assertEqual(session.advocate_names["anti"], "Mathias")
+        self.assertIn("Progressive Taxers", debate._position_text(session))
+        self.assertIn("Flat Taxers", debate._position_text(session))
+        self.assertEqual(calls[0][0], "moderator")
+        self.assertEqual(calls[1][0], "clerk")
+        self.assertIn("Moderator scope", calls[1][1])
+        self.assertEqual(calls[1][2], ["progressive tax flat tax debate"])
+        self.assertEqual(session.initial_research_brief["scope"], "Compare mainstream tax-structure positions")
+
+    async def test_clerk_research_enforces_source_limit(self):
+        session = debate.DebateSession(
+            id="cap1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+        )
+        original_plan = debate._plan_clerk_queries
+        original_search = debate._search_web
+        original_filter = debate._filter_relevant_search_results
+        original_fetch = debate._fetch_source_content
+        original_summarize = debate._summarize_source
+        original_packet = debate._summarize_research_packet
+
+        async def fake_plan(*args, **kwargs):
+            return ["tax policy"]
+
+        async def fake_search(query):
+            return [
+                {
+                    "title": f"Source {i}",
+                    "url": f"https://example.com/{i}",
+                    "normalized_url": f"https://example.com/{i}",
+                    "domain": "example.com",
+                    "snippet": "snippet",
+                }
+                for i in range(20)
+            ]
+
+        async def fake_fetch(result):
+            return {"success": True, "title": result["title"], "url": result["url"], "content": "content"}
+
+        async def fake_filter(*args, **kwargs):
+            return args[4][: args[5]]
+
+        async def fake_summarize(target_session, result, fetched):
+            return {
+                "id": f"S{len(target_session.sources) + 1}",
+                "title": result["title"],
+                "url": result["url"],
+                "normalized_url": result["normalized_url"],
+                "fetch_success": True,
+                "summary": "summary",
+                "key_claims": [],
+            }
+
+        async def fake_packet(*args, **kwargs):
+            return "packet summary"
+
+        try:
+            debate._plan_clerk_queries = fake_plan
+            debate._search_web = fake_search
+            debate._filter_relevant_search_results = fake_filter
+            debate._fetch_source_content = fake_fetch
+            debate._summarize_source = fake_summarize
+            debate._summarize_research_packet = fake_packet
+            packet = await debate._clerk_research(session, "pro", "side_deep", "question", max_sources=3)
+        finally:
+            debate._plan_clerk_queries = original_plan
+            debate._search_web = original_search
+            debate._filter_relevant_search_results = original_filter
+            debate._fetch_source_content = original_fetch
+            debate._summarize_source = original_summarize
+            debate._summarize_research_packet = original_packet
+
+        self.assertEqual(len(session.sources), 3)
+        self.assertEqual(len(packet["source_ids"]), 3)
+        self.assertEqual(packet["source_limit"], 3)
+
+    async def test_clerk_research_runs_search_and_fetch_concurrently_with_stable_ids(self):
+        session = debate.DebateSession(
+            id="parallel1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+        )
+        original_plan = debate._plan_clerk_queries
+        original_search = debate._search_web
+        original_filter = debate._filter_relevant_search_results
+        original_fetch = debate._fetch_source_content
+        original_summarize = debate._summarize_source
+        original_packet = debate._summarize_research_packet
+        search_started = []
+        search_release = asyncio.Event()
+        fetch_started = []
+        fetch_release = asyncio.Event()
+
+        async def fake_plan(*args, **kwargs):
+            return ["query one", "query two"]
+
+        async def fake_search(query):
+            search_started.append(query)
+            if len(search_started) == 2:
+                search_release.set()
+            await search_release.wait()
+            index = 1 if query == "query one" else 2
+            return [{
+                "title": f"Source {index}",
+                "url": f"https://example.com/{index}",
+                "normalized_url": f"https://example.com/{index}",
+                "domain": "example.com",
+                "snippet": query,
+            }]
+
+        async def fake_filter(*args, **kwargs):
+            return args[4][: args[5]]
+
+        async def fake_fetch(result):
+            fetch_started.append(result["url"])
+            if len(fetch_started) == 2:
+                fetch_release.set()
+            await fetch_release.wait()
+            return {"success": True, "title": result["title"], "url": result["url"], "content": result["title"]}
+
+        async def fake_summarize(target_session, result, fetched):
+            return {
+                "id": "placeholder",
+                "title": result["title"],
+                "url": result["url"],
+                "normalized_url": result["normalized_url"],
+                "fetch_success": True,
+                "summary": fetched["content"],
+                "key_claims": [],
+            }
+
+        async def fake_packet(*args, **kwargs):
+            return "packet summary"
+
+        try:
+            debate._plan_clerk_queries = fake_plan
+            debate._search_web = fake_search
+            debate._filter_relevant_search_results = fake_filter
+            debate._fetch_source_content = fake_fetch
+            debate._summarize_source = fake_summarize
+            debate._summarize_research_packet = fake_packet
+            packet = await debate._clerk_research(session, "pro", "side_deep", "question", max_sources=2)
+        finally:
+            debate._plan_clerk_queries = original_plan
+            debate._search_web = original_search
+            debate._filter_relevant_search_results = original_filter
+            debate._fetch_source_content = original_fetch
+            debate._summarize_source = original_summarize
+            debate._summarize_research_packet = original_packet
+
+        self.assertEqual(search_started, ["query one", "query two"])
+        self.assertEqual(fetch_started, ["https://example.com/1", "https://example.com/2"])
+        self.assertEqual([item["query"] for item in session.search_queries], ["query one", "query two"])
+        self.assertEqual([source["id"] for source in session.sources], ["S1", "S2"])
+        self.assertEqual(packet["id"], "P1")
+        self.assertEqual(packet["source_ids"], ["S1", "S2"])
+
+    async def test_concurrent_clerk_research_assigns_unique_ids_and_skips_duplicate_urls(self):
+        session = debate.DebateSession(
+            id="parallel2",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+        )
+        original_plan = debate._plan_clerk_queries
+        original_search = debate._search_web
+        original_filter = debate._filter_relevant_search_results
+        original_fetch = debate._fetch_source_content
+        original_summarize = debate._summarize_source
+        original_packet = debate._summarize_research_packet
+
+        async def fake_plan(target_session, requester, phase, question, limit, seed_queries=None):
+            return [f"{requester} query"]
+
+        async def fake_search(query):
+            return [
+                {
+                    "title": f"Shared {query}",
+                    "url": "https://example.com/shared",
+                    "normalized_url": "https://example.com/shared",
+                    "domain": "example.com",
+                    "snippet": query,
+                },
+                {
+                    "title": f"Unique {query}",
+                    "url": f"https://example.com/{query.split()[0]}",
+                    "normalized_url": f"https://example.com/{query.split()[0]}",
+                    "domain": "example.com",
+                    "snippet": query,
+                },
+            ]
+
+        async def fake_filter(*args, **kwargs):
+            return args[4][: args[5]]
+
+        async def fake_fetch(result):
+            return {"success": True, "title": result["title"], "url": result["url"], "content": result["title"]}
+
+        async def fake_summarize(target_session, result, fetched):
+            await asyncio.sleep(0)
+            return {
+                "id": "placeholder",
+                "title": result["title"],
+                "url": result["url"],
+                "normalized_url": result["normalized_url"],
+                "fetch_success": True,
+                "summary": fetched["content"],
+                "key_claims": [],
+            }
+
+        async def fake_packet(*args, **kwargs):
+            return "packet summary"
+
+        try:
+            debate._plan_clerk_queries = fake_plan
+            debate._search_web = fake_search
+            debate._filter_relevant_search_results = fake_filter
+            debate._fetch_source_content = fake_fetch
+            debate._summarize_source = fake_summarize
+            debate._summarize_research_packet = fake_packet
+            pro_packet, anti_packet = await asyncio.gather(
+                debate._clerk_research(session, "pro", "side_deep", "question", max_sources=2),
+                debate._clerk_research(session, "anti", "side_deep", "question", max_sources=2),
+            )
+        finally:
+            debate._plan_clerk_queries = original_plan
+            debate._search_web = original_search
+            debate._filter_relevant_search_results = original_filter
+            debate._fetch_source_content = original_fetch
+            debate._summarize_source = original_summarize
+            debate._summarize_research_packet = original_packet
+
+        normalized_urls = [source["normalized_url"] for source in session.sources]
+        self.assertEqual(len(normalized_urls), len(set(normalized_urls)))
+        self.assertEqual([source["id"] for source in session.sources], [f"S{i}" for i in range(1, len(session.sources) + 1)])
+        self.assertEqual({pro_packet["id"], anti_packet["id"]}, {"P1", "P2"})
+
+    async def test_plan_clerk_queries_accepts_top_level_json_list(self):
+        session = debate.DebateSession(
+            id="queries1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+        )
+        original_query = debate._query_clerk_model
+
+        async def fake_query(*args, **kwargs):
+            return '["irs tax incidence study", "Tax Foundation flat tax analysis"]'
+
+        try:
+            debate._query_clerk_model = fake_query
+            queries = await debate._plan_clerk_queries(
+                session,
+                "pro",
+                "round_1",
+                "Who bears the burden?",
+                2,
+                seed_queries=["tax incidence distribution"],
+            )
+        finally:
+            debate._query_clerk_model = original_query
+
+        self.assertEqual(
+            queries,
+            ["tax incidence distribution", "irs tax incidence study"],
+        )
+
+    async def test_refine_side_search_queries_accepts_top_level_json_list(self):
+        session = debate.DebateSession(
+            id="queries2",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Support progressive taxation"},
+        )
+        original_query = debate._query_main_model
+
+        async def fake_query(*args, **kwargs):
+            return '["progressive tax revenue effects", "CBO tax distribution report"]'
+
+        try:
+            debate._query_main_model = fake_query
+            queries = await debate._refine_side_search_queries(
+                session,
+                "pro",
+                "side_light",
+                "Find evidence for revenue stability",
+                2,
+            )
+        finally:
+            debate._query_main_model = original_query
+
+        self.assertEqual(
+            queries,
+            ["progressive tax revenue effects", "CBO tax distribution report"],
+        )
+
+    async def test_relevance_filter_distinguishes_empty_from_malformed(self):
+        session = debate.DebateSession(
+            id="filter1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Support progressive taxes"},
+            side_names={"pro": "Progressive Taxers"},
+        )
+        results = [
+            {
+                "title": "Tangential news",
+                "url": "https://example.com/a",
+                "normalized_url": "https://example.com/a",
+                "domain": "example.com",
+                "snippet": "not useful",
+                "query": "tax policy",
+            },
+            {
+                "title": "Relevant study",
+                "url": "https://example.org/b",
+                "normalized_url": "https://example.org/b",
+                "domain": "example.org",
+                "snippet": "useful",
+                "query": "tax policy",
+            },
+        ]
+        original_query = debate._query_clerk_model
+
+        async def empty_selection(*args, **kwargs):
+            return '{"selected_indexes":[]}'
+
+        async def malformed_selection(*args, **kwargs):
+            return 'not json'
+
+        try:
+            debate._query_clerk_model = empty_selection
+            self.assertEqual(
+                await debate._filter_relevant_search_results(session, "pro", "side_light", "need", results, 2),
+                [],
+            )
+
+            debate._query_clerk_model = malformed_selection
+            self.assertEqual(
+                await debate._filter_relevant_search_results(session, "pro", "side_light", "need", results, 1),
+                results[:1],
+            )
+        finally:
+            debate._query_clerk_model = original_query
+
+    def test_archive_session_writes_expected_files_and_index(self):
+        session = debate.DebateSession(
+            id="arch1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            status="completed",
+            final_memo="Final memo",
+            source_appendix="Sources",
+            formal_turns=[{"speaker": "pro", "kind": "opening", "content": "formal"}],
+            sources=[{"id": "S1"}],
+            round_results=[{"round": 1, "winner": "pro"}],
+        )
+        original_archive_dir = debate.DEBATE_ARCHIVE_DIR
+        original_index_path = debate.DEBATE_INDEX_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            debate.DEBATE_ARCHIVE_DIR = os.path.join(tmp, "debate")
+            debate.DEBATE_INDEX_PATH = os.path.join(tmp, "config", "debate_sessions.json")
+            folder = debate._archive_session(session)
+
+            self.assertTrue((folder / "session.json").exists())
+            self.assertTrue((folder / "memo.md").exists())
+            self.assertTrue((folder / "sources.md").exists())
+            self.assertTrue((folder / "transcript.md").exists())
+            self.assertEqual(debate._load_index()[0]["id"], "arch1")
+
+        debate.DEBATE_ARCHIVE_DIR = original_archive_dir
+        debate.DEBATE_INDEX_PATH = original_index_path
+
+    async def test_run_debate_registers_foreground_loop(self):
+        session = debate.DebateSession(
+            id="loop1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            status="defining_positions",
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_round = debate._run_question_round
+        original_final_side = debate._final_side_thesis
+        original_final_side_text = debate._final_side_thesis_text
+        original_final_memo = debate._build_final_memo
+        original_appendix = debate._build_source_appendix
+        original_archive = debate._archive_session
+        original_clerk_query = debate._query_clerk_model
+        observed_active = []
+
+        async def fake_prepare(bot, target, side):
+            observed_active.append(globals.has_active_foreground_loops())
+            return f"{side} opening"
+
+        async def fake_questions(target):
+            return ["Q1", "Q2", "Q3"]
+
+        async def fake_round(bot, target, round_number, question):
+            target.round_results.append({"round": round_number, "winner": "tie"})
+
+        async def fake_final_side(target, side):
+            return None
+
+        async def fake_final_side_text(target, side):
+            return f"{side} final thesis"
+
+        async def fake_final_memo(target):
+            return "Final memo"
+
+        def fake_appendix(target):
+            return "Sources"
+
+        def fake_archive(target):
+            return None
+
+        async def fake_clerk_query(*args, **kwargs):
+            return "summary"
+
+        try:
+            debate._prepare_side = fake_prepare
+            debate._moderator_questions = fake_questions
+            debate._run_question_round = fake_round
+            debate._final_side_thesis = fake_final_side
+            debate._final_side_thesis_text = fake_final_side_text
+            debate._build_final_memo = fake_final_memo
+            debate._build_source_appendix = fake_appendix
+            debate._archive_session = fake_archive
+            debate._query_clerk_model = fake_clerk_query
+            await debate._run_debate_session(session, FakeBot())
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._run_question_round = original_round
+            debate._final_side_thesis = original_final_side
+            debate._final_side_thesis_text = original_final_side_text
+            debate._build_final_memo = original_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = original_archive
+            debate._query_clerk_model = original_clerk_query
+
+        self.assertEqual(observed_active, [True, True])
+        self.assertFalse(globals.has_active_foreground_loops())
+        self.assertEqual(session.status, "completed")
+
+
+
+    async def test_concurrent_side_prep_preserves_transcript_order(self):
+        """Both sides prepare concurrently, but transcript shows pro-then-anti opening turns."""
+        session = debate.DebateSession(
+            id="conc1",
+            topic="AI regulation",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro AI regulation", "anti": "Anti AI regulation"},
+        )
+        prepared = {}
+        order_lock = asyncio.Lock()
+        prepare_order = []
+
+        async def fake_prepare_concurrent(bot, target, side):
+            async with order_lock:
+                prepare_order.append(side)
+            await asyncio.sleep(0.01)
+            prepared[side] = f"{side} opening thesis"
+            debate._record_formal_turn(target, side, "opening_thesis", prepared[side])
+            return prepared[side]
+
+        async def fake_questions(target):
+            return ["Q1", "Q2", "Q3"]
+
+        async def fake_round(bot, target, round_number, question):
+            target.round_results.append({"round": round_number, "winner": "tie"})
+
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_round = debate._run_question_round
+        original_final_side = debate._final_side_thesis
+        original_final_side_text = debate._final_side_thesis_text
+        original_record_final = debate._record_final_side_theses
+        original_final_memo = debate._build_final_memo
+        original_appendix = debate._build_source_appendix
+        original_archive = debate._archive_session
+        original_clerk_query = debate._query_clerk_model
+        original_opening_html = debate._opening_statements_html
+        original_round_html = debate._round_responses_html
+
+        async def fake_opening_html(target, pro, anti):
+            return f"Opening: pro={pro} anti={anti}"
+
+        async def fake_round_html(target, rn, q, pro, anti):
+            return f"Round {rn}: pro={pro} anti={anti}"
+
+        async def fake_final_side_text(target, side):
+            return f"{side} final"
+
+        async def fake_final_memo(target):
+            return "Fake memo"
+
+        def fake_archive(target):
+            return None
+
+        try:
+            debate._prepare_side = fake_prepare_concurrent
+            debate._moderator_questions = fake_questions
+            debate._run_question_round = fake_round
+            debate._final_side_thesis = fake_final_side_text
+            debate._final_side_thesis_text = fake_final_side_text
+            debate._build_final_memo = fake_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = fake_archive
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = fake_opening_html
+            debate._round_responses_html = fake_round_html
+
+            # Patch _record_final_side_theses to use text generators
+            def fake_record_final_side_theses(target, pro_text, anti_text):
+                round_num = len(target.debate_questions) + 1
+                debate._record_formal_turn(target, "pro", "final_thesis", pro_text, round_number=round_num)
+                debate._record_formal_turn(target, "anti", "final_thesis", anti_text, round_number=round_num)
+
+            debate._record_final_side_theses = fake_record_final_side_theses
+
+            await debate._run_debate_session(session, FakeBot())
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._run_question_round = original_round
+            debate._final_side_thesis = original_final_side
+            debate._final_side_thesis_text = original_final_side_text
+            debate._record_final_side_theses = original_record_final
+            debate._build_final_memo = original_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = original_archive
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = original_opening_html
+            debate._round_responses_html = original_round_html
+
+        # Pro and anti may have been prepared in any internal order due to concurrency
+        self.assertIn("pro", prepare_order)
+        self.assertIn("anti", prepare_order)
+        # But transcript must be deterministic: pro opening before anti opening
+        pro_opening_indices = [i for i, t in enumerate(session.formal_turns) if t["speaker"] == "pro" and t["kind"] == "opening_thesis"]
+        anti_opening_indices = [i for i, t in enumerate(session.formal_turns) if t["speaker"] == "anti" and t["kind"] == "opening_thesis"]
+        self.assertGreater(len(pro_opening_indices), 0)
+        self.assertGreater(len(anti_opening_indices), 0)
+        self.assertLess(pro_opening_indices[0], anti_opening_indices[0])
+        # Same for final theses
+        pro_final_indices = [i for i, t in enumerate(session.formal_turns) if t["speaker"] == "pro" and t["kind"] == "final_thesis"]
+        anti_final_indices = [i for i, t in enumerate(session.formal_turns) if t["speaker"] == "anti" and t["kind"] == "final_thesis"]
+        self.assertGreater(len(pro_final_indices), 0)
+        self.assertGreater(len(anti_final_indices), 0)
+        self.assertLess(pro_final_indices[0], anti_final_indices[0])
+
+    async def test_combined_brief_opening_json_fallback_chain(self):
+        """Malformed JSON falls back to raw text, then to deep_packet summary."""
+        session = debate.DebateSession(
+            id="fallback1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        original_clerk = debate._clerk_research
+        original_query = debate._query_main_model
+
+        async def fake_clerk(*args, **kwargs):
+            return {"summary": "DEEP PACKET SUMMARY"}
+
+        try:
+            debate._clerk_research = fake_clerk
+
+            def assert_single_opening(side, expected):
+                turns = [t for t in session.formal_turns if t["speaker"] == side and t["kind"] == "opening_thesis"]
+                self.assertEqual(len(turns), 1)
+                self.assertEqual(turns[0]["content"], expected)
+
+            # Case 1: Valid JSON with both keys
+            async def fake_query_good(prompt, *args, **kwargs):
+                return '{"role_brief": "Role brief text", "opening_thesis": "Opening text"}'
+
+            debate._query_main_model = fake_query_good
+            opening = await debate._prepare_side(FakeBot(), session, "pro")
+            self.assertEqual(session.role_briefs["pro"], "Role brief text")
+            self.assertEqual(opening, "Opening text")
+            assert_single_opening("pro", "Opening text")
+
+            # Case 2: Malformed JSON - fallback to raw text, then role_brief for opening
+            async def fake_query_bad(prompt, *args, **kwargs):
+                return "Raw model output with no JSON at all"
+
+            session.role_briefs.clear()
+            session.formal_turns.clear()
+            debate._query_main_model = fake_query_bad
+            opening = await debate._prepare_side(FakeBot(), session, "anti")
+            self.assertEqual(session.role_briefs["anti"], "Raw model output with no JSON at all")
+            self.assertEqual(opening, "Raw model output with no JSON at all")
+            assert_single_opening("anti", "Raw model output with no JSON at all")
+
+            # Case 3: JSON with role_brief missing - fallback to deep_packet summary
+            async def fake_query_missing_role(prompt, *args, **kwargs):
+                return '{"opening_thesis": "Only opening"}'
+
+            session.role_briefs.clear()
+            session.formal_turns.clear()
+            debate._query_main_model = fake_query_missing_role
+            opening = await debate._prepare_side(FakeBot(), session, "pro")
+            # raw JSON string is truthy, so role_brief falls back to raw text
+            self.assertEqual(session.role_briefs["pro"], '{"opening_thesis": "Only opening"}')
+            self.assertEqual(opening, "Only opening")
+            assert_single_opening("pro", "Only opening")
+
+            # Case 4: Completely empty JSON object - raw "{}" is truthy, falls back to raw
+            async def fake_query_empty(prompt, *args, **kwargs):
+                return '{}'
+
+            session.role_briefs.clear()
+            session.formal_turns.clear()
+            debate._query_main_model = fake_query_empty
+            opening = await debate._prepare_side(FakeBot(), session, "anti")
+            self.assertEqual(session.role_briefs["anti"], "{}")
+            self.assertEqual(opening, "{}")
+            assert_single_opening("anti", "{}")
+
+        finally:
+            debate._clerk_research = original_clerk
+            debate._query_main_model = original_query
+
+    async def test_final_side_thesis_text_and_record_order(self):
+        """_final_side_thesis_text generates text and _record_final_side_theses writes pro-then-anti."""
+        session = debate.DebateSession(
+            id="thesis1",
+            topic="AI regulation",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+            debate_questions=["Q1", "Q2", "Q3"],
+        )
+        original_query = debate._query_main_model
+
+        async def fake_query(prompt, system_prompt):
+            if "pro side" in system_prompt:
+                return "pro final"
+            return "anti final"
+
+        try:
+            debate._query_main_model = fake_query
+            pro_text = await debate._final_side_thesis_text(session, "pro")
+            anti_text = await debate._final_side_thesis_text(session, "anti")
+            self.assertEqual(pro_text, "pro final")
+            self.assertEqual(anti_text, "anti final")
+
+            debate._record_final_side_theses(session, pro_text, anti_text)
+        finally:
+            debate._query_main_model = original_query
+
+        final_turns = [t for t in session.formal_turns if t["kind"] == "final_thesis"]
+        self.assertEqual(len(final_turns), 2)
+        self.assertEqual(final_turns[0]["speaker"], "pro")
+        self.assertEqual(final_turns[0]["round"], 4)
+        self.assertEqual(final_turns[1]["speaker"], "anti")
+        self.assertEqual(final_turns[1]["round"], 4)
+
+    async def test_commit_lock_lifecycle_cleanup(self):
+        """Commit lock is created during debate and cleaned up on completion."""
+        session = debate.DebateSession(
+            id="lock1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_round = debate._run_question_round
+        original_final_side = debate._final_side_thesis
+        original_final_side_text = debate._final_side_thesis_text
+        original_final_memo = debate._build_final_memo
+        original_appendix = debate._build_source_appendix
+        original_archive = debate._archive_session
+        original_clerk_query = debate._query_clerk_model
+        original_opening_html = debate._opening_statements_html
+
+        async def fake_prepare(bot, target, side):
+            return f"{side} opening"
+
+        async def fake_questions(target):
+            return ["Q1"]
+
+        async def fake_round(bot, target, round_number, question):
+            target.round_results.append({"round": round_number, "winner": "tie"})
+
+        async def fake_final_memo(target):
+            return "Final memo"
+
+        async def fake_final_side_text(target, side):
+            return f"{side} final"
+
+        async def fake_opening_html(target, pro_opening, anti_opening):
+            return f"{pro_opening}\n{anti_opening}"
+
+        def fake_archive(target):
+            return None
+
+        try:
+            debate._prepare_side = fake_prepare
+            debate._moderator_questions = fake_questions
+            debate._run_question_round = fake_round
+            debate._final_side_thesis = original_final_side
+            debate._final_side_thesis_text = fake_final_side_text
+            debate._build_final_memo = fake_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = fake_archive
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = fake_opening_html
+
+            self.assertNotIn(session.id, debate.DEBATE_COMMIT_LOCKS)
+            debate._session_commit_lock(session)
+            self.assertIn(session.id, debate.DEBATE_COMMIT_LOCKS)
+            await debate._run_debate_session(session, FakeBot())
+            self.assertNotIn(session.id, debate.DEBATE_COMMIT_LOCKS)
+            self.assertEqual(session.status, "completed")
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._run_question_round = original_round
+            debate._final_side_thesis = original_final_side
+            debate._final_side_thesis_text = original_final_side_text
+            debate._build_final_memo = original_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = original_archive
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = original_opening_html
+
+    async def test_commit_lock_cleanup_on_cancellation(self):
+        """Commit lock is cleaned up when debate is cancelled."""
+        session = debate.DebateSession(
+            id="cancel1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+
+        cancel_event = asyncio.Event()
+
+        async def fake_prepare_slow(bot, target, side):
+            await cancel_event.wait()
+            return f"{side} opening"
+
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_clerk_query = debate._query_clerk_model
+        original_opening_html = debate._opening_statements_html
+
+        try:
+            debate._prepare_side = fake_prepare_slow
+            debate._moderator_questions = original_questions
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = original_opening_html
+
+            debate._session_commit_lock(session)
+            self.assertIn(session.id, debate.DEBATE_COMMIT_LOCKS)
+            debate._start_debate_task(session, FakeBot())
+            await asyncio.sleep(0.1)
+
+            self.assertIn(session.id, debate.DEBATE_TASKS)
+
+            await debate._cancel_session_object(FakeBot(), session)
+
+            self.assertNotIn(session.id, debate.DEBATE_COMMIT_LOCKS)
+            cancel_event.set()
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._query_clerk_model = original_clerk_query
+            debate._opening_statements_html = original_opening_html
+            for task in list(debate.DEBATE_TASKS.values()):
+                task.cancel()
+            debate.DEBATE_TASKS.clear()
+            debate.DEBATE_COMMIT_LOCKS.clear()
+            debate.ACTIVE_DEBATES.clear()
+
+
+if __name__ == "__main__":
+    unittest.main()

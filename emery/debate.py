@@ -48,6 +48,7 @@ import emery.globals as globals
 
 ACTIVE_DEBATES: dict[tuple[int, int | None], "DebateSession"] = {}
 DEBATE_TASKS: dict[str, asyncio.Task] = {}
+DEBATE_COMMIT_LOCKS: dict[str, asyncio.Lock] = {}
 
 CALLBACK_PREFIX = "debate"
 INITIAL_POSITION_SOURCE_LIMIT = 2
@@ -57,6 +58,14 @@ ROUND_SOURCE_LIMIT = 2
 MIN_DEBATE_ROUNDS = 3
 MAX_DEBATE_ROUNDS = 5
 SEARCH_RESULTS_PER_QUERY = 8
+
+
+def _session_commit_lock(session: "DebateSession") -> asyncio.Lock:
+    lock = DEBATE_COMMIT_LOCKS.get(session.id)
+    if lock is None:
+        lock = asyncio.Lock()
+        DEBATE_COMMIT_LOCKS[session.id] = lock
+    return lock
 
 
 @dataclass
@@ -357,7 +366,7 @@ async def _summarize_source(session: DebateSession, result: dict, fetched: dict)
     )
     parsed = _extract_json_object(await _query_clerk_model(prompt, "You are the Clerk. Return only compact JSON source notes.")) or {}
     return {
-        "id": f"S{len(session.sources) + 1}",
+        "id": None,
         "title": fetched.get("title") or result.get("title") or "Untitled",
         "url": fetched.get("url") or result.get("url"),
         "normalized_url": result.get("normalized_url") or _normalize_url(fetched.get("url") or result.get("url")),
@@ -570,16 +579,24 @@ async def _clerk_research(
     candidates = []
     candidate_limit = max(max_sources * 4, max_sources)
 
+    # Record query metadata in planned-query order (deterministic).
+    query_records: list[dict] = []
     for query in queries:
-        if len(candidates) >= candidate_limit:
-            break
-        session.search_queries.append({
+        query_records.append({
             "requester": requester,
             "phase": phase,
             "query": query,
             "created_at": _now_label(),
         })
-        results = await _search_web(query)
+    # Launch all search queries concurrently.
+    search_results_list = await asyncio.gather(*[_search_web(query) for query in queries])
+    # Persist query records in planned-query order.
+    for rec in query_records:
+        session.search_queries.append(rec)
+    # Build candidates by iterating queries and their results in order.
+    for results in search_results_list:
+        if len(candidates) >= candidate_limit:
+            break
         for result in results:
             normalized = result.get("normalized_url")
             if not normalized or normalized in seen:
@@ -598,11 +615,29 @@ async def _clerk_research(
         max_sources,
     )
 
+    # Fetch all targets concurrently.
+    fetch_futures = [
+        _fetch_source_content(target) for target in targets[:max_sources]
+    ]
+    fetched_list = await asyncio.gather(*fetch_futures)
     new_sources = []
-    for target in targets[:max_sources]:
-        fetched = await _fetch_source_content(target)
+    # Process and commit sources in target order for deterministic IDs.
+    commit_lock = _session_commit_lock(session)
+    for target, fetched in zip(targets[:max_sources], fetched_list):
         source = await _summarize_source(session, target, fetched)
-        session.sources.append(source)
+        async with commit_lock:
+            normalized = source.get("normalized_url")
+            if normalized and any(existing.get("normalized_url") == normalized for existing in session.sources):
+                logging.info(
+                    "DEBATE: Skipping duplicate source during concurrent commit session=%s requester=%s phase=%s url=%s",
+                    session.id,
+                    requester,
+                    phase,
+                    normalized,
+                )
+                continue
+            source["id"] = f"S{len(session.sources) + 1}"
+            session.sources.append(source)
         new_sources.append(source)
         logging.info(
             "DEBATE: Clerk added source %s for session=%s requester=%s phase=%s domain=%s fetch_success=%s",
@@ -616,8 +651,9 @@ async def _clerk_research(
         await _send_clerk_source_notice(bot, session, source)
 
     packet_summary = await _summarize_research_packet(session, requester, phase, question, new_sources)
+    # Assign packet ID under commit lock for deterministic ordering.
     packet = {
-        "id": f"P{len(session.research_packets) + 1}",
+        "id": None,
         "requester": requester,
         "phase": phase,
         "question": question,
@@ -628,7 +664,9 @@ async def _clerk_research(
         "created_at": _now_label(),
         "source_limit": max_sources,
     }
-    session.research_packets.append(packet)
+    async with commit_lock:
+        packet["id"] = f"P{len(session.research_packets) + 1}"
+        session.research_packets.append(packet)
     session.touch()
     logging.info(
         "DEBATE: Clerk research completed session=%s packet=%s requester=%s phase=%s queries=%d candidates=%d sources=%d",
@@ -909,27 +947,32 @@ async def _prepare_side(bot, session: DebateSession, side: str) -> str:
         seed_queries=deep_queries,
     )
     prompt = (
-        "Build this side's private debate brief. Return concise prose with thesis, best evidence, likely objections, and response strategy. "
-        "Do not include hidden reasoning.\n\n"
+        "Build this side's private debate brief AND opening thesis. Return strict JSON with keys: "
+        "role_brief (prose with thesis, best evidence, likely objections, and response strategy), "
+        "opening_thesis (polished prose citing source IDs). Do not include hidden reasoning.\n\n"
         f"{_build_side_context(session, side)}\n\nDeep packet:\n{deep_packet.get('summary')}"
     )
-    session.role_briefs[side] = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
-    thesis_prompt = (
-        "Write this side's opening thesis for the formal transcript. Use only claims supportable by your private research. "
-        "Cite source IDs where useful. Return polished prose.\n\n"
-        f"{_build_side_context(session, side)}"
-    )
-    thesis = await _query_main_model(thesis_prompt, f"You are the {side} side in a formal debate.")
-    _record_formal_turn(session, side, "opening_thesis", thesis or session.role_briefs.get(side, ""))
+    raw = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
+    parsed = _extract_json_object(raw) or {}
+    role_brief = parsed.get("role_brief") or ""
+    opening_thesis = parsed.get("opening_thesis") or ""
+    # Fallback chain for role_brief.
+    if not role_brief:
+        role_brief = raw.strip() if raw and raw.strip() else (deep_packet.get("summary") or "No private brief was generated.")
+    # Fallback for opening_thesis uses role_brief.
+    if not opening_thesis:
+        opening_thesis = role_brief
+    session.role_briefs[side] = role_brief
+    _record_formal_turn(session, side, "opening_thesis", opening_thesis)
     logging.info(
         "DEBATE: Side preparation completed session=%s side=%s research_packets=%d total_sources=%d opening_chars=%d",
         session.id,
         side,
         len(_research_packets_for_side(session, side)),
         len(session.sources),
-        len(thesis or session.role_briefs.get(side, "")),
+        len(opening_thesis or ""),
     )
-    return thesis or session.role_briefs.get(side, "")
+    return opening_thesis or role_brief
 
 
 async def _moderator_questions(session: DebateSession) -> list[str]:
@@ -1048,6 +1091,32 @@ async def _run_question_round(bot, session: DebateSession, round_number: int, qu
         ),
     )
     logging.info("DEBATE: Question round completed session=%s round=%d", session.id, round_number)
+
+
+async def _final_side_thesis_text(session: DebateSession, side: str) -> str:
+    """Generate final thesis text for a side without recording. Used for concurrent execution."""
+    logging.info("DEBATE: Generating final thesis session=%s side=%s", session.id, side)
+    prompt = (
+        "Write this side's final thesis after all rounds. Address the formal debate record and preserve your position. "
+        "Return only the formal final thesis.\n\n"
+        f"{_build_side_context(session, side)}"
+    )
+    thesis = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
+    logging.info("DEBATE: Final thesis generated session=%s side=%s chars=%d", session.id, side, len(thesis or ""))
+    return thesis or ""
+
+
+def _record_final_side_theses(session: DebateSession, pro_text: str, anti_text: str) -> None:
+    """Record final thesis turns in deterministic pro-then-anti order."""
+    round_num = len(session.debate_questions) + 1
+    _record_formal_turn(session, "pro", "final_thesis", pro_text, round_number=round_num)
+    _record_formal_turn(session, "anti", "final_thesis", anti_text, round_number=round_num)
+    logging.info(
+        "DEBATE: Final theses recorded session=%s pro_chars=%d anti_chars=%d",
+        session.id,
+        len(pro_text or ""),
+        len(anti_text or ""),
+    )
 
 
 async def _final_side_thesis(session: DebateSession, side: str) -> None:
@@ -1213,8 +1282,10 @@ def _visible_summary_section(session: DebateSession, side: str, heading: str, su
 
 
 async def _opening_statements_html(session: DebateSession, pro_opening: str, anti_opening: str) -> str:
-    pro_summary = await _summarize_formal_response(session, "pro", "opening statement", pro_opening)
-    anti_summary = await _summarize_formal_response(session, "anti", "opening statement", anti_opening)
+    pro_summary, anti_summary = await asyncio.gather(
+        _summarize_formal_response(session, "pro", "opening statement", pro_opening),
+        _summarize_formal_response(session, "anti", "opening statement", anti_opening),
+    )
     return "\n\n".join([
         "<b>The debate has begun!</b>",
         "<b>Opening Statements:</b>",
@@ -1230,8 +1301,10 @@ async def _round_responses_html(
     pro_response: str,
     anti_response: str,
 ) -> str:
-    pro_summary = await _summarize_formal_response(session, "pro", f"question round {round_number}", pro_response)
-    anti_summary = await _summarize_formal_response(session, "anti", f"question round {round_number}", anti_response)
+    pro_summary, anti_summary = await asyncio.gather(
+        _summarize_formal_response(session, "pro", f"question round {round_number}", pro_response),
+        _summarize_formal_response(session, "anti", f"question round {round_number}", anti_response),
+    )
     return "\n\n".join([
         f"<b>Question Round {round_number}:</b>",
         _telegram_escape(question),
@@ -1315,17 +1388,25 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
             _side_label(session, "pro"),
             _side_label(session, "anti"),
         )
+        # Send both preparation status messages before launching work.
         await _send_status(bot, session, f"🔴 {_advocate_name(session, 'pro')} is researching in preparation for the debate.")
-        pro_opening = await _prepare_side(bot, session, "pro")
         await _send_status(bot, session, f"🔵 {_advocate_name(session, 'anti')} is researching in preparation for the debate.")
-        anti_opening = await _prepare_side(bot, session, "anti")
+        # Run pro and anti side preparation concurrently.
+        pro_opening, anti_opening = await asyncio.gather(
+            _prepare_side(bot, session, "pro"),
+            _prepare_side(bot, session, "anti"),
+        )
         session.debate_questions = await _moderator_questions(session)
         await _send_status(bot, session, _question_rounds_text(session))
         await _send_html_text(bot, session, await _opening_statements_html(session, pro_opening, anti_opening))
         for index, question in enumerate(session.debate_questions, start=1):
             await _run_question_round(bot, session, index, question)
-        await _final_side_thesis(session, "pro")
-        await _final_side_thesis(session, "anti")
+        # Generate final theses concurrently, then record in deterministic order.
+        pro_thesis, anti_thesis = await asyncio.gather(
+            _final_side_thesis_text(session, "pro"),
+            _final_side_thesis_text(session, "anti"),
+        )
+        _record_final_side_theses(session, pro_thesis, anti_thesis)
         session.final_memo = await _build_final_memo(session)
         session.source_appendix = _build_source_appendix(session)
         session.status = "completed"
@@ -1353,6 +1434,8 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         globals.unregister_foreground_loop(session.id)
         if DEBATE_TASKS.get(session.id) is current_task:
             DEBATE_TASKS.pop(session.id, None)
+        # Clean up commit lock for finished/cancelled session.
+        DEBATE_COMMIT_LOCKS.pop(session.id, None)
 
 
 def _start_debate_task(session: DebateSession, bot) -> None:
@@ -1389,6 +1472,7 @@ async def _cancel_session_object(bot, session: DebateSession) -> None:
     session.status = "cancelled"
     ACTIVE_DEBATES.pop(session.key(), None)
     globals.unregister_foreground_loop(session.id)
+    DEBATE_COMMIT_LOCKS.pop(session.id, None)
     await _send_status(bot, session, "🛑 Debate cancelled.")
 
 
