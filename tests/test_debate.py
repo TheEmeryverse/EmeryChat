@@ -671,7 +671,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         original_final_memo = debate._build_final_memo
         original_appendix = debate._build_source_appendix
         original_archive = debate._archive_session
-        original_opening_html = debate._opening_statements_html
+        original_opening_rich = debate._opening_statements_rich_and_fallback_html
         original_rich = debate.send_rich_or_split_html_message
 
         async def fake_prepare(bot, target, side):
@@ -695,8 +695,8 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         def fake_archive(target):
             return None
 
-        async def fake_opening_html(target, pro_opening, anti_opening):
-            return "<b>Openings</b>"
+        async def fake_opening_rich(target, pro_opening, anti_opening):
+            return "<h2>Openings</h2>", "<b>Openings</b>"
 
         async def fake_rich(bot, chat_id, markdown_text, **kwargs):
             calls.append({
@@ -715,7 +715,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_final_memo = fake_final_memo
             debate._build_source_appendix = fake_appendix
             debate._archive_session = fake_archive
-            debate._opening_statements_html = fake_opening_html
+            debate._opening_statements_rich_and_fallback_html = fake_opening_rich
             debate.send_rich_or_split_html_message = fake_rich
             await debate._run_debate_session(session, FakeBot())
         finally:
@@ -726,7 +726,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_final_memo = original_final_memo
             debate._build_source_appendix = original_appendix
             debate._archive_session = original_archive
-            debate._opening_statements_html = original_opening_html
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
             debate.send_rich_or_split_html_message = original_rich
 
         self.assertEqual([call["markdown"] for call in calls], ["# Final Memo\n\n- **Finding**", "# Sources\n\n- [S1] Example"])
@@ -777,6 +777,41 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["thread"], 456)
         self.assertEqual(calls[0]["markdown"], "# Archived Memo\n\n- **Finding**")
         self.assertIn("<strong>Finding</strong>", calls[0]["fallback"])
+
+    async def test_debate_loop_rich_html_uses_details_without_spoilers(self):
+        session = debate.DebateSession(
+            id="rich-loop",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=None,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        original_summarize = debate._summarize_formal_response
+
+        async def fake_summarize(target, side, label, text):
+            return f"{side} visible summary"
+
+        try:
+            debate._summarize_formal_response = fake_summarize
+            rich_html, fallback_html = await debate._opening_statements_rich_and_fallback_html(
+                session,
+                "<think>private chain</think>Pro full answer",
+                "Anti full answer",
+            )
+        finally:
+            debate._summarize_formal_response = original_summarize
+
+        self.assertIn("<details>", rich_html)
+        self.assertIn("<summary>Full argument</summary>", rich_html)
+        self.assertIn("pro visible summary", rich_html)
+        self.assertIn("Pro full answer", rich_html)
+        self.assertNotIn("private chain", rich_html)
+        self.assertNotIn("<blockquote expandable>", rich_html)
+        self.assertNotIn("tg-spoiler", rich_html)
+        self.assertNotIn("spoiler", rich_html.lower())
+        self.assertIn("<blockquote expandable>", fallback_html)
+        self.assertEqual(debate._clean_thinking_tags("Visible <think>private chain"), "Visible ")
 
     async def test_run_debate_registers_foreground_loop(self):
         session = debate.DebateSession(
@@ -893,14 +928,16 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         original_appendix = debate._build_source_appendix
         original_archive = debate._archive_session
         original_clerk_query = debate._query_clerk_model
-        original_opening_html = debate._opening_statements_html
-        original_round_html = debate._round_responses_html
+        original_opening_rich = debate._opening_statements_rich_and_fallback_html
+        original_round_rich = debate._round_responses_rich_and_fallback_html
 
-        async def fake_opening_html(target, pro, anti):
-            return f"Opening: pro={pro} anti={anti}"
+        async def fake_opening_rich(target, pro, anti):
+            text = f"Opening: pro={pro} anti={anti}"
+            return text, text
 
-        async def fake_round_html(target, rn, q, pro, anti):
-            return f"Round {rn}: pro={pro} anti={anti}"
+        async def fake_round_rich(target, rn, q, pro, anti):
+            text = f"Round {rn}: pro={pro} anti={anti}"
+            return text, text
 
         async def fake_final_side_text(target, side):
             return f"{side} final"
@@ -921,8 +958,8 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_source_appendix = original_appendix
             debate._archive_session = fake_archive
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = fake_opening_html
-            debate._round_responses_html = fake_round_html
+            debate._opening_statements_rich_and_fallback_html = fake_opening_rich
+            debate._round_responses_rich_and_fallback_html = fake_round_rich
 
             # Patch _record_final_side_theses to use text generators
             def fake_record_final_side_theses(target, pro_text, anti_text):
@@ -944,8 +981,8 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_source_appendix = original_appendix
             debate._archive_session = original_archive
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = original_opening_html
-            debate._round_responses_html = original_round_html
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
+            debate._round_responses_rich_and_fallback_html = original_round_rich
 
         # Pro and anti may have been prepared in any internal order due to concurrency
         self.assertIn("pro", prepare_order)
@@ -1094,7 +1131,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         original_appendix = debate._build_source_appendix
         original_archive = debate._archive_session
         original_clerk_query = debate._query_clerk_model
-        original_opening_html = debate._opening_statements_html
+        original_opening_rich = debate._opening_statements_rich_and_fallback_html
 
         async def fake_prepare(bot, target, side):
             return f"{side} opening"
@@ -1111,8 +1148,9 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         async def fake_final_side_text(target, side):
             return f"{side} final"
 
-        async def fake_opening_html(target, pro_opening, anti_opening):
-            return f"{pro_opening}\n{anti_opening}"
+        async def fake_opening_rich(target, pro_opening, anti_opening):
+            text = f"{pro_opening}\n{anti_opening}"
+            return text, text
 
         def fake_archive(target):
             return None
@@ -1127,7 +1165,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_source_appendix = original_appendix
             debate._archive_session = fake_archive
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = fake_opening_html
+            debate._opening_statements_rich_and_fallback_html = fake_opening_rich
 
             self.assertNotIn(session.id, debate.DEBATE_COMMIT_LOCKS)
             debate._session_commit_lock(session)
@@ -1145,7 +1183,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._build_source_appendix = original_appendix
             debate._archive_session = original_archive
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = original_opening_html
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
 
     async def test_commit_lock_cleanup_on_cancellation(self):
         """Commit lock is cleaned up when debate is cancelled."""
@@ -1167,13 +1205,13 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         original_prepare = debate._prepare_side
         original_questions = debate._moderator_questions
         original_clerk_query = debate._query_clerk_model
-        original_opening_html = debate._opening_statements_html
+        original_opening_rich = debate._opening_statements_rich_and_fallback_html
 
         try:
             debate._prepare_side = fake_prepare_slow
             debate._moderator_questions = original_questions
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = original_opening_html
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
 
             debate._session_commit_lock(session)
             self.assertIn(session.id, debate.DEBATE_COMMIT_LOCKS)
@@ -1190,7 +1228,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate._prepare_side = original_prepare
             debate._moderator_questions = original_questions
             debate._query_clerk_model = original_clerk_query
-            debate._opening_statements_html = original_opening_html
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
             for task in list(debate.DEBATE_TASKS.values()):
                 task.cancel()
             debate.DEBATE_TASKS.clear()

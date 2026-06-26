@@ -41,7 +41,7 @@ from emery.config import (
 )
 from emery.helpers import emery_format
 from emery.logging_utils import format_logging_payload, safe_preview
-from emery.telegram_delivery import send_rich_or_split_html_message, send_split_html_message
+from emery.telegram_delivery import send_rich_html_or_split_html_message, send_rich_or_split_html_message, send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 from emery.tools import fetch_web_content, get_youtube_transcript
 import emery.globals as globals
@@ -183,7 +183,9 @@ def _message_content_to_text(content) -> str:
 
 
 def _clean_thinking_tags(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r"<think>.*", "", clean, flags=re.DOTALL | re.IGNORECASE)
+    return re.sub(r"</?think>", "", clean, flags=re.IGNORECASE)
 
 
 def _telegram_escape(text: str) -> str:
@@ -1080,16 +1082,18 @@ async def _run_question_round(bot, session: DebateSession, round_number: int, qu
         "Reply to opposing side:",
         first_response if first == "anti" else second_response,
     ])
-    await _send_html_text(
+    rich_html, fallback_html = await _round_responses_rich_and_fallback_html(
+        session,
+        round_number,
+        question,
+        pro_full_response,
+        anti_full_response,
+    )
+    await _send_rich_debate_loop_html(
         bot,
         session,
-        await _round_responses_html(
-            session,
-            round_number,
-            question,
-            pro_full_response,
-            anti_full_response,
-        ),
+        rich_html,
+        fallback_html,
     )
     logging.info("DEBATE: Question round completed session=%s round=%d", session.id, round_number)
 
@@ -1232,6 +1236,18 @@ async def _send_html_text(bot, session: DebateSession, html_text: str) -> None:
     )
 
 
+async def _send_rich_debate_loop_html(bot, session: DebateSession, rich_html_text: str, fallback_html_text: str) -> None:
+    if not str(rich_html_text or "").strip():
+        return
+    await send_rich_html_or_split_html_message(
+        bot,
+        session.chat_id,
+        rich_html_text,
+        fallback_html_text=fallback_html_text,
+        message_thread_id=session.message_thread_id,
+    )
+
+
 async def _send_clerk_source_notice(bot, session: DebateSession, source: dict) -> None:
     if bot is None:
         return
@@ -1273,6 +1289,26 @@ def _collapsed_argument_section(title: str, full_text: str) -> str:
     return f"<b>{escaped_title}</b>\n<blockquote expandable>{escaped_text}</blockquote>"
 
 
+def _rich_text_block(text: str) -> str:
+    clean = _clean_thinking_tags(str(text or "")).strip()
+    if not clean:
+        return "<p></p>"
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", clean):
+        lines = [_telegram_escape(line) for line in paragraph.splitlines()]
+        paragraphs.append(f"<p>{'<br/>'.join(lines)}</p>")
+    return "\n".join(paragraphs)
+
+
+def _rich_collapsed_argument_section(title: str, full_text: str) -> str:
+    return "\n".join([
+        "<details>",
+        f"<summary>{_telegram_escape(title)}</summary>",
+        _rich_text_block(full_text),
+        "</details>",
+    ])
+
+
 def _visible_summary_section(session: DebateSession, side: str, heading: str, summary: str, full_text: str) -> str:
     icon = "🔴" if side == "pro" else "🔵"
     if heading.lower() == "response":
@@ -1286,17 +1322,68 @@ def _visible_summary_section(session: DebateSession, side: str, heading: str, su
     ])
 
 
-async def _opening_statements_html(session: DebateSession, pro_opening: str, anti_opening: str) -> str:
+def _rich_visible_summary_section(session: DebateSession, side: str, heading: str, summary: str, full_text: str) -> str:
+    icon = "🔴" if side == "pro" else "🔵"
+    if heading.lower() == "response":
+        title = f"{icon} {_advocate_name(session, side)} responds"
+    else:
+        title = f"{icon} {_advocate_name(session, side)} {heading}"
+    return "\n".join([
+        f"<h3>{_telegram_escape(title)}</h3>",
+        _rich_text_block(summary),
+        _rich_collapsed_argument_section("Full argument", full_text),
+    ])
+
+
+async def _opening_statements_rich_and_fallback_html(session: DebateSession, pro_opening: str, anti_opening: str) -> tuple[str, str]:
     pro_summary, anti_summary = await asyncio.gather(
         _summarize_formal_response(session, "pro", "opening statement", pro_opening),
         _summarize_formal_response(session, "anti", "opening statement", anti_opening),
     )
-    return "\n\n".join([
+    fallback_html = "\n\n".join([
         "<b>The debate has begun!</b>",
         "<b>Opening Statements:</b>",
         _visible_summary_section(session, "pro", "Opening Statement", pro_summary, pro_opening),
         _visible_summary_section(session, "anti", "Opening Statement", anti_summary, anti_opening),
     ])
+    rich_html = "\n".join([
+        "<h2>The debate has begun!</h2>",
+        "<h3>Opening Statements</h3>",
+        _rich_visible_summary_section(session, "pro", "Opening Statement", pro_summary, pro_opening),
+        _rich_visible_summary_section(session, "anti", "Opening Statement", anti_summary, anti_opening),
+    ])
+    return rich_html, fallback_html
+
+
+async def _opening_statements_html(session: DebateSession, pro_opening: str, anti_opening: str) -> str:
+    _rich_html, fallback_html = await _opening_statements_rich_and_fallback_html(session, pro_opening, anti_opening)
+    return fallback_html
+
+
+async def _round_responses_rich_and_fallback_html(
+    session: DebateSession,
+    round_number: int,
+    question: str,
+    pro_response: str,
+    anti_response: str,
+) -> tuple[str, str]:
+    pro_summary, anti_summary = await asyncio.gather(
+        _summarize_formal_response(session, "pro", f"question round {round_number}", pro_response),
+        _summarize_formal_response(session, "anti", f"question round {round_number}", anti_response),
+    )
+    fallback_html = "\n\n".join([
+        f"<b>Question Round {round_number}:</b>",
+        _telegram_escape(question),
+        _visible_summary_section(session, "pro", "Response", pro_summary, pro_response),
+        _visible_summary_section(session, "anti", "Response", anti_summary, anti_response),
+    ])
+    rich_html = "\n".join([
+        f"<h2>Question Round {round_number}</h2>",
+        _rich_text_block(question),
+        _rich_visible_summary_section(session, "pro", "Response", pro_summary, pro_response),
+        _rich_visible_summary_section(session, "anti", "Response", anti_summary, anti_response),
+    ])
+    return rich_html, fallback_html
 
 
 async def _round_responses_html(
@@ -1306,16 +1393,14 @@ async def _round_responses_html(
     pro_response: str,
     anti_response: str,
 ) -> str:
-    pro_summary, anti_summary = await asyncio.gather(
-        _summarize_formal_response(session, "pro", f"question round {round_number}", pro_response),
-        _summarize_formal_response(session, "anti", f"question round {round_number}", anti_response),
+    _rich_html, fallback_html = await _round_responses_rich_and_fallback_html(
+        session,
+        round_number,
+        question,
+        pro_response,
+        anti_response,
     )
-    return "\n\n".join([
-        f"<b>Question Round {round_number}:</b>",
-        _telegram_escape(question),
-        _visible_summary_section(session, "pro", "Response", pro_summary, pro_response),
-        _visible_summary_section(session, "anti", "Response", anti_summary, anti_response),
-    ])
+    return fallback_html
 
 
 def _callback(session_id: str, action: str, *parts: str) -> str:
@@ -1403,7 +1488,8 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
         )
         session.debate_questions = await _moderator_questions(session)
         await _send_status(bot, session, _question_rounds_text(session))
-        await _send_html_text(bot, session, await _opening_statements_html(session, pro_opening, anti_opening))
+        rich_html, fallback_html = await _opening_statements_rich_and_fallback_html(session, pro_opening, anti_opening)
+        await _send_rich_debate_loop_html(bot, session, rich_html, fallback_html)
         for index, question in enumerate(session.debate_questions, start=1):
             await _run_question_round(bot, session, index, question)
         # Generate final theses concurrently, then record in deterministic order.

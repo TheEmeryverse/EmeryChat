@@ -100,16 +100,20 @@ def split_telegram_html(text: str, limit: int = MAX_TELEGRAM_HTML_MESSAGE_LEN) -
 
 def build_telegram_rich_message_payload(
     chat_id: int,
-    markdown_text: str,
+    rich_text: str,
     *,
+    rich_format: str = "markdown",
     reply_to_message_id: int = None,
     message_thread_id: int = None,
 ) -> dict:
     """Build the raw Bot API payload for sendRichMessage."""
+    if rich_format not in {"markdown", "html"}:
+        raise ValueError("rich_format must be 'markdown' or 'html'")
+
     payload = {
         "chat_id": chat_id,
         "rich_message": {
-            "markdown": str(markdown_text or ""),
+            rich_format: str(rich_text or ""),
         },
     }
 
@@ -126,8 +130,8 @@ def build_telegram_rich_message_payload(
     return payload
 
 
-def _rich_message_within_limits(markdown_text: str) -> bool:
-    return len(str(markdown_text or "").encode("utf-8")) <= MAX_TELEGRAM_RICH_MESSAGE_BYTES
+def _rich_message_within_limits(rich_text: str) -> bool:
+    return len(str(rich_text or "").encode("utf-8")) <= MAX_TELEGRAM_RICH_MESSAGE_BYTES
 
 
 async def _send_native_rich_message(bot, payload: dict):
@@ -195,6 +199,7 @@ async def send_rich_or_split_html_message(
     payload = build_telegram_rich_message_payload(
         chat_id,
         markdown_text,
+        rich_format="markdown",
         reply_to_message_id=reply_to_message_id,
         message_thread_id=message_thread_id,
     )
@@ -223,6 +228,61 @@ async def send_rich_or_split_html_message(
     elif ENABLE_TELEGRAM_RICH_MESSAGES:
         logging.info(
             "TELEGRAM RICH: final reply is over %s bytes; falling back to split HTML.",
+            MAX_TELEGRAM_RICH_MESSAGE_BYTES,
+        )
+
+    return await send_split_html_message(
+        bot,
+        chat_id,
+        fallback_text,
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
+
+
+async def send_rich_html_or_split_html_message(
+    bot,
+    chat_id: int,
+    rich_html_text: str,
+    *,
+    fallback_html_text: str = None,
+    reply_to_message_id: int = None,
+    message_thread_id: int = None,
+):
+    """Send Telegram Rich HTML, falling back to legacy split HTML."""
+    fallback_text = fallback_html_text if fallback_html_text is not None else str(rich_html_text or "")
+    payload = build_telegram_rich_message_payload(
+        chat_id,
+        rich_html_text,
+        rich_format="html",
+        reply_to_message_id=reply_to_message_id,
+        message_thread_id=message_thread_id,
+    )
+
+    if ENABLE_TELEGRAM_RICH_MESSAGES and _rich_message_within_limits(rich_html_text):
+        try:
+            sent_msg = await _send_native_rich_message(bot, payload)
+            if sent_msg is None:
+                sent_msg = await _send_raw_rich_message(payload)
+            return [sent_msg]
+        except BadRequest as e:
+            logging.warning(
+                "TELEGRAM RICH: sendRichMessage rejected rich HTML for chat_id=%s thread_id=%s; falling back to HTML: %s",
+                chat_id,
+                payload.get("message_thread_id"),
+                e,
+            )
+        except Exception as e:
+            logging.warning(
+                "TELEGRAM RICH: sendRichMessage rich HTML failed for chat_id=%s thread_id=%s; falling back to HTML: %s",
+                chat_id,
+                payload.get("message_thread_id"),
+                e,
+                exc_info=True,
+            )
+    elif ENABLE_TELEGRAM_RICH_MESSAGES:
+        logging.info(
+            "TELEGRAM RICH: rich HTML is over %s bytes; falling back to split HTML.",
             MAX_TELEGRAM_RICH_MESSAGE_BYTES,
         )
 

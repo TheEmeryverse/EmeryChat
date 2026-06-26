@@ -26,7 +26,7 @@ from emery.helpers import (
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.engine import emery_engine
-from emery.telegram_delivery import send_rich_or_split_html_message, send_split_html_message
+from emery.telegram_delivery import send_rich_html_or_split_html_message, send_rich_or_split_html_message, send_split_html_message
 from emery.docling import (
     detect_supported_document_type,
     convert_document_bytes,
@@ -54,6 +54,45 @@ _HEARTBEAT_EXCLUDED_CONTEXT_RE = re.compile(
     r"\b(security|camera|reolink|motion alert|snapshot|news|headline|reuters|fox news)\b",
     re.IGNORECASE,
 )
+
+
+def _thought_process_title(part_index: int = None, part_count: int = None) -> str:
+    if part_index is not None and part_count and part_count > 1:
+        return f"🧠 {MODEL_NAME}'s Thought Process (Part {part_index}/{part_count})"
+    return f"🧠 {MODEL_NAME}'s Thought Process"
+
+
+def _rich_thought_html(title: str, thought_text: str) -> str:
+    escaped_title = telegram_escape(title)
+    escaped_text = telegram_escape(thought_text).replace("\n", "<br/>")
+    return "\n".join([
+        "<details>",
+        f"<summary>{escaped_title}</summary>",
+        f"<p><i>{escaped_text}</i></p>",
+        "</details>",
+    ])
+
+
+def _fallback_thought_html(title: str, thought_text: str) -> str:
+    return (
+        f"<b>{telegram_escape(title)}</b> (Expand to read):\n"
+        f"<blockquote expandable><i>{telegram_escape(thought_text)}</i></blockquote>"
+    )
+
+
+async def send_model_thought_message(chat_id: int, thought_text: str, *, part_index: int = None, part_count: int = None, message_thread_id: int = None):
+    """Send intentionally visible model thoughts as hidden Rich Message details with HTML fallback."""
+    clean_thought = str(thought_text or "").strip()
+    if not clean_thought:
+        return []
+    title = _thought_process_title(part_index, part_count)
+    return await send_rich_html_or_split_html_message(
+        globals.application_bot,
+        chat_id,
+        _rich_thought_html(title, clean_thought),
+        fallback_html_text=_fallback_thought_html(title, clean_thought),
+        message_thread_id=message_thread_id,
+    )
 
 
 async def _build_supported_document_content_text(document, caption: str = "") -> str:
@@ -508,10 +547,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         if match.strip()
     ]
 
-    clean_response = response_text
-
-    if thinking_blocks:
-        clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean_response = clean_thinking_tags(response_text).strip()
 
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
@@ -532,13 +568,13 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
 
         for idx, chunk in enumerate(chunks):
-            if len(chunks) > 1:
-                header = f"🧠 <b>{telegram_escape(MODEL_NAME)}'s Thought Process (Part {idx+1}/{len(chunks)})</b> (Expand to read):\n"
-            else:
-                header = f"🧠 <b>{telegram_escape(MODEL_NAME)}'s Thought Process</b> (Expand to read):\n"
-
-            thinking_msg = f"{header}<blockquote expandable><i>{telegram_escape(chunk)}</i></blockquote>"
-            await globals.application_bot.send_message(chat_id=chat_id, text=thinking_msg, parse_mode="HTML", message_thread_id=globals.CURRENT_THREAD_ID.get())
+            await send_model_thought_message(
+                chat_id,
+                chunk,
+                part_index=idx + 1,
+                part_count=len(chunks),
+                message_thread_id=globals.CURRENT_THREAD_ID.get(),
+            )
 
     sent_msgs = []
     # --- SINGLE FINAL REPLY DISPATCHER ---
@@ -743,10 +779,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
         typing_stop.set()
         await typing_task
         
-    start_tag = "<" + "think" + ">"
-    end_tag = "</" + "think" + ">"
-    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-    clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean_response = clean_thinking_tags(response_text).strip()
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
@@ -1035,10 +1068,7 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
         logging.error(f"Error executing heartbeat engine: {e}")
         response_text = "DONE"
         
-    start_tag = "<" + "think" + ">"
-    end_tag = "</" + "think" + ">"
-    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-    clean_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean_response = clean_thinking_tags(response_text).strip()
     
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
