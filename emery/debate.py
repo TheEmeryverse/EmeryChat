@@ -39,8 +39,9 @@ from emery.config import (
     SEARXNG_URL,
     USER_TIMEZONE,
 )
+from emery.helpers import emery_format
 from emery.logging_utils import format_logging_payload, safe_preview
-from emery.telegram_delivery import send_split_html_message
+from emery.telegram_delivery import send_rich_or_split_html_message, send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
 from emery.tools import fetch_web_content, get_youtube_transcript
 import emery.globals as globals
@@ -1211,9 +1212,13 @@ async def _send_long_text(bot, session: DebateSession, text: str) -> None:
     clean = str(text or "").strip()
     if not clean:
         return
-    chunk_size = 3800
-    for start in range(0, len(clean), chunk_size):
-        await _send_status(bot, session, clean[start:start + chunk_size])
+    await send_rich_or_split_html_message(
+        bot,
+        session.chat_id,
+        clean,
+        fallback_html_text=emery_format(clean),
+        message_thread_id=session.message_thread_id,
+    )
 
 
 async def _send_html_text(bot, session: DebateSession, html_text: str) -> None:
@@ -1603,7 +1608,16 @@ async def _open_archived_debate(update, context, session_id: str) -> None:
     if not memo_path.exists():
         await target_message.reply_text(f"Archived debate {session_id} is missing its memo file.")
         return
-    await target_message.reply_text(memo_path.read_text(encoding="utf-8")[:3800])
+    memo = memo_path.read_text(encoding="utf-8")
+    chat_id = update.effective_chat.id if update.effective_chat else entry.get("chat_id")
+    thread_id = normalize_message_thread_id(chat_id, getattr(target_message, "message_thread_id", None))
+    await send_rich_or_split_html_message(
+        context.bot,
+        chat_id,
+        memo,
+        fallback_html_text=emery_format(memo),
+        message_thread_id=thread_id,
+    )
 
 
 def _topic_has_enough_substance(topic: str) -> bool:

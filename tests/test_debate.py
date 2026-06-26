@@ -8,33 +8,43 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-if "telegram" not in sys.modules:
+telegram_module = sys.modules.get("telegram")
+telegram_error_module = sys.modules.get("telegram.error")
+if telegram_module is None:
     telegram_module = types.ModuleType("telegram")
+    sys.modules["telegram"] = telegram_module
+if telegram_error_module is None:
     telegram_error_module = types.ModuleType("telegram.error")
+    sys.modules["telegram.error"] = telegram_error_module
 
+if not hasattr(telegram_module, "InlineKeyboardButton"):
     class InlineKeyboardButton:
         def __init__(self, text, callback_data=None):
             self.text = text
             self.callback_data = callback_data
 
+    telegram_module.InlineKeyboardButton = InlineKeyboardButton
+
+if not hasattr(telegram_module, "InlineKeyboardMarkup"):
     class InlineKeyboardMarkup:
         def __init__(self, inline_keyboard):
             self.inline_keyboard = inline_keyboard
 
+    telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup
+
+if not hasattr(telegram_module, "ReplyParameters"):
     class ReplyParameters:
         def __init__(self, message_id, allow_sending_without_reply=False):
             self.message_id = message_id
             self.allow_sending_without_reply = allow_sending_without_reply
 
+    telegram_module.ReplyParameters = ReplyParameters
+
+if not hasattr(telegram_error_module, "BadRequest"):
     class BadRequest(Exception):
         pass
 
-    telegram_module.InlineKeyboardButton = InlineKeyboardButton
-    telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup
-    telegram_module.ReplyParameters = ReplyParameters
     telegram_error_module.BadRequest = BadRequest
-    sys.modules["telegram"] = telegram_module
-    sys.modules["telegram.error"] = telegram_error_module
 
 
 from emery import debate
@@ -44,6 +54,11 @@ import emery.globals as globals
 class FakeBot:
     def __init__(self):
         self.messages = []
+        self.rich_messages = []
+
+    async def send_rich_message(self, **kwargs):
+        self.rich_messages.append(kwargs)
+        return types.SimpleNamespace(message_id=len(self.rich_messages))
 
     async def send_message(self, **kwargs):
         self.messages.append(kwargs)
@@ -638,6 +653,130 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
 
         debate.DEBATE_ARCHIVE_DIR = original_archive_dir
         debate.DEBATE_INDEX_PATH = original_index_path
+
+    async def test_debate_final_outputs_use_rich_delivery_path(self):
+        session = debate.DebateSession(
+            id="rich1",
+            topic="Tax policy",
+            chat_id=123,
+            message_thread_id=789,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        calls = []
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_round = debate._run_question_round
+        original_final_side_text = debate._final_side_thesis_text
+        original_final_memo = debate._build_final_memo
+        original_appendix = debate._build_source_appendix
+        original_archive = debate._archive_session
+        original_opening_html = debate._opening_statements_html
+        original_rich = debate.send_rich_or_split_html_message
+
+        async def fake_prepare(bot, target, side):
+            return f"{side} opening"
+
+        async def fake_questions(target):
+            return ["Q1"]
+
+        async def fake_round(bot, target, round_number, question):
+            target.round_results.append({"round": round_number, "winner": "tie"})
+
+        async def fake_final_side_text(target, side):
+            return f"{side} final"
+
+        async def fake_final_memo(target):
+            return "# Final Memo\n\n- **Finding**"
+
+        def fake_appendix(target):
+            return "# Sources\n\n- [S1] Example"
+
+        def fake_archive(target):
+            return None
+
+        async def fake_opening_html(target, pro_opening, anti_opening):
+            return "<b>Openings</b>"
+
+        async def fake_rich(bot, chat_id, markdown_text, **kwargs):
+            calls.append({
+                "chat_id": chat_id,
+                "markdown": markdown_text,
+                "fallback": kwargs.get("fallback_html_text"),
+                "thread": kwargs.get("message_thread_id"),
+            })
+            return [types.SimpleNamespace(message_id=len(calls))]
+
+        try:
+            debate._prepare_side = fake_prepare
+            debate._moderator_questions = fake_questions
+            debate._run_question_round = fake_round
+            debate._final_side_thesis_text = fake_final_side_text
+            debate._build_final_memo = fake_final_memo
+            debate._build_source_appendix = fake_appendix
+            debate._archive_session = fake_archive
+            debate._opening_statements_html = fake_opening_html
+            debate.send_rich_or_split_html_message = fake_rich
+            await debate._run_debate_session(session, FakeBot())
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._run_question_round = original_round
+            debate._final_side_thesis_text = original_final_side_text
+            debate._build_final_memo = original_final_memo
+            debate._build_source_appendix = original_appendix
+            debate._archive_session = original_archive
+            debate._opening_statements_html = original_opening_html
+            debate.send_rich_or_split_html_message = original_rich
+
+        self.assertEqual([call["markdown"] for call in calls], ["# Final Memo\n\n- **Finding**", "# Sources\n\n- [S1] Example"])
+        self.assertEqual([call["chat_id"] for call in calls], [123, 123])
+        self.assertEqual([call["thread"] for call in calls], [789, 789])
+        self.assertIn("<strong>Finding</strong>", calls[0]["fallback"])
+        self.assertIn("Example", calls[1]["fallback"])
+
+    async def test_open_archived_debate_uses_rich_delivery_path(self):
+        original_index_path = debate.DEBATE_INDEX_PATH
+        original_rich = debate.send_rich_or_split_html_message
+        calls = []
+
+        async def fake_rich(bot, chat_id, markdown_text, **kwargs):
+            calls.append({
+                "bot": bot,
+                "chat_id": chat_id,
+                "markdown": markdown_text,
+                "fallback": kwargs.get("fallback_html_text"),
+                "thread": kwargs.get("message_thread_id"),
+            })
+            return [types.SimpleNamespace(message_id=1)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memo_path = os.path.join(tmp, "memo.md")
+            with open(memo_path, "w", encoding="utf-8") as handle:
+                handle.write("# Archived Memo\n\n- **Finding**")
+            debate.DEBATE_INDEX_PATH = os.path.join(tmp, "config", "debate_sessions.json")
+            debate._save_index([{
+                "id": "arch-rich",
+                "topic": "Tax policy",
+                "memo_path": memo_path,
+            }])
+
+            try:
+                debate.send_rich_or_split_html_message = fake_rich
+                update = FakeUpdate(chat_id=-100123)
+                update.message.message_thread_id = 456
+                context = FakeContext()
+                await debate._open_archived_debate(update, context, "arch-rich")
+            finally:
+                debate.send_rich_or_split_html_message = original_rich
+                debate.DEBATE_INDEX_PATH = original_index_path
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["bot"], context.bot)
+        self.assertEqual(calls[0]["chat_id"], -100123)
+        self.assertEqual(calls[0]["thread"], 456)
+        self.assertEqual(calls[0]["markdown"], "# Archived Memo\n\n- **Finding**")
+        self.assertIn("<strong>Finding</strong>", calls[0]["fallback"])
 
     async def test_run_debate_registers_foreground_loop(self):
         session = debate.DebateSession(
