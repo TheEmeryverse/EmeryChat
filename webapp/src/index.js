@@ -10,6 +10,7 @@ import {
 import { Home } from './home'
 import { Login } from './login'
 import { SignUp } from './signup'
+import { Settings } from './settings'
 import './styles.css';
 
 const rootRoute = createRootRoute()
@@ -32,9 +33,17 @@ const signupRoute = createRoute({
   component: SignUp,
 })
 
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'settings',
+  component: Settings,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  loginRoute, signupRoute
+  loginRoute,
+  signupRoute,
+  settingsRoute, 
 ])
 
 // Create a new router instance

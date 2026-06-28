@@ -35,7 +35,16 @@ export const Home = () => {
 
     return <>
         <div className='backdrop'/>
-        <div className="header">Emery Chat</div>
+        <div className="header">
+            <span>Emery Chat</span>
+            <button
+                className="gear-icon"
+                title="Settings"
+                onClick={() =>  window.location.href = '/settings'}
+            >
+            ⚙️
+          </button>
+        </div>
         <div className="content_wrapper">
             {userData._id ? 
             <TextChat
