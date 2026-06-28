@@ -81,6 +81,19 @@ import * as React from 'react';
     /* ... you can keep adding the rest of your list here in the same pattern ... */
   ];
 
+  const fetchUserData = async (setUserData) => {
+      try {
+          const response = await fetch('http://localhost:3002/user/me', { credentials: 'include' })
+          const data = await response.json()
+          if (data.channels) {
+              setUserData({...data})
+          }
+      } catch {
+          window.location.href = '/login'
+          console.log('failed to connect to server')
+      }
+  }
+
   /* --------------------------------------------------------------------
      The Settings component
   -------------------------------------------------------------------- */
@@ -88,6 +101,12 @@ import * as React from 'react';
     const [values, setValues] = React.useState({});
     const [loading, setLoading] = React.useState(true);
     const [msg, setMsg]     = React.useState('');
+    const [userData, setUserData] = React.useState({})
+    console.log(userData)
+
+    React.useEffect(() => {
+        fetchUserData(setUserData)
+    }, [setUserData])
 
     /* Fetch the current values when the page loads */
     React.useEffect(() => {

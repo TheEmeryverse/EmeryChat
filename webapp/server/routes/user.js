@@ -75,7 +75,7 @@ router.get('/me', authentication.required(), (req, res, next) => {
     setHeaders(res)
 
     const channels = req.user.channels ?? []
-    const {name, avatar = '', loginHistory = [], _id} = req.user
+    const {name, avatar = '', loginHistory = [], _id, configurations = {}} = req.user
     const session = loginHistory[loginHistory.length - 1].sessionID
 
     return res.json({
@@ -84,6 +84,7 @@ router.get('/me', authentication.required(), (req, res, next) => {
         name,
         avatar,
         session,
+        configurations,
         _id,
     })
 })
