@@ -9,60 +9,60 @@ async function recreateDesignDocs() {
     
     // Define the design documents to create
     const designDocs = [
-      {
-        _id: '_design/user',
+       {
+         _id: '_design/user',
         views: {
           forName: {
-            map: "function (doc) {\n  if (doc.type === 'user') {\n    emit(doc.name, {\n      _id: doc.id,\n      name: doc.name,\n      last_seen: doc.last_seen\n    })\n  }\n}"
+            map: "function (doc) {\n  if (doc.type === 'user') {\n    emit(doc.name, {\n       _id: doc.id,\n      name: doc.name,\n      last_seen: doc.last_seen,\n      configurations: doc.configurations\n     })\n   }\n}"
           },
           all: {
-            map: "function (doc) {\n  if (doc.type === 'user') {\n    emit(doc._id, {\n      _id: doc._id,\n      name: doc.name,\n      last_seen: doc.last_seen\n    });\n  }\n}"
+            map: "function (doc) {\n  if (doc.type === 'user') {\n    emit(doc._id, {\n       _id: doc._id,\n      name: doc.name,\n      last_seen: doc.last_seen,\n     });\n   }\n}"
           }
         },
         language: "javascript"
-      },
-      {
-        _id: '_design/chat',
+       },
+       {
+         _id: '_design/chat',
         views: {
           forOwner: {
-            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc.owner, {\n      _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages    })\n  }\n}"
+            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc.owner, {\n       _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages     })\n   }\n}"
           },
           all: {
-            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc._id, {\n      _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages    });\n  }\n}"
+            map: "function (doc) {\n  if (doc.type === 'chat') {\n    emit(doc._id, {\n       _id: doc._id,\n      visibility: doc.visibility,\n      name: doc.name,\n      chat_type: doc.chat_type,\n      owner: doc.owner,\n      members: doc.members,\n      messages: doc.messages     });\n   }\n}"
           }
         },
         language: "javascript"
-      }
-    ];
+       }
+     ];
 
     // Delete existing design documents and recreate them
     for (const designDoc of designDocs) {
       try {
-        // Get the current design document to check if it exists
+         // Get the current design document to check if it exists
         const currentDoc = await db.get(designDoc._id);
         
-        // Delete the existing design document
+         // Delete the existing design document
         await db.destroy(designDoc._id, currentDoc._rev);
         console.log(`Deleted existing ${designDoc._id}`);
-      } catch (error) {
+       } catch (error) {
         if (error.statusCode !== 404) {
           console.error(`Error deleting ${designDoc._id}:`, error);
           throw error;
-        }
-        // If it doesn't exist, that's fine
+         }
+         // If it doesn't exist, that's fine
         console.log(`${designDoc._id} does not exist, creating fresh`);
-      }
+       }
 
-      // Create the new design document
+       // Create the new design document
       await db.insert(designDoc);
       console.log(`Created new ${designDoc._id}`);
-    }
+     }
 
     console.log('All design documents recreated successfully!');
-  } catch (error) {
+   } catch (error) {
     console.error('Error recreating design documents:', error);
     process.exit(1);
-  }
+   }
 }
 
 // Run the function

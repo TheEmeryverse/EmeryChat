@@ -87,5 +87,38 @@ router.get('/me', authentication.required(), (req, res, next) => {
         _id,
     })
 })
+router.post('/configurations', authentication.required(), async (req, res, next) => {
+    setHeaders(res)
+
+    const configurations = req.body
+    if (!configurations || typeof configurations !== 'object') {
+        return res.json({
+            success: false,
+            reason: "Invalid body: expected an object of configuration key/value pairs"
+         })
+    }
+
+    try {
+        const user = req.user
+        user.configurations = {
+            ...user.configurations,
+            ...configurations
+        }
+
+        await User.save(user)
+
+        return res.json({
+            success: true,
+            configurations: user.configurations
+         })
+    } catch (error) {
+        console.warn('Failed to save user configurations:', error)
+        return res.json({
+            success: false,
+            reason: "Failed to save configurations"
+         })
+    }
+})
+
 
 module.exports = router
