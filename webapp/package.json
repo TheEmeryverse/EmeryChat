@@ -25,13 +25,13 @@
     "globals": "^16.5.0",
     "html-webpack-plugin": "^5.6.7",
     "style-loader": "^4.0.0",
-    "webpack": "^5.107.2",
+    "webpack": "^5.108.1",
     "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^5.2.4"
+    "webpack-dev-server": "^5.2.5"
   },
   "dependencies": {
-    "@coreui/react": "^5.11.0",
-    "@tanstack/react-router": "^1.170.9",
+    "@coreui/react": "^5.12.0",
+    "@tanstack/react-router": "^1.170.16",
     "bcryptjs": "^3.0.3",
     "connect-redis": "^9.0.0",
     "cors": "^2.8.6",
