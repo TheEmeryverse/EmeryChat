@@ -1285,6 +1285,10 @@ class TestNormalizeParagraphs(unittest.TestCase):
         )
         self.assertEqual(result, ["One", "Two"])
 
+    def test_markdown_blocks_are_normalized_to_one_prose_line(self):
+        result = debate._normalize_paragraphs(["# Heading\n- supporting point"], 3)
+        self.assertEqual(result, ["Heading - supporting point"])
+
 
 class TestFormatMemoText(unittest.TestCase):
     """Unit tests for _format_memo_text — headings, side names, tie variant."""
@@ -1301,7 +1305,6 @@ class TestFormatMemoText(unittest.TestCase):
             ["Loser one.", "Loser two."], ["R1: Pro — good point"]
         )
         self.assertIn("# Pro wins", text)
-        self.assertIn("Score: Pro 2, Anti 1", text)
         self.assertIn("## Strengths and Weaknesses of Anti", text)
 
     def test_anti_winner_heading(self):
@@ -1333,7 +1336,7 @@ class TestFormatMemoText(unittest.TestCase):
         self.assertIn("# No clear winner", text)
         self.assertIn("## Analysis of Both Positions", text)
 
-    def test_score_line_in_text(self):
+    def test_score_line_is_not_an_extra_paragraph(self):
         outcome = {
             "title": "Pro wins",
             "score_line": "Score: Pro 3, Anti 0, Ties 0",
@@ -1343,7 +1346,9 @@ class TestFormatMemoText(unittest.TestCase):
         text = debate._format_memo_text(
             outcome, ["Synth one."], ["Loser one."], []
         )
-        self.assertIn("Score: Pro 3, Anti 0, Ties 0", text)
+        self.assertNotIn("Score: Pro 3, Anti 0, Ties 0", text)
+        self.assertEqual(text.count("Synth one."), 1)
+        self.assertEqual(text.count("Loser one."), 1)
 
 
 class TestBuildFinalMemo(unittest.IsolatedAsyncioTestCase):
@@ -1417,7 +1422,7 @@ class TestBuildFinalMemo(unittest.IsolatedAsyncioTestCase):
             debate._query_main_model = original
 
         self.assertIn("Pro wins", memo)
-        self.assertIn("Score: Pro 1, Anti 0", memo)
+        self.assertIn("Pro won 1 round", memo)
 
     async def test_tie_no_losing_heading(self):
         session = debate.DebateSession(
@@ -1586,8 +1591,8 @@ class TestBuildFinalMemoExtended(unittest.IsolatedAsyncioTestCase):
         # Check synthesis section specifically
         synth_section = memo.split("## Strengths")[0]
         synth_paras = self._count_rendered_paragraphs(synth_section)
-        self.assertGreaterEqual(synth_paras, 1, "Synthesis must have at least 1 paragraph")
-        self.assertLessEqual(synth_paras, 3, f"Synthesis must have at most 3 paragraphs, got {len(synth_paras)}")
+        self.assertGreaterEqual(len(synth_paras), 1, "Synthesis must have at least 1 paragraph")
+        self.assertLessEqual(len(synth_paras), 3, f"Synthesis must have at most 3 paragraphs, got {len(synth_paras)}")
 
     def test_readability_prompt_captured(self):
         """Prompt sent to model must include readability instructions."""
@@ -1635,6 +1640,54 @@ class TestBuildFinalMemoExtended(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Anti actually won", memo)
         # Must have correct heading
         self.assertIn("# Pro wins", memo)
+
+    def test_contradiction_rejection_says_winner_lost(self):
+        """Valid JSON claiming the executable winner lost must trigger fallback."""
+        session = self._make_session()
+        session.round_results = [{"winner": "pro", "rationale": "better evidence"}]
+        fake_json = json.dumps({
+            "synthesis_paragraphs": ["Pro lost the debate."],
+            "losing_argument_paragraphs": ["Anti had a clear alternative."]
+        })
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        self.assertNotIn("Pro lost", memo)
+        self.assertIn("# Pro wins", memo)
+
+    def test_loser_round_win_is_not_mistaken_for_overall_victory(self):
+        """A truthful claim about one round must not trigger contradiction fallback."""
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "pro", "rationale": "better evidence"},
+            {"winner": "anti", "rationale": "lower cost"},
+            {"winner": "pro", "rationale": "clearer answer"},
+        ]
+        fake_json = json.dumps({
+            "synthesis_paragraphs": ["Anti won 1 round, but Pro won the debate overall."],
+            "losing_argument_paragraphs": ["Anti's strength was cost. Its weakness was evidence."]
+        })
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        self.assertIn("Anti won 1 round", memo)
+        self.assertIn("Pro won the debate overall", memo)
 
     def test_side_names_in_fallback_synthesis(self):
         """Fallback synthesis must use actual side names, not generic Pro/Anti."""
@@ -1684,10 +1737,9 @@ class TestBuildFinalMemoExtended(unittest.IsolatedAsyncioTestCase):
             debate._query_main_model = original
 
         losing_section = memo.split("## Strengths")[1] if "## Strengths" in memo else ""
-        # Must contain something beyond just "lost on round counts"
-        # It should have rationale-based content
-        self.assertNotIn("lost on round counts.", losing_section,
-            f"Fallback losing should have more substance: {losing_section}")
+        self.assertIn("strength", losing_section.lower())
+        self.assertIn("weakness", losing_section.lower())
+        self.assertIn("stronger evidence", losing_section)
 
     def test_multiline_rationale_normalized(self):
         """Multiline rationale in fallback should produce bounded paragraphs."""
@@ -1753,6 +1805,9 @@ class TestSourceAppendixRichAndFallbackHtml(unittest.TestCase):
         self.assertIn("href=\"https://example.com\"", rich_html)
         self.assertIn("A summary", rich_html)
         self.assertIn("<blockquote expandable>", fallback_html)
+        self.assertTrue(rich_html.startswith("<details>"))
+        self.assertTrue(rich_html.endswith("</details>"))
+        self.assertNotIn("spoiler", rich_html.lower())
 
     def test_failed_fetch_label(self):
         session = self._make_session(sources=[{
