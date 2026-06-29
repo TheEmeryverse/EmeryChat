@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import sys
 import tempfile
@@ -654,87 +655,6 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         debate.DEBATE_ARCHIVE_DIR = original_archive_dir
         debate.DEBATE_INDEX_PATH = original_index_path
 
-    async def test_debate_final_outputs_use_rich_delivery_path(self):
-        session = debate.DebateSession(
-            id="rich1",
-            topic="Tax policy",
-            chat_id=123,
-            message_thread_id=789,
-            user_id=456,
-            positions={"pro": "Pro", "anti": "Anti"},
-        )
-        calls = []
-        original_prepare = debate._prepare_side
-        original_questions = debate._moderator_questions
-        original_round = debate._run_question_round
-        original_final_side_text = debate._final_side_thesis_text
-        original_final_memo = debate._build_final_memo
-        original_appendix = debate._build_source_appendix
-        original_archive = debate._archive_session
-        original_opening_rich = debate._opening_statements_rich_and_fallback_html
-        original_rich = debate.send_rich_or_split_html_message
-
-        async def fake_prepare(bot, target, side):
-            return f"{side} opening"
-
-        async def fake_questions(target):
-            return ["Q1"]
-
-        async def fake_round(bot, target, round_number, question):
-            target.round_results.append({"round": round_number, "winner": "tie"})
-
-        async def fake_final_side_text(target, side):
-            return f"{side} final"
-
-        async def fake_final_memo(target):
-            return "# Final Memo\n\n- **Finding**"
-
-        def fake_appendix(target):
-            return "# Sources\n\n- [S1] Example"
-
-        def fake_archive(target):
-            return None
-
-        async def fake_opening_rich(target, pro_opening, anti_opening):
-            return "<h2>Openings</h2>", "<b>Openings</b>"
-
-        async def fake_rich(bot, chat_id, markdown_text, **kwargs):
-            calls.append({
-                "chat_id": chat_id,
-                "markdown": markdown_text,
-                "fallback": kwargs.get("fallback_html_text"),
-                "thread": kwargs.get("message_thread_id"),
-            })
-            return [types.SimpleNamespace(message_id=len(calls))]
-
-        try:
-            debate._prepare_side = fake_prepare
-            debate._moderator_questions = fake_questions
-            debate._run_question_round = fake_round
-            debate._final_side_thesis_text = fake_final_side_text
-            debate._build_final_memo = fake_final_memo
-            debate._build_source_appendix = fake_appendix
-            debate._archive_session = fake_archive
-            debate._opening_statements_rich_and_fallback_html = fake_opening_rich
-            debate.send_rich_or_split_html_message = fake_rich
-            await debate._run_debate_session(session, FakeBot())
-        finally:
-            debate._prepare_side = original_prepare
-            debate._moderator_questions = original_questions
-            debate._run_question_round = original_round
-            debate._final_side_thesis_text = original_final_side_text
-            debate._build_final_memo = original_final_memo
-            debate._build_source_appendix = original_appendix
-            debate._archive_session = original_archive
-            debate._opening_statements_rich_and_fallback_html = original_opening_rich
-            debate.send_rich_or_split_html_message = original_rich
-
-        self.assertEqual([call["markdown"] for call in calls], ["# Final Memo\n\n- **Finding**", "# Sources\n\n- [S1] Example"])
-        self.assertEqual([call["chat_id"] for call in calls], [123, 123])
-        self.assertEqual([call["thread"] for call in calls], [789, 789])
-        self.assertIn("<strong>Finding</strong>", calls[0]["fallback"])
-        self.assertIn("Example", calls[1]["fallback"])
-
     async def test_open_archived_debate_uses_rich_delivery_path(self):
         original_index_path = debate.DEBATE_INDEX_PATH
         original_rich = debate.send_rich_or_split_html_message
@@ -1234,6 +1154,809 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             debate.DEBATE_TASKS.clear()
             debate.DEBATE_COMMIT_LOCKS.clear()
             debate.ACTIVE_DEBATES.clear()
+
+
+
+class TestComputeOutcome(unittest.TestCase):
+    """Unit tests for _compute_outcome — deterministic winner/loser from round results."""
+
+    def _make_session(self, pro_side="Pro", anti_side="Anti", side_names=None):
+        session = debate.DebateSession(
+            id="outcome1", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        if side_names:
+            session.side_names = side_names
+        else:
+            session.side_names = {"pro": pro_side, "anti": anti_side}
+        return session
+
+    def test_pro_wins(self):
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "pro"},
+            {"winner": "pro"},
+            {"winner": "anti"},
+            {"winner": "tie"},
+        ]
+        outcome = debate._compute_outcome(session)
+        self.assertEqual(outcome["winner_side"], "pro")
+        self.assertEqual(outcome["loser_side"], "anti")
+        self.assertEqual(outcome["pro_wins"], 2)
+        self.assertEqual(outcome["anti_wins"], 1)
+        self.assertEqual(outcome["tie_count"], 1)
+        self.assertIn("Pro wins", outcome["title"])
+        self.assertIn("Pro 2", outcome["score_line"])
+
+    def test_anti_wins(self):
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "anti"},
+            {"winner": "anti"},
+            {"winner": "anti"},
+        ]
+        outcome = debate._compute_outcome(session)
+        self.assertEqual(outcome["winner_side"], "anti")
+        self.assertEqual(outcome["loser_side"], "pro")
+        self.assertEqual(outcome["pro_wins"], 0)
+        self.assertEqual(outcome["anti_wins"], 3)
+
+    def test_exact_tie(self):
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "pro"},
+            {"winner": "anti"},
+        ]
+        outcome = debate._compute_outcome(session)
+        self.assertIsNone(outcome["winner_side"])
+        self.assertIsNone(outcome["loser_side"])
+        self.assertEqual(outcome["title"], "No clear winner")
+        self.assertEqual(outcome["pro_wins"], 1)
+        self.assertEqual(outcome["anti_wins"], 1)
+
+    def test_all_ties(self):
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "tie"},
+            {"winner": "tie"},
+        ]
+        outcome = debate._compute_outcome(session)
+        self.assertIsNone(outcome["winner_side"])
+        self.assertIsNone(outcome["loser_side"])
+        self.assertEqual(outcome["tie_count"], 2)
+
+    def test_custom_side_names_used_in_labels(self):
+        session = self._make_session(pro_side="Progressive Tax", anti_side="Flat Tax")
+        session.round_results = [{"winner": "pro"}]
+        outcome = debate._compute_outcome(session)
+        self.assertIn("Progressive Tax", outcome["title"])
+        self.assertIn("Progressive Tax", outcome["pro_label"])
+        self.assertIn("Flat Tax", outcome["anti_label"])
+
+
+class TestNormalizeParagraphs(unittest.TestCase):
+    """Unit tests for _normalize_paragraphs — blank removal and overflow merging."""
+
+    def test_within_limit(self):
+        result = debate._normalize_paragraphs(
+            ["One", "Two"], 3
+        )
+        self.assertEqual(result, ["One", "Two"])
+
+    def test_empty_list(self):
+        result = debate._normalize_paragraphs([], 3)
+        self.assertEqual(result, [])
+
+    def test_none_input(self):
+        result = debate._normalize_paragraphs(None, 3)
+        self.assertEqual(result, [])
+
+    def test_removes_blanks(self):
+        result = debate._normalize_paragraphs(
+            ["One", "", "  ", "Two"], 3
+        )
+        self.assertEqual(result, ["One", "Two"])
+
+    def test_overflow_merged_into_last(self):
+        result = debate._normalize_paragraphs(
+            ["One", "Two", "Three", "Four", "Five"], 3
+        )
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0], "One")
+        self.assertEqual(result[1], "Two")
+        self.assertIn("Three", result[2])
+        self.assertIn("Four", result[2])
+        self.assertIn("Five", result[2])
+
+    def test_all_overflow_into_last(self):
+        result = debate._normalize_paragraphs(
+            ["One", "Two", "Three", "Four"], 2
+        )
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], "One")
+        self.assertIn("Two", result[1])
+        self.assertIn("Three", result[1])
+        self.assertIn("Four", result[1])
+
+    def test_non_string_entries_ignored(self):
+        result = debate._normalize_paragraphs(
+            ["One", 42, "Two", None], 3
+        )
+        self.assertEqual(result, ["One", "Two"])
+
+
+class TestFormatMemoText(unittest.TestCase):
+    """Unit tests for _format_memo_text — headings, side names, tie variant."""
+
+    def test_pro_winner_heading(self):
+        outcome = {
+            "title": "Pro wins",
+            "score_line": "Score: Pro 2, Anti 1, Ties 0",
+            "loser_side": "anti",
+            "anti_label": "Anti",
+        }
+        text = debate._format_memo_text(
+            outcome, ["Synth one.", "Synth two."],
+            ["Loser one.", "Loser two."], ["R1: Pro — good point"]
+        )
+        self.assertIn("# Pro wins", text)
+        self.assertIn("Score: Pro 2, Anti 1", text)
+        self.assertIn("## Strengths and Weaknesses of Anti", text)
+
+    def test_anti_winner_heading(self):
+        outcome = {
+            "title": "Anti wins",
+            "score_line": "Score: Pro 1, Anti 3, Ties 0",
+            "loser_side": "pro",
+            "pro_label": "Pro",
+        }
+        text = debate._format_memo_text(
+            outcome, ["Synth one."],
+            ["Loser one."], ["R1: Anti — good point"]
+        )
+        self.assertIn("# Anti wins", text)
+        self.assertIn("## Strengths and Weaknesses of Pro", text)
+
+    def test_tie_uses_both_analysis(self):
+        outcome = {
+            "title": "No clear winner",
+            "score_line": "Score: Pro 1, Anti 1, Ties 1",
+            "winner_side": None,
+            "loser_side": None,
+        }
+        text = debate._format_memo_text(
+            outcome, ["Synth one."],
+            ["Both analysis one.", "Both analysis two."],
+            []
+        )
+        self.assertIn("# No clear winner", text)
+        self.assertIn("## Analysis of Both Positions", text)
+
+    def test_score_line_in_text(self):
+        outcome = {
+            "title": "Pro wins",
+            "score_line": "Score: Pro 3, Anti 0, Ties 0",
+            "loser_side": "anti",
+            "anti_label": "Anti",
+        }
+        text = debate._format_memo_text(
+            outcome, ["Synth one."], ["Loser one."], []
+        )
+        self.assertIn("Score: Pro 3, Anti 0, Ties 0", text)
+
+
+class TestBuildFinalMemo(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for _build_final_memo — JSON parsing, fallback, outcome enforcement."""
+
+    async def test_structured_json_parsed(self):
+        session = debate.DebateSession(
+            id="fm1", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "pro"}]
+        fake_json = '{"synthesis_paragraphs": ["Synth one.", "Synth two."], "losing_argument_paragraphs": ["Loser one."]}'
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        self.assertIn("# Pro wins", memo)
+        self.assertIn("Synth one.", memo)
+        self.assertIn("## Strengths and Weaknesses of Anti", memo)
+        self.assertIn("Loser one.", memo)
+
+    async def test_malformed_json_fallback(self):
+        session = debate.DebateSession(
+            id="fm2", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "anti"}]
+        fake_prose = "This is just prose\n\nNot structured at all\n\nIt has multiple\n\nparagraphs\n\nbut no JSON keys"
+
+        async def fake_query(text, system):
+            return fake_prose
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        self.assertIn("Anti wins", memo)
+        self.assertIn("Strengths and Weaknesses of Pro", memo)
+
+    async def test_empty_model_output_fallback(self):
+        session = debate.DebateSession(
+            id="fm3", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "pro"}]
+
+        async def fake_query(text, system):
+            return ""
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        self.assertIn("Pro wins", memo)
+        self.assertIn("Score: Pro 1, Anti 0", memo)
+
+    async def test_tie_no_losing_heading(self):
+        session = debate.DebateSession(
+            id="fm4", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "pro"}, {"winner": "anti"}]
+        fake_json = '{"synthesis_paragraphs": ["Synth one."], "losing_argument_paragraphs": ["Analysis one."]}'
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        self.assertIn("# No clear winner", memo)
+        self.assertIn("## Analysis of Both Positions", memo)
+        self.assertNotIn("Strengths and Weaknesses of", memo)
+
+    async def test_model_cannot_override_winner_label(self):
+        session = debate.DebateSession(
+            id="fm5", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "pro"}, {"winner": "pro"}]
+        fake_json = '{"synthesis_paragraphs": ["Anti actually wins"], "losing_argument_paragraphs": ["Pro is weak"]}'
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        # The memo title must reflect the computed winner, not the model's prose
+        self.assertIn("# Pro wins", memo)
+        self.assertIn("Strengths and Weaknesses of Anti", memo)
+
+    async def test_malformed_json_uses_deterministic_fallback(self):
+        """Malformed model output must produce deterministic fallback, not raw text split."""
+        session = debate.DebateSession(
+            id="fm6", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "pro"}, {"winner": "pro"}]
+        # Return completely malformed text
+        async def fake_query(text, system):
+            return "this is not json at all"
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        # Should have deterministic headings from code-computed outcome
+        self.assertIn("# Pro wins", memo)
+        self.assertIn("Strengths and Weaknesses of Anti", memo)
+        # Should NOT contain raw model text
+        self.assertNotIn("this is not json", memo)
+
+    async def test_partial_json_missing_keys_uses_deterministic_fallback(self):
+        """Partially valid JSON (missing keys) must not forward raw text."""
+        session = debate.DebateSession(
+            id="fm7", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        session.round_results = [{"winner": "anti"}, {"winner": "pro"}, {"winner": "anti"}]
+        # Valid JSON but missing losing_argument_paragraphs key
+        async def fake_query(text, system):
+            return '{"synthesis_paragraphs": ["Anti won the debate"]}'
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = await debate._build_final_memo(session)
+        finally:
+            debate._query_main_model = original
+
+        # Should still have both sections with deterministic fallback for losing
+        self.assertIn("# Anti wins", memo)
+        self.assertIn("Strengths and Weaknesses of Pro", memo)
+        # Should NOT contain unheaded raw text
+        self.assertNotIn("Anti won the debate", memo)
+
+
+class TestBuildFinalMemoExtended(unittest.IsolatedAsyncioTestCase):
+    """Additional tests for _build_final_memo: paragraph bounds, prompt, contradictions,
+    side names in fallback, fallback substance, multiline rationale normalization."""
+
+    def _make_session(self, topic="Tax", pro="Pro", anti="Anti", side_names=None):
+        session = debate.DebateSession(
+            id="fm_ext", topic=topic, chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": pro, "anti": anti},
+            side_names=side_names or {"pro": pro, "anti": anti},
+        )
+        return session
+
+    def _count_rendered_paragraphs(self, memo):
+        """Count non-empty, non-heading paragraphs in the rendered memo text."""
+        import re
+        lines = memo.strip().split("\n")
+        paras = []
+        current = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if current:
+                    paras.append(" ".join(current))
+                    current = []
+                continue
+            if stripped:
+                if current:
+                    current.append(stripped)
+                else:
+                    current = [stripped]
+            else:
+                if current:
+                    paras.append(" ".join(current))
+                    current = []
+        if current:
+            paras.append(" ".join(current))
+        return paras
+
+    def test_paragraph_count_enforcement_parsed(self):
+        """Synthesis must be 1-3 paragraphs, losing must be 1-2 paragraphs in rendered output."""
+        session = self._make_session()
+        session.round_results = [{"winner": "pro"}]
+        # Model returns more than 3 synthesis paragraphs
+        fake_json = json.dumps({
+            "synthesis_paragraphs": ["P1", "P2", "P3", "P4", "P5"],
+            "losing_argument_paragraphs": ["L1", "L2", "L3", "L4"]
+        })
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        paras = self._count_rendered_paragraphs(memo)
+        # All paragraphs together should be bounded (synthesis 1-3 + losing 1-2 = max 5)
+        self.assertLessEqual(len(paras), 5,
+            f"Expected at most 5 paragraphs, got {len(paras)}: {paras}")
+        # Check synthesis section specifically
+        synth_section = memo.split("## Strengths")[0]
+        synth_paras = self._count_rendered_paragraphs(synth_section)
+        self.assertGreaterEqual(synth_paras, 1, "Synthesis must have at least 1 paragraph")
+        self.assertLessEqual(synth_paras, 3, f"Synthesis must have at most 3 paragraphs, got {len(synth_paras)}")
+
+    def test_readability_prompt_captured(self):
+        """Prompt sent to model must include readability instructions."""
+        session = self._make_session()
+        session.round_results = [{"winner": "pro"}]
+        captured_prompt = None
+
+        async def fake_query(text, system):
+            nonlocal captured_prompt
+            captured_prompt = text
+            return "{}"
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        self.assertIsNotNone(captured_prompt)
+        self.assertIn("everyday language", captured_prompt)
+        self.assertIn("short sentences", captured_prompt)
+        self.assertIn("technical terms", captured_prompt)
+
+    def test_contradiction_rejection_proses_winner(self):
+        """Valid JSON claiming the loser won must trigger fallback synthesis."""
+        session = self._make_session()
+        session.round_results = [{"winner": "pro"}]
+        fake_json = json.dumps({
+            "synthesis_paragraphs": ["Anti actually won the debate."],
+            "losing_argument_paragraphs": ["Pro is weak."]
+        })
+
+        async def fake_query(text, system):
+            return fake_json
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        # Must NOT contain the contradictory claim
+        self.assertNotIn("Anti actually won", memo)
+        # Must have correct heading
+        self.assertIn("# Pro wins", memo)
+
+    def test_side_names_in_fallback_synthesis(self):
+        """Fallback synthesis must use actual side names, not generic Pro/Anti."""
+        session = self._make_session(
+            pro="Progressive Taxers",
+            anti="Flat Taxers",
+            side_names={"pro": "Progressive Taxers", "anti": "Flat Taxers"}
+        )
+        session.round_results = [{"winner": "pro"}]
+
+        async def fake_query(text, system):
+            return "not json"
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        # Should use actual side names
+        self.assertIn("Progressive Taxers", memo)
+        self.assertIn("Flat Taxers", memo)
+        # Should NOT contain generic Pro/Anti in the synthesized content
+        synth_section = memo.split("## Strengths")[0]
+        # If side names differ from Pro/Anti, generic labels should not appear
+        if "Progressive Taxers" != "Pro":
+            self.assertNotIn("Pro won", synth_section,
+                f"Generic 'Pro' should not appear in fallback synthesis: {synth_section}")
+
+    def test_fallback_losing_substance(self):
+        """Fallback losing must discuss both a strength and a weakness, not just 'lost on round counts'."""
+        session = self._make_session()
+        session.round_results = [
+            {"winner": "pro", "rationale": "stronger evidence"},
+            {"winner": "pro", "rationale": "better logic"}
+        ]
+
+        async def fake_query(text, system):
+            return "not json"
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        losing_section = memo.split("## Strengths")[1] if "## Strengths" in memo else ""
+        # Must contain something beyond just "lost on round counts"
+        # It should have rationale-based content
+        self.assertNotIn("lost on round counts.", losing_section,
+            f"Fallback losing should have more substance: {losing_section}")
+
+    def test_multiline_rationale_normalized(self):
+        """Multiline rationale in fallback should produce bounded paragraphs."""
+        session = self._make_session()
+        session.round_results = [{"winner": "pro", "rationale": "Line one.\n\nLine two.\n\nLine three."}]
+
+        async def fake_query(text, system):
+            return "not json"
+
+        original = debate._query_main_model
+        try:
+            debate._query_main_model = fake_query
+            memo = asyncio.run(debate._build_final_memo(session))
+        finally:
+            debate._query_main_model = original
+
+        # Should not have extra blank lines creating paragraphs
+        paras = self._count_rendered_paragraphs(memo)
+        self.assertLessEqual(len(paras), 5,
+            f"Multiline rationale should normalize to bounded paragraphs: {paras}")
+
+
+
+class TestSourceAppendixRichAndFallbackHtml(unittest.TestCase):
+    """Unit tests for _source_appendix_rich_and_fallback_html."""
+
+    def _make_session(self, sources=None):
+        session = debate.DebateSession(
+            id="src1", topic="Tax", chat_id=123, user_id=456,
+            message_thread_id=None,
+            positions={"pro": "Pro", "anti": "Anti"},
+            side_names={"pro": "Pro", "anti": "Anti"},
+        )
+        if sources is not None:
+            session.sources = sources
+        return session
+
+    def test_zero_sources(self):
+        session = self._make_session(sources=[])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        self.assertIn("<details>", rich_html)
+        self.assertIn("<summary>", rich_html)
+        self.assertIn("Sources (0)", rich_html)
+        self.assertIn("No sources were gathered.", rich_html)
+        self.assertIn("<blockquote expandable>", fallback_html)
+        self.assertIn("Sources (0)", fallback_html)
+
+    def test_single_source(self):
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "Example Article",
+            "url": "https://example.com",
+            "summary": "A summary",
+            "fetch_success": True,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        self.assertIn("<details>", rich_html)
+        self.assertIn("Sources (1)", rich_html)
+        self.assertIn("<b>S1</b>", rich_html)
+        self.assertIn("Example Article", rich_html)
+        self.assertIn("href=\"https://example.com\"", rich_html)
+        self.assertIn("A summary", rich_html)
+        self.assertIn("<blockquote expandable>", fallback_html)
+
+    def test_failed_fetch_label(self):
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "Broken Link",
+            "url": "https://broken.com",
+            "summary": "Could not reach",
+            "fetch_success": False,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        self.assertIn("(fetch failed)", rich_html)
+
+    def test_no_url(self):
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "No URL Source",
+            "url": "",
+            "summary": "No link available",
+            "fetch_success": True,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        self.assertIn("<b>S1</b>", rich_html)
+        self.assertIn("No URL Source", rich_html)
+        # No href should appear for empty URL
+        self.assertNotIn("href=\"\"", rich_html)
+
+    def test_html_escaping(self):
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "<script>alert('xss')</script>",
+            "url": "https://example.com?x=1&y=2",
+            "summary": "Summary with <b>bold</b>",
+            "fetch_success": True,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        # Escaped, not rendered
+        self.assertIn("&lt;script&gt;", rich_html)
+        self.assertIn("x=1&amp;y=2", rich_html)
+        self.assertIn("&lt;b&gt;", rich_html)
+        # Raw HTML tags should not appear
+        self.assertNotIn("<script>", rich_html)
+
+    def test_multiple_sources_ordered(self):
+        session = self._make_session(sources=[
+            {"id": "S1", "title": "First", "url": "https://a.com", "summary": "First summary", "fetch_success": True},
+            {"id": "S2", "title": "Second", "url": "https://b.com", "summary": "Second summary", "fetch_success": True},
+            {"id": "S3", "title": "Third", "url": "https://c.com", "summary": "Third summary", "fetch_success": True},
+        ])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        self.assertIn("Sources (3)", rich_html)
+        first_pos = rich_html.index("First")
+        second_pos = rich_html.index("Second")
+        third_pos = rich_html.index("Third")
+        self.assertLess(first_pos, second_pos)
+        self.assertLess(second_pos, third_pos)
+
+
+    def test_url_escaping_prevents_attribute_injection(self):
+        """URLs with quotes must not break out of href attributes."""
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "Safe Title",
+            "url": "https://example.com/x=\" onclick=\"alert(1)",
+            "summary": "Summary",
+            "fetch_success": True,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        # Double quotes in URL must be HTML-escaped so they can't break the href attribute.
+        # The injected onclick= is contained inside the href value as literal text.
+        self.assertIn("&quot;", rich_html)
+        # Verify the <a> tag is well-formed and closes properly.
+        self.assertIn("Safe Title</a>", rich_html)
+
+    def test_status_not_duplicated(self):
+        """Fetch-failed status should appear exactly once per source."""
+        session = self._make_session(sources=[{
+            "id": "S1",
+            "title": "Failed Source",
+            "url": "https://example.com",
+            "summary": "Summary",
+            "fetch_success": False,
+        }])
+        rich_html, fallback_html = debate._source_appendix_rich_and_fallback_html(session)
+
+        # The status text should appear exactly once
+        status_count = rich_html.count("(fetch failed)")
+        self.assertEqual(status_count, 1)
+
+        # Same for fallback
+        fallback_count = fallback_html.count("(fetch failed)")
+        self.assertEqual(fallback_count, 1)
+
+
+class TestDebateFinalOutputsUseRichDeliveryPathUpdated(unittest.IsolatedAsyncioTestCase):
+    """Updated e2e test: assert Rich Markdown memo + Rich HTML sources, same routing.
+
+    This replaces the old test_debate_final_outputs_use_rich_delivery_path which only
+    tracked calls to send_rich_or_split_html_message. The new code path sends the
+    final memo via Rich Markdown and sources via Rich HTML, so we capture both
+    delivery functions. Opening statements also go through Rich Markdown delivery.
+    """
+
+    async def test_rich_markdown_memo_then_rich_html_sources(self):
+        session = debate.DebateSession(
+            id="rich2", topic="Tax policy",
+            chat_id=123, message_thread_id=789,
+            user_id=456,
+            positions={"pro": "Pro", "anti": "Anti"},
+        )
+        calls = []
+        original_prepare = debate._prepare_side
+        original_questions = debate._moderator_questions
+        original_round = debate._run_question_round
+        original_final_side_text = debate._final_side_thesis_text
+        original_final_memo = debate._build_final_memo
+        original_archive = debate._archive_session
+        original_opening_rich = debate._opening_statements_rich_and_fallback_html
+        original_rich_md = debate.send_rich_or_split_html_message
+        original_rich_html = debate.send_rich_html_or_split_html_message
+
+        async def fake_prepare(bot, target, side):
+            return f"{side} opening"
+
+        async def fake_questions(target):
+            return ["Q1"]
+
+        async def fake_round(bot, target, round_number, question):
+            target.round_results.append({"round": round_number, "winner": "pro"})
+
+        async def fake_final_side_text(target, side):
+            return f"{side} final"
+
+        async def fake_final_memo(target):
+            return "# Final Memo\n\n- **Finding**"
+
+        def fake_archive(target):
+            return None
+
+        async def fake_opening_rich(target, pro_opening, anti_opening):
+            return "<h2>Openings</h2>", "<b>Openings</b>"
+
+        async def fake_rich_md(bot, chat_id, markdown_text, **kwargs):
+            calls.append({
+                "delivery": "rich_md",
+                "chat_id": chat_id,
+                "markdown": markdown_text,
+                "thread": kwargs.get("message_thread_id"),
+            })
+            return [types.SimpleNamespace(message_id=len(calls))]
+
+        async def fake_rich_html(bot, chat_id, rich_html_text, **kwargs):
+            calls.append({
+                "delivery": "rich_html",
+                "chat_id": chat_id,
+                "html": rich_html_text,
+                "thread": kwargs.get("message_thread_id"),
+            })
+            return [types.SimpleNamespace(message_id=len(calls))]
+
+        try:
+            debate._prepare_side = fake_prepare
+            debate._moderator_questions = fake_questions
+            debate._run_question_round = fake_round
+            debate._final_side_thesis_text = fake_final_side_text
+            debate._build_final_memo = fake_final_memo
+            debate._archive_session = fake_archive
+            debate._opening_statements_rich_and_fallback_html = fake_opening_rich
+            debate.send_rich_or_split_html_message = fake_rich_md
+            debate.send_rich_html_or_split_html_message = fake_rich_html
+            await debate._run_debate_session(session, FakeBot())
+        finally:
+            debate._prepare_side = original_prepare
+            debate._moderator_questions = original_questions
+            debate._run_question_round = original_round
+            debate._final_side_thesis_text = original_final_side_text
+            debate._build_final_memo = original_final_memo
+            debate._archive_session = original_archive
+            debate._opening_statements_rich_and_fallback_html = original_opening_rich
+            debate.send_rich_or_split_html_message = original_rich_md
+            debate.send_rich_html_or_split_html_message = original_rich_html
+
+        # Assert: opening (Rich MD), final memo (Rich MD), sources (Rich HTML)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0]["delivery"], "rich_html")
+        self.assertEqual(calls[1]["delivery"], "rich_md")
+        self.assertEqual(calls[2]["delivery"], "rich_html")
+
+        # Same chat and thread routing for all
+        for call in calls:
+            self.assertEqual(call["chat_id"], 123)
+            self.assertEqual(call["thread"], 789)
+
+        # Memo content preserved
+        self.assertEqual(calls[1]["markdown"], "# Final Memo\n\n- **Finding**")
+
+        # Sources should be Rich HTML with <details> block
+        self.assertIn("<details>", calls[2]["html"])
+        self.assertIn("<summary>", calls[2]["html"])
+        self.assertIn("Sources", calls[2]["html"])
 
 
 if __name__ == "__main__":

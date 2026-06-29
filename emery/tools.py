@@ -46,6 +46,19 @@ from emery.logging_utils import safe_preview
 from emery.telegram_utils import normalize_message_thread_id
 
 
+REOLINK_TELEGRAM_READ_TIMEOUT_SECONDS = 90.0
+REOLINK_TELEGRAM_WRITE_TIMEOUT_SECONDS = 90.0
+
+
+async def _send_reolink_alert_photo(**send_kwargs):
+    """Send one alert with media-specific budgets and no ambiguous retry."""
+    return await globals.application_bot.send_photo(
+        **send_kwargs,
+        read_timeout=REOLINK_TELEGRAM_READ_TIMEOUT_SECONDS,
+        write_timeout=REOLINK_TELEGRAM_WRITE_TIMEOUT_SECONDS,
+    )
+
+
 def _format_large_number(value):
     try:
         num = float(value)
@@ -2571,7 +2584,7 @@ async def get_reolink_snapshot(
                 f"📸 <b>Live: {telegram_escape(matched_camera_name.upper())}</b>\n\n"
                 f"🛡️ <i>{telegram_escape(concise_report)}</i>"
             )
-            sent_photo_msg = await globals.application_bot.send_photo(
+            sent_photo_msg = await _send_reolink_alert_photo(
                 chat_id=target_chat_id,
                 photo=compressed_bytes,
                 caption=telegram_caption,

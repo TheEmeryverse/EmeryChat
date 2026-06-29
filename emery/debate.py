@@ -1136,21 +1136,311 @@ async def _final_side_thesis(session: DebateSession, side: str) -> None:
     logging.info("DEBATE: Final thesis generated session=%s side=%s chars=%d", session.id, side, len(thesis or ""))
 
 
+SYNTHESIS_MAX_PARAGRAPHS = 3
+LOSING_ARGUMENT_MAX_PARAGRAPHS = 2
+
+
+def _compute_outcome(session: DebateSession) -> dict:
+    """Compute round-count winner/loser deterministically from session.round_results."""
+    pro_wins = sum(1 for r in session.round_results if r.get("winner") == "pro")
+    anti_wins = sum(1 for r in session.round_results if r.get("winner") == "anti")
+    tie_count = sum(1 for r in session.round_results if r.get("winner") == "tie")
+    pro_label = _side_name(session, "pro")
+    anti_label = _side_name(session, "anti")
+    if pro_wins > anti_wins:
+        return {
+            "pro_wins": pro_wins,
+            "anti_wins": anti_wins,
+            "tie_count": tie_count,
+            "winner_side": "pro",
+            "loser_side": "anti",
+            "pro_label": pro_label,
+            "anti_label": anti_label,
+            "title": f"{pro_label} wins",
+            "score_line": f"Score: {pro_label} {pro_wins}, {anti_label} {anti_wins}, Ties {tie_count}",
+        }
+    elif anti_wins > pro_wins:
+        return {
+            "pro_wins": pro_wins,
+            "anti_wins": anti_wins,
+            "tie_count": tie_count,
+            "winner_side": "anti",
+            "loser_side": "pro",
+            "pro_label": pro_label,
+            "anti_label": anti_label,
+            "title": f"{anti_label} wins",
+            "score_line": f"Score: {pro_label} {pro_wins}, {anti_label} {anti_wins}, Ties {tie_count}",
+        }
+    else:
+        return {
+            "pro_wins": pro_wins,
+            "anti_wins": anti_wins,
+            "tie_count": tie_count,
+            "winner_side": None,
+            "loser_side": None,
+            "pro_label": pro_label,
+            "anti_label": anti_label,
+            "title": "No clear winner",
+            "score_line": f"Score: {pro_label} {pro_wins}, {anti_label} {anti_wins}, Ties {tie_count}",
+        }
+
+
+def _normalize_paragraphs(paragraphs, max_count):
+    """Normalize a paragraph array: remove blanks, collapse embedded blank lines, merge overflow."""
+    if not isinstance(paragraphs, list):
+        return []
+    # Collapse embedded blank lines within each paragraph so each item is truly one paragraph.
+    cleaned = []
+    for p in paragraphs:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        # Split on blank-line boundaries and rejoin with single spaces.
+        parts = re.split(r"\n\s*\n", p.strip())
+        cleaned.append(" ".join(part.strip() for part in parts if part.strip()))
+    if len(cleaned) <= max_count:
+        return cleaned
+    allowed = cleaned[:max_count - 1]
+    overflow = " ".join(cleaned[max_count - 1:])
+    allowed.append(overflow)
+    return allowed
+
+
+def _round_winners_by_side(round_results):
+    """Return (loser_winning_rounds, loser_losing_rounds, winner_rounds) indices."""
+    loser_winning = []
+    loser_losing = []
+    winner = []
+    for r in round_results:
+        w = r.get("winner", "tie")
+        if w == "tie":
+            continue
+        round_idx = r.get("round", "?")
+        if w == "pro":
+            winner.append(round_idx)
+        else:
+            loser_losing.append(round_idx)
+    return loser_winning, loser_losing, winner
+
+
+def _fallback_synthesis(outcome: dict, round_rationales: list[str], pro_label: str = "Pro", anti_label: str = "Anti") -> list[str]:
+    """Deterministic synthesis fallback when JSON parsing fails.
+
+    Uses actual side names (pro_label, anti_label) so output is
+    readable and specific, never generic Pro/Anti.
+    """
+    pro_wins = outcome["pro_wins"]
+    anti_wins = outcome["anti_wins"]
+    tie_count = outcome["tie_count"]
+    if pro_label != "Pro":
+        lines = [f"{pro_label} won {pro_wins} rounds, {anti_label} won {anti_wins} rounds, and {tie_count} round(s) tied."]
+    else:
+        lines = [f"Pro won {pro_wins} rounds, Anti won {anti_wins} rounds, and {tie_count} round(s) tied."]
+    if round_rationales:
+        lines.append(round_rationales[0])
+    return lines
+
+
+def _fallback_losing(outcome: dict, round_rationales: list[str], round_results: list | None = None) -> list[str]:
+    """Deterministic losing-argument fallback when JSON parsing fails.
+
+    Produces substantive prose covering both strengths and weaknesses
+    of the losing side (or both sides in a tie). Uses round winners
+    and rationales deterministically; states evidence absence honestly
+    rather than fabricating analysis.
+    """
+    if outcome["loser_side"] is not None:
+        loser_label = outcome.get(f"{outcome['loser_side']}_label", "Losing position")
+        winner_side = "pro" if outcome["loser_side"] == "anti" else "anti"
+        winner_label = outcome.get(f"{winner_side}_label", "Winning position")
+
+        if round_results:
+            loser_winning_rounds = []
+            loser_losing_rounds = []
+            for r in round_results:
+                w = r.get("winner", "tie")
+                if w == "tie":
+                    continue
+                if w != outcome["loser_side"]:
+                    loser_losing_rounds.append(r)
+                else:
+                    loser_winning_rounds.append(r)
+
+            strengths_parts = []
+            weaknesses_parts = []
+            for r in loser_winning_rounds:
+                strengths_parts.append(f"In round {r.get('round', '?')}, {loser_label} demonstrated {r.get('rationale', '').strip()}")
+            for r in loser_losing_rounds:
+                weaknesses_parts.append(f"The {winner_label} pointed out that {r.get('rationale', '').strip()}")
+
+            paragraphs = []
+            if strengths_parts and weaknesses_parts:
+                paragraphs.append(f"{loser_label} showed strengths by {', '.join(s.split('demonstrated')[-1] for s in strengths_parts if s.split('demonstrated')[-1].strip())}. However, they were countered when the {winner_label} pointed out that {', '.join(w.split('pointed out that')[-1] for w in weaknesses_parts if w.split('pointed out that')[-1].strip())}.")
+            elif strengths_parts:
+                paragraphs.append(f"{loser_label} demonstrated strengths including {', '.join(strengths_parts)}. The round record does not contain specific counterarguments for these points.")
+            elif weaknesses_parts:
+                paragraphs.append(f"The {winner_label} argued that {', '.join(weaknesses_parts)}, which was not fully addressed by {loser_label}.")
+            else:
+                paragraphs.append(f"{loser_label} lost on round counts, though the available record does not provide specific evidence for a detailed strength and weakness analysis.")
+            return paragraphs
+
+        return [f"{loser_label} lost on round counts."]
+    else:
+        # Tie: analyze both positions
+        if round_results:
+            pro_winning = []
+            anti_winning = []
+            for r in round_results:
+                w = r.get("winner", "tie")
+                if w == "tie":
+                    continue
+                if w == "pro":
+                    pro_winning.append(r)
+                else:
+                    anti_winning.append(r)
+
+            paragraphs = []
+            pro_label = outcome.get("pro_label", "Pro")
+            anti_label = outcome.get("anti_label", "Anti")
+
+            if pro_winning and anti_winning:
+                pro_strengths = [f"In round {r.get('round', '?')}, {pro_label} demonstrated {r.get('rationale', '').strip()}" for r in pro_winning]
+                anti_strengths = [f"In round {r.get('round', '?')}, {anti_label} demonstrated {r.get('rationale', '').strip()}" for r in anti_winning]
+                paragraphs.append(f"{pro_label} demonstrated strengths including {', '.join(pro_strengths)}. {anti_label} demonstrated strengths including {', '.join(anti_strengths)}. The debate was close with both positions showing strengths and facing counterarguments in different rounds.")
+            elif pro_winning:
+                pro_strengths = [f"In round {r.get('round', '?')}, {pro_label} demonstrated {r.get('rationale', '').strip()}" for r in pro_winning]
+                paragraphs.append(f"No clear winner. {pro_label} demonstrated strengths including {', '.join(pro_strengths)}, but {anti_label} also had rounds where they were not fully countered.")
+            elif anti_winning:
+                anti_strengths = [f"In round {r.get('round', '?')}, {anti_label} demonstrated {r.get('rationale', '').strip()}" for r in anti_winning]
+                paragraphs.append(f"No clear winner. {anti_label} demonstrated strengths including {', '.join(anti_strengths)}, but {pro_label} also had rounds where they were not fully countered.")
+            else:
+                paragraphs.append("No clear winner. Both positions were evenly matched, and the available record does not provide specific evidence for a detailed analysis.")
+            return paragraphs
+
+        if round_rationales:
+            return [f"No clear winner. {round_rationales[0]}"]
+        return ["No clear winner. Rounds were evenly matched."]
+
+
+def _format_memo_text(outcome: dict, synthesis_paragraphs: list[str], losing_paragraphs: list[str], round_rationales: list[str]) -> str:
+    """Build the final-memo Markdown from code-computed outcome and parsed paragraph arrays."""
+    lines = [f"# {outcome['title']}"]
+    lines.append(outcome["score_line"])
+    lines.append("")
+    for p in synthesis_paragraphs:
+        lines.append(p.strip())
+        lines.append("")
+    if outcome["loser_side"] is not None and losing_paragraphs:
+        loser_label = outcome.get(f"{outcome['loser_side']}_label", f"Position {outcome['loser_side']}")
+        lines.append(f"## Strengths and Weaknesses of {loser_label}")
+        for p in losing_paragraphs:
+            lines.append(p.strip())
+            lines.append("")
+    elif outcome["loser_side"] is None:
+        lines.append(f"## Analysis of Both Positions")
+        for p in losing_paragraphs:
+            lines.append(p.strip())
+            lines.append("")
+    else:
+        for r in round_rationales:
+            lines.append(r.strip())
+            lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _round_rationales(session: DebateSession) -> list[str]:
+    """Extract per-round rationale summaries for fallback text."""
+    rationales = []
+    for r in session.round_results:
+        winner = r.get("winner", "tie")
+        rationale = r.get("rationale", "")
+        if winner == "tie" or not rationale:
+            continue
+        winner_label = _side_name(session, winner)
+        rationales.append(f"Round {r.get('round', '?')}: {winner_label} \u2014 {rationale}")
+    return rationales[:5]
+
+
 async def _build_final_memo(session: DebateSession) -> str:
     logging.info("DEBATE: Moderator synthesizing final memo session=%s", session.id)
-    pro_wins = sum(1 for result in session.round_results if result.get("winner") == "pro")
-    anti_wins = sum(1 for result in session.round_results if result.get("winner") == "anti")
-    tie_count = sum(1 for result in session.round_results if result.get("winner") == "tie")
-    score_line = f"Score: {_side_name(session, 'pro')} {pro_wins}, {_side_name(session, 'anti')} {anti_wins}, Ties {tie_count}"
+    outcome = _compute_outcome(session)
+    round_rationales = _round_rationales(session)
+
+    # Extract side labels for deterministic fallback prose
+    pro_label = outcome['pro_label']
+    anti_label = outcome['anti_label']
+
     prompt = (
-        "Write the final debate decision memo. Include: positions, round winners, strongest arguments, strongest objections, "
-        "winner by round count, nuanced synthesized verdict that accounts for the losing side, confidence, and practical next step. "
-        "Use concise Telegram-friendly Markdown.\n\n"
-        f"{score_line}\n\n{_build_moderator_context(session)}"
+        "You are the neutral Moderator writing the final debate decision memo. "
+        "Use everyday language, short sentences, and explain any unavoidable technical terms.\n\n"
+        "Return valid JSON with exactly these two keys:\n"
+        '  - "synthesis_paragraphs": 1-3 paragraphs explaining the round-count winner in plain language\n'
+        '  - "losing_argument_paragraphs": 1-2 paragraphs analyzing the strengths and weaknesses of the losing position\n\n'
+        "Rules:\n"
+        '  - If the winner is clear, analyze the losing position. If tied, analyze both positions.\n'
+        '  - Do NOT include a "winner" or "loser" field; the score determines that.\n'
+        "  - Keep sentences short. Use plain language.\n\n"
+        "Score: pro_wins={pro_wins}, anti_wins={anti_wins}, ties={tie_count}\n\n"
+        "{moderator_context}"
+    ).format(
+        pro_wins=outcome["pro_wins"],
+        anti_wins=outcome["anti_wins"],
+        tie_count=outcome["tie_count"],
+        moderator_context=_build_moderator_context(session),
     )
-    memo = await _query_main_model(prompt, "You are the neutral Moderator writing the final debate decision memo.")
-    logging.info("DEBATE: Moderator final memo generated session=%s chars=%d", session.id, len(memo or ""))
-    return memo.strip() or f"Debate complete.\n\n{score_line}"
+
+    raw = await _query_main_model(prompt, "You are the neutral Moderator writing the final debate decision memo.")
+    logging.info("DEBATE: Moderator final memo generated session=%s chars=%d", session.id, len(raw or ""))
+
+    # Try to parse structured JSON output
+    synthesis_paragraphs = []
+    losing_paragraphs = []
+    try:
+        text = str(raw or "").strip()
+        data = json.loads(text)
+        synthesis_paragraphs = _normalize_paragraphs(data.get("synthesis_paragraphs"), SYNTHESIS_MAX_PARAGRAPHS)
+        losing_paragraphs = _normalize_paragraphs(data.get("losing_argument_paragraphs"), LOSING_ARGUMENT_MAX_PARAGRAPHS)
+        # Guard: partially valid JSON with missing required keys must fall back
+        if not synthesis_paragraphs or not losing_paragraphs:
+            synthesis_paragraphs = _fallback_synthesis(outcome, round_rationales, pro_label, anti_label)
+            losing_paragraphs = _fallback_losing(outcome, round_rationales, session.round_results)
+    except (json.JSONDecodeError, AttributeError, KeyError):
+        # Construct deterministic fallback from the computed score; never forward raw model text.
+        synthesis_paragraphs = _fallback_synthesis(outcome, round_rationales, pro_label, anti_label)
+        losing_paragraphs = _fallback_losing(outcome, round_rationales, session.round_results)
+
+    # Contradiction detection: reject body prose that explicitly assigns victory
+    # to the computed loser or defeat to the computed winner.
+    loser_side = outcome.get("loser_side")
+    if loser_side and synthesis_paragraphs:
+        loser_label = outcome.get(f"{loser_side}_label", loser_side)
+        loser_lower = re.sub(r"[^a-z0-9 ]+", " ", loser_label.lower()).strip()
+        # Build regex: loser label (word-boundary separated) followed by wins/won
+        loser_words = re.split(r"\s+", loser_lower)
+        pattern_parts = [r"(?:\b" + re.escape(w) + r"\b)" for w in loser_words]
+        # Allow any non-alphanumeric text between loser words
+        inner = r"[^a-z]*?".join(pattern_parts)
+        pattern = inner + r"\b.*?\b(wins|won)\b"
+        for sp in synthesis_paragraphs:
+            text_lower = sp.lower()
+            if re.search(pattern, text_lower):
+                synthesis_paragraphs = _fallback_synthesis(outcome, round_rationales, pro_label, anti_label)
+                losing_paragraphs = _fallback_losing(outcome, round_rationales, session.round_results)
+                break
+
+    # Single normalization boundary: normalize fallback arrays too so every
+    # path produces clean, bounded paragraphs before formatting.
+    synthesis_paragraphs = _normalize_paragraphs(synthesis_paragraphs, SYNTHESIS_MAX_PARAGRAPHS)
+    losing_paragraphs = _normalize_paragraphs(losing_paragraphs, LOSING_ARGUMENT_MAX_PARAGRAPHS)
+
+    if not synthesis_paragraphs and not losing_paragraphs:
+        synthesis_paragraphs = [outcome["score_line"]]
+        if outcome["loser_side"] is not None:
+            loser_label = outcome.get(f"{outcome['loser_side']}_label", "Losing position")
+            losing_paragraphs = [f"{loser_label} lost on round counts."]
+        else:
+            losing_paragraphs = [f"No clear winner. {_round_rationales(session)[0] if round_rationales else 'Rounds were evenly matched.'}"]
+
+    return _format_memo_text(outcome, synthesis_paragraphs, losing_paragraphs, round_rationales)
 
 
 def _build_source_appendix(session: DebateSession) -> str:
@@ -1165,6 +1455,50 @@ def _build_source_appendix(session: DebateSession) -> str:
             f"{source.get('summary')}"
         )
     return "\n\n".join(lines)
+
+
+def _source_appendix_rich_and_fallback_html(session: DebateSession) -> tuple[str, str]:
+    """Build Rich HTML <details> and escaped blockquote fallback HTML for the source list."""
+    if not session.sources:
+        summary = "Sources (0)"
+        body = "No sources were gathered."
+        rich_html = f"<details><summary>{_telegram_escape(summary)}</summary>{_telegram_escape(body)}</details>"
+        fallback_html = f"<blockquote expandable>{_telegram_escape(summary)}\n{_telegram_escape(body)}</blockquote>"
+        return rich_html, fallback_html
+
+    source_entries = []
+    for source in session.sources:
+        src_id = source.get("id", "")
+        title = source.get("title", "")
+        url = source.get("url", "")
+        summary = source.get("summary", "")
+        fetch_ok = source.get("fetch_success", True)
+        status_text = "" if fetch_ok else " (fetch failed)"
+
+        escaped_title = _telegram_escape(title)
+        escaped_url = html.escape(url or "", quote=True)
+        escaped_summary = _telegram_escape(summary)
+        escaped_id = _telegram_escape(src_id)
+        escaped_status = _telegram_escape(status_text)
+
+        if url:
+            source_entries.append(
+                f"<b>{escaped_id}</b>: <a href=\"{escaped_url}\">{escaped_title}</a>{escaped_status}<br>"
+                f"{escaped_summary}"
+            )
+        else:
+            source_entries.append(
+                f"<b>{escaped_id}</b>: {escaped_title}{escaped_status}<br>"
+                f"{escaped_summary}"
+            )
+
+    joined = "<br><br>".join(source_entries)
+    count = len(session.sources)
+    summary = f"Sources ({count})"
+
+    rich_html = f"<details><summary>{_telegram_escape(summary)}</summary>{joined}</details>"
+    fallback_html = f"<blockquote expandable>{_telegram_escape(summary)}\n{joined}</blockquote>"
+    return rich_html, fallback_html
 
 
 async def _send_status(bot, session: DebateSession, text: str, *, reply_markup=None, parse_mode: str | None = None):
@@ -1510,7 +1844,8 @@ async def _run_debate_session(session: DebateSession, bot) -> None:
             archive_path,
         )
         await _send_long_text(bot, session, session.final_memo)
-        await _send_long_text(bot, session, session.source_appendix)
+        rich_src_html, fallback_src_html = _source_appendix_rich_and_fallback_html(session)
+        await _send_rich_debate_loop_html(bot, session, rich_src_html, fallback_src_html)
         ACTIVE_DEBATES.pop(session.key(), None)
     except asyncio.CancelledError:
         session.status = "cancelled"
