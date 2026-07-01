@@ -2364,7 +2364,9 @@ async def _classify_expert_topic_input(topic: str) -> str:
         "Return exactly one label: research_topic or malformed.\n\n"
         "Use malformed for vague one- or two-word inputs, command-like fragments, or inputs such as: "
         "space, summary, research, question, help me, topic, list please. "
-        "Use research_topic for complete requests with enough detail for a research session.\n\n"
+        "Use research_topic for complete requests with enough detail for a research session. "
+        "Imperative phrasing such as 'Research the latest...', 'Investigate...', or 'Compare...' is a valid request "
+        "when it identifies a concrete subject; do not treat the leading verb itself as a command-like fragment.\n\n"
         f"Input: {topic}"
     )
     try:
@@ -2376,8 +2378,27 @@ async def _classify_expert_topic_input(topic: str) -> str:
         logging.warning("EXPERT: Topic classifier failed: %s", exc)
         return "research_topic" if _topic_has_enough_substance(topic) else "malformed"
     label = _expert_topic_label(result)
-    if label in {"research_topic", "malformed"}:
+    if label == "research_topic":
         return label
+    if label == "malformed":
+        review_prompt = (
+            "Review a possible false-negative /expert topic classification. "
+            "Return exactly one label: research_topic or malformed.\n\n"
+            "A complete imperative request is research_topic when it identifies a concrete subject or question, "
+            "including requests beginning with 'Research', 'Investigate', 'Explain', or 'Compare'. "
+            "Use malformed only when the input is too vague or content-free to determine what should be researched.\n\n"
+            f"Input previously labeled malformed: {topic}"
+        )
+        try:
+            review_result = await _query_expert_fast_model(
+                review_prompt,
+                f"You review possible false negatives in {_model_display_name()} research-request classification. "
+                "Return one label only.",
+            )
+        except Exception as exc:
+            logging.warning("EXPERT: Topic classifier review failed: %s", exc)
+            return "malformed"
+        return "research_topic" if _expert_topic_label(review_result) == "research_topic" else "malformed"
     return "research_topic" if _topic_has_enough_substance(topic) else "malformed"
 
 
