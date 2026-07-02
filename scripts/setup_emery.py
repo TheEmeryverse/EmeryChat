@@ -57,7 +57,7 @@ DEFAULT_ENV = {
     "ENABLE_NEST": "false",
     "ENABLE_REOLINK": "false",
     "ENABLE_SCHEDULER": "true",
-    "ENABLE_HEARTBEAT": "true",
+    "ENABLE_HEARTBEAT": "false",
     "ENABLE_MEMORY": "true",
     "ENABLE_PORTAINER": "false",
     "ENABLE_TELEGRAM_RICH_MESSAGES": "true",

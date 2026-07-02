@@ -472,7 +472,7 @@ Chat history is append-only during runtime to preserve llama.cpp prompt-cache ch
 | `ENABLE_SCHEDULER` | `true` | Enables custom job scheduling |
 | `ROUTINE_HISTORY_DEFER_SECONDS` | `600` | Defers compact routine-history ingestion when another routine is due soon |
 | `ENABLE_ROUTINE_CACHE_WARMUP` | `true` | Warms the normal chat prompt cache after the final nearby routine finishes |
-| `ENABLE_HEARTBEAT` | `true` | Enables inactivity check-ins |
+| `ENABLE_HEARTBEAT` | `false` | Enables opt-in inactivity check-ins |
 | `HEARTBEAT_INTERVAL_SECONDS` | `3600` | Heartbeat polling interval |
 | `HEARTBEAT_SILENCE_THRESHOLD_SECONDS` | `14400` | Silence before check-in |
 | `HEARTBEAT_SILENT_RETRY_SECONDS` | `3600` | Cooldown after a silent heartbeat evaluation |
