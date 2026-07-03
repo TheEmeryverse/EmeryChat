@@ -105,6 +105,7 @@ DEFAULT_NEWS_FEEDS = [
 def _default_users_config():
     return {
         "allowed_user_ids": [],
+        "allowed_bot_ids": [],
         "primary_user": {
             "id": 0,
             "name": "User",
@@ -149,6 +150,22 @@ def _default_integrations_config():
     }
 
 
+def _normalize_allowed_bot_ids(raw):
+    if not isinstance(raw, list):
+        raise ValueError("allowed_bot_ids must be a list of positive integers")
+
+    normalized = []
+    seen = set()
+    for value in raw:
+        if type(value) is not int or value <= 0:
+            raise ValueError("allowed_bot_ids must contain only positive integers")
+        if value in seen:
+            raise ValueError(f"allowed_bot_ids contains duplicate ID {value}")
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
 def _ensure_json_file(path: Path, default_data):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -175,6 +192,8 @@ def _normalize_users_config(raw):
             for user_id in (_to_int(value, 0) for value in raw.get("allowed_user_ids", []))
             if user_id != 0
         ] if isinstance(raw, dict) else [],
+        "allowed_bot_ids": _normalize_allowed_bot_ids(raw.get("allowed_bot_ids", []))
+        if isinstance(raw, dict) else [],
         "primary_user": {
             "id": _to_int(primary.get("id"), default["primary_user"]["id"]),
             "name": str(primary.get("name", default["primary_user"]["name"])).strip() or default["primary_user"]["name"],
@@ -446,6 +465,7 @@ ROUTINE_HISTORY_DEFER_SECONDS = _to_int(os.getenv("ROUTINE_HISTORY_DEFER_SECONDS
 PRIMARY_USER_ID = USERS_CONFIG["primary_user"]["id"]
 SECONDARY_USER_ID = USERS_CONFIG["secondary_user"]["id"]
 ALLOWED_USER_IDS = USERS_CONFIG["allowed_user_ids"]
+ALLOWED_BOT_IDS = USERS_CONFIG["allowed_bot_ids"]
 USER_NAME = USERS_CONFIG["primary_user"]["name"]
 USER_LOCATION = USERS_CONFIG["primary_user"]["location"]
 USER_TIMEZONE = pytz.timezone(USERS_CONFIG["primary_user"]["timezone"])

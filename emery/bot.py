@@ -14,7 +14,7 @@ from emery.config import (
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
     HEARTBEAT_SILENT_RETRY_SECONDS, HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS,
     HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
-    ALLOWED_USER_IDS, ENABLE_WEATHER,
+    ALLOWED_USER_IDS, ALLOWED_BOT_IDS, ENABLE_WEATHER,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
     ALLOW_UNRESTRICTED_TELEGRAM_ACCESS
 )
@@ -158,11 +158,11 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
     )
 
 def is_user_allowed(update: Update) -> bool:
-    """Checks if the user interacting with the bot is whitelisted in TELEGRAM_ALLOWED_USERS."""
+    """Checks whether the Telegram sender is an allowed human user."""
     user = update.effective_user
-    if not user:
+    if not user or user.is_bot:
         return False
-        
+
     if not ALLOWED_USER_IDS:
         return bool(ALLOW_UNRESTRICTED_TELEGRAM_ACCESS)
     return user.id in ALLOWED_USER_IDS
@@ -170,8 +170,12 @@ def is_user_allowed(update: Update) -> bool:
 
 def validate_telegram_access_policy() -> None:
     """Logs the effective Telegram access posture at startup."""
-    if ALLOWED_USER_IDS:
-        logging.info("🔐 TELEGRAM ACCESS: allowlist enabled for %s user(s).", len(ALLOWED_USER_IDS))
+    if ALLOWED_USER_IDS or ALLOWED_BOT_IDS:
+        logging.info(
+            "🔐 TELEGRAM ACCESS: allowlist enabled for %s user(s) and %s bot(s).",
+            len(ALLOWED_USER_IDS),
+            len(ALLOWED_BOT_IDS),
+        )
         return
 
     if ALLOW_UNRESTRICTED_TELEGRAM_ACCESS:
@@ -182,8 +186,8 @@ def validate_telegram_access_policy() -> None:
         return
 
     logging.critical(
-        "🚫 TELEGRAM ACCESS: no allowed_user_ids are configured and unrestricted access is disabled. "
-        "The bot will start but ignore all Telegram users until config/users.json includes allowed user IDs "
+        "🚫 TELEGRAM ACCESS: no allowed_user_ids or allowed_bot_ids are configured and unrestricted access is disabled. "
+        "The bot will start but ignore all Telegram senders until config/users.json includes allowed IDs "
         "or ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true is set."
     )
 
@@ -274,6 +278,7 @@ def _help_text() -> str:
         "/help - Show this command list.",
         "/clear - Clear this chat's active context history.",
         "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
+        "/bridge &lt;message&gt; - Send an authenticated request to Hermes.",
         "",
         "<b>Expert research</b>",
         "/expert &lt;topic&gt; - Start a foreground deep research session.",
@@ -1132,6 +1137,9 @@ async def start_bot_heartbeat(application) -> None:
 
 async def bot_post_init(application) -> None:
     """Consolidated post_init wrapper to launch Reolink polling and start the bot heartbeat."""
+    from emery.inter_agent_bridge import initialize_inter_agent_bridge
+
+    await initialize_inter_agent_bridge(application)
     await validate_telegram_routing(application)
     from emery.tools import start_reolink_polling
     await start_reolink_polling(application)
