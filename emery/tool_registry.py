@@ -24,7 +24,7 @@ from emery.tools import (
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
     list_portainer_environments, list_portainer_containers, update_portainer_container,
-    import_recipe_to_mealie
+    import_recipe_to_mealie, send_inter_agent_message
 )
 
 # Helper to check if a feature is enabled
@@ -270,6 +270,44 @@ if is_enabled("ENABLE_HISTORY"):
             "parameters": {}
         }
     })
+
+# --- Inter-Agent Bridge (always enabled) ---
+AVAILABLE_TOOLS["send_inter_agent_message"] = send_inter_agent_message
+tools_schema.append({
+    "type": "function",
+    "function": {
+        "name": "send_inter_agent_message",
+        "description": (
+            "Send a message to Hermes through the inter-agent bridge and wait for Hermes's response. "
+            "Hermes is especially useful for substantial research, investigating unfamiliar or current topics, "
+            "coding and debugging, reviewing repositories, and collaborating with Codex on software tasks. "
+            "Hermes can run commands on the system and use computer-control tools to open and interact with "
+            "browser windows, so delegate work that requires inspecting the local environment, executing commands, "
+            "testing code, or navigating a graphical website. Use Hermes when the user explicitly asks for it, "
+            "when its capabilities materially improve the result, or when Emery's own tools are insufficient; do "
+            "not delegate simple questions Emery can answer directly. Give Hermes the relevant context, the exact "
+            "task, constraints, and desired output. Keep delegated actions within the user's request, and do not ask "
+            "Hermes to perform destructive, irreversible, credential-sensitive, or externally consequential actions "
+            "without the user's authorization. After Hermes responds, evaluate its answer and incorporate the useful "
+            "parts into the response to the user."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipient_bot_id": {
+                    "type": "integer",
+                    "enum": [8726427681],
+                    "description": "The Hermes bot ID. Must be 8726427681."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "A self-contained task for Hermes, including relevant context, constraints, and the desired result or response format."
+                }
+            },
+            "required": ["recipient_bot_id", "message"]
+        }
+    }
+})
 
 if is_enabled("ENABLE_SEARCH"):
     AVAILABLE_TOOLS["web_search"] = web_search

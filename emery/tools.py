@@ -276,6 +276,58 @@ async def _alpha_vantage_query(params: dict, retries: int = 2, delay: float = 1.
 
     return None, last_error or "Stock data error: Alpha Vantage request failed."
 
+# --- INTER-AGENT BRIDGE TOOLS ---
+async def send_inter_agent_message(recipient_bot_id: int, message: str) -> str:
+    """Send a message to another bot via the inter-agent bridge.
+
+    Use this when you need to communicate with another bot (like Hermes) on behalf of the user.
+    The message is sent through the bridge protocol and the correlated response is returned.
+
+    Args:
+        recipient_bot_id: The bot ID of the recipient (e.g., Hermes bot ID)
+        message: The message to send
+
+    Returns:
+        The response from the recipient bot
+    """
+    try:
+        # Import bridge here to avoid circular imports
+        from emery.inter_agent_bridge import _bridge
+
+        # Get the current bot instance
+        import emery.globals as globals
+        bot = globals.application_bot
+
+        if not bot:
+            return "Error: Bot not initialized"
+
+        if not _bridge:
+            return "Error: Inter-agent bridge not initialized"
+
+        if type(recipient_bot_id) is not int or recipient_bot_id != _bridge.peer_bot_id:
+            return f"Error: Unsupported bridge recipient {recipient_bot_id}; expected Hermes ({_bridge.peer_bot_id})"
+
+        if globals.current_user_id.get() == _bridge.peer_bot_id:
+            return "Error: Cannot open a nested bridge request while processing a Hermes message"
+
+        origin_chat_id = globals.TARGET_CHAT_ID.get()
+        if origin_chat_id is None:
+            return "Error: No active chat context for the bridge response"
+
+        # Wait for the correlated response so Emery can use it in the current tool loop.
+        return await _bridge.send_request_and_wait(
+            bot=bot,
+            body=message,
+            origin_chat_id=origin_chat_id,
+            origin_thread_id=globals.CURRENT_THREAD_ID.get(),
+        )
+    except asyncio.TimeoutError:
+        return "Error: Hermes did not respond before the bridge timeout"
+    except Exception as e:
+        logging.error("❌ INTER-AGENT: Failed to send message: %s", e, exc_info=True)
+        return f"Error sending message: {e}"
+
+
 # --- VOICE / TTS TOOLS ---
 VOICE_MEMO_SYSTEM_PROMPT = (
     "You rewrite assistant text into natural spoken voice memo scripts. "

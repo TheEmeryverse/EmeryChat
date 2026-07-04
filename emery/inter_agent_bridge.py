@@ -14,6 +14,7 @@ be enabled for both accounts in BotFather before Telegram will deliver direct
 bot messages.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -38,13 +39,12 @@ from emery.config import (
 
 
 HERMES_BOT_ID = 8726427681
-EMERY_BOT_ID = 8725929278
 HERMES_BOT_USERNAME = "@emeryverse_hermesbot"
-EMERY_BOT_USERNAME = "@EmeryAIbot"
 BRIDGE_VERSION = 1
 MAX_BRIDGE_HOPS = 1
 MAX_PAYLOAD_BYTES = 2800
 PENDING_TTL_SECONDS = 15 * 60
+BRIDGE_RESPONSE_TIMEOUT_SECONDS = 10 * 60
 PEER_RATE_LIMIT_REQUESTS = 5
 PEER_RATE_LIMIT_WINDOW_SECONDS = 60
 
@@ -126,6 +126,13 @@ class _PendingRoute:
     chat_id: int
     message_thread_id: int | None
     created_at: float
+    response_future: asyncio.Future[str] | None = None
+
+
+@dataclass(frozen=True)
+class _CachedResponse:
+    envelope: BridgeEnvelope
+    created_at: float
 
 
 class InterAgentBridge:
@@ -133,28 +140,31 @@ class InterAgentBridge:
 
     def __init__(
         self,
-        local_bot_id: int,
+        local_bot_id: int | None,
         peer_bot_id: int,
         *,
         peer_chat_id: int | str | None = None,
     ):
-        self.local_bot_id = int(local_bot_id)
+        self.local_bot_id = int(local_bot_id) if local_bot_id is not None else None
         self.peer_bot_id = int(peer_bot_id)
         self.peer_chat_id = peer_chat_id or self.peer_bot_id
         self._authenticated = False
         self._pending: dict[str, _PendingRoute] = {}
-        self._seen: dict[str, float] = {}
+        self._completed: dict[str, _CachedResponse] = {}
         self._inflight: set[str] = set()
         self._peer_requests: dict[int, deque[float]] = {}
 
     async def authenticate(self, bot) -> None:
         """Verify that the configured Bot API token belongs to this endpoint."""
         identity = await bot.get_me()
-        if identity.id != self.local_bot_id or not identity.is_bot:
+        if not identity.is_bot:
+            raise RuntimeError("Bridge authentication requires a Telegram bot account.")
+        if self.local_bot_id is not None and identity.id != self.local_bot_id:
             raise RuntimeError(
                 f"Bridge expected bot ID {self.local_bot_id}, but the configured token "
                 f"authenticated bot ID {identity.id}."
             )
+        self.local_bot_id = identity.id
         self._authenticated = True
         logging.info(
             "INTER-AGENT BRIDGE: authenticated bot_id=%s; peer_bot_id=%s",
@@ -169,15 +179,25 @@ class InterAgentBridge:
     def _prune_state(self) -> None:
         now = time.monotonic()
         cutoff = now - PENDING_TTL_SECONDS
+        expired_routes = {
+            request_id: route
+            for request_id, route in self._pending.items()
+            if route.created_at < cutoff
+        }
+        for route in expired_routes.values():
+            future = route.response_future
+            if future is not None and not future.done():
+                future.set_exception(asyncio.TimeoutError("bridge response timed out"))
+
         self._pending = {
             request_id: route
             for request_id, route in self._pending.items()
             if route.created_at >= cutoff
         }
-        self._seen = {
-            request_id: seen_at
-            for request_id, seen_at in self._seen.items()
-            if seen_at >= cutoff
+        self._completed = {
+            request_id: cached
+            for request_id, cached in self._completed.items()
+            if cached.created_at >= cutoff
         }
         rate_cutoff = now - PEER_RATE_LIMIT_WINDOW_SECONDS
         for peer_id, requests in list(self._peer_requests.items()):
@@ -211,6 +231,7 @@ class InterAgentBridge:
         *,
         origin_chat_id: int,
         origin_thread_id: int | None = None,
+        response_future: asyncio.Future[str] | None = None,
     ) -> str:
         body = str(body or "").strip()
         if not body:
@@ -218,12 +239,14 @@ class InterAgentBridge:
         if len(body.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise ValueError(f"bridge message exceeds {MAX_PAYLOAD_BYTES} UTF-8 bytes")
 
+        await self._ensure_authenticated(bot)
         self._prune_state()
         request_id = uuid.uuid4().hex
         self._pending[request_id] = _PendingRoute(
             chat_id=origin_chat_id,
             message_thread_id=origin_thread_id,
             created_at=time.monotonic(),
+            response_future=response_future,
         )
         envelope = BridgeEnvelope(
             message_type="request",
@@ -239,6 +262,37 @@ class InterAgentBridge:
             self._pending.pop(request_id, None)
             raise
         return request_id
+
+    async def send_request_and_wait(
+        self,
+        bot,
+        body: str,
+        *,
+        origin_chat_id: int,
+        origin_thread_id: int | None = None,
+        timeout: float = BRIDGE_RESPONSE_TIMEOUT_SECONDS,
+    ) -> str:
+        """Send a request and return the correlated peer response body."""
+        response_future = asyncio.get_running_loop().create_future()
+        try:
+            request_id = await self.send_request(
+                bot,
+                body,
+                origin_chat_id=origin_chat_id,
+                origin_thread_id=origin_thread_id,
+                response_future=response_future,
+            )
+        except Exception:
+            response_future.cancel()
+            raise
+        try:
+            return await asyncio.wait_for(asyncio.shield(response_future), timeout=timeout)
+        finally:
+            route = self._pending.get(request_id)
+            if route is not None and route.response_future is response_future:
+                self._pending.pop(request_id, None)
+            if not response_future.done():
+                response_future.cancel()
 
     def _validate_peer_envelope(self, envelope: BridgeEnvelope, sender_id: int) -> None:
         if sender_id != self.peer_bot_id:
@@ -256,12 +310,15 @@ class InterAgentBridge:
         sender_id: int,
         sender_name: str,
     ) -> None:
+        await self._ensure_authenticated(bot)
         self._prune_state()
         self._validate_peer_envelope(envelope, sender_id)
         if envelope.hops >= MAX_BRIDGE_HOPS:
             raise ValueError("bridge request cannot be relayed beyond the hop limit")
-        if envelope.request_id in self._seen:
-            logging.warning("INTER-AGENT BRIDGE: ignored duplicate request %s", envelope.request_id)
+        cached = self._completed.get(envelope.request_id)
+        if cached is not None:
+            logging.info("INTER-AGENT BRIDGE: replaying response for duplicate request %s", envelope.request_id)
+            await self._send_envelope(bot, cached.envelope)
             return
         if envelope.request_id in self._inflight:
             logging.warning("INTER-AGENT BRIDGE: ignored in-flight duplicate request %s", envelope.request_id)
@@ -280,24 +337,25 @@ class InterAgentBridge:
                 logging.exception("INTER-AGENT BRIDGE: request %s failed", envelope.request_id)
                 response = "EmeryChat failed to process the bridge request."
 
-            await self._send_envelope(
-                bot,
-                BridgeEnvelope(
-                    message_type="response",
-                    request_id=envelope.request_id,
-                    source_bot_id=self.local_bot_id,
-                    destination_bot_id=self.peer_bot_id,
-                    hops=envelope.hops + 1,
-                    body=_limit_payload(response),
-                ),
+            response_envelope = BridgeEnvelope(
+                message_type="response",
+                request_id=envelope.request_id,
+                source_bot_id=self.local_bot_id,
+                destination_bot_id=self.peer_bot_id,
+                hops=envelope.hops + 1,
+                body=_limit_payload(response),
             )
-            self._seen[envelope.request_id] = time.monotonic()
+            self._completed[envelope.request_id] = _CachedResponse(
+                envelope=response_envelope,
+                created_at=time.monotonic(),
+            )
+            await self._send_envelope(bot, response_envelope)
         finally:
             self._inflight.discard(envelope.request_id)
 
     async def _route_response(self, bot, envelope: BridgeEnvelope) -> None:
         self._prune_state()
-        route = self._pending.pop(envelope.request_id, None)
+        route = self._pending.get(envelope.request_id)
         if route is None:
             logging.warning(
                 "INTER-AGENT BRIDGE: response %s has no pending local request",
@@ -305,11 +363,18 @@ class InterAgentBridge:
             )
             return
 
+        if route.response_future is not None:
+            if not route.response_future.done():
+                route.response_future.set_result(envelope.body)
+            self._pending.pop(envelope.request_id, None)
+            return
+
         await bot.send_message(
             chat_id=route.chat_id,
             message_thread_id=route.message_thread_id,
             text=f"Hermes:\n{envelope.body}",
         )
+        self._pending.pop(envelope.request_id, None)
 
     async def handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -399,9 +464,9 @@ class InterAgentBridge:
 
 
 def _is_allowed_human(user_id: int) -> bool:
-    if ALLOWED_USER_IDS or ALLOWED_BOT_IDS:
-        return user_id in ALLOWED_USER_IDS
-    return bool(ALLOW_UNRESTRICTED_TELEGRAM_ACCESS)
+    if not ALLOWED_USER_IDS:
+        return bool(ALLOW_UNRESTRICTED_TELEGRAM_ACCESS)
+    return user_id in ALLOWED_USER_IDS
 
 
 async def _run_emery_request(body: str, *, sender_id: int, sender_name: str) -> str:
@@ -453,7 +518,7 @@ async def _run_emery_request(body: str, *, sender_id: int, sender_name: str) -> 
 
 
 _bridge = InterAgentBridge(
-    local_bot_id=EMERY_BOT_ID,
+    local_bot_id=None,
     peer_bot_id=HERMES_BOT_ID,
     peer_chat_id=HERMES_BOT_USERNAME,
 )

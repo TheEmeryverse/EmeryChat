@@ -712,7 +712,8 @@ TOOL_STATUS_MESSAGES = {
     "remove_scheduled_job": f"{MODEL_NAME} is removing a scheduled job...",
     "list_portainer_environments": f"{MODEL_NAME} is retrieving Portainer environments...",
     "list_portainer_containers": f"{MODEL_NAME} is listing Portainer containers...",
-    "update_portainer_container": f"{MODEL_NAME} is updating a container in Portainer..."
+    "update_portainer_container": f"{MODEL_NAME} is updating a container in Portainer...",
+    "send_inter_agent_message": f"{MODEL_NAME} is consulting Hermes...",
 }
 
 
