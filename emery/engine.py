@@ -10,6 +10,9 @@ from telegram.error import BadRequest
 from emery.config import (
     MAIN_MODEL_URL,
     MODEL_ID,
+    MAIN_MODEL_CONTEXT_TOKENS,
+    CONTEXT_COMPACTION_THRESHOLD,
+    MODEL_CHARS_PER_TOKEN,
     TOOL_LOOP,
     MODEL_NAME,
     THINK,
@@ -505,7 +508,52 @@ def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
 
+def _message_token_estimate(msg: dict) -> int:
+    content = msg.get("content")
+    if isinstance(content, list):
+        content = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return max(1, int(len(str(content or "")) / max(MODEL_CHARS_PER_TOKEN, 1.0)) + 16)
+
+
+def _compact_history_for_model(history_buffer) -> list[dict]:
+    budget_tokens = max(256, int(MAIN_MODEL_CONTEXT_TOKENS * CONTEXT_COMPACTION_THRESHOLD))
+    selected = []
+    used_tokens = 0
+    for msg in reversed(list(history_buffer or [])):
+        message_tokens = _message_token_estimate(msg)
+        if selected and used_tokens + message_tokens > budget_tokens:
+            break
+        if not selected and message_tokens > budget_tokens:
+            msg = dict(msg)
+            content = str(msg.get("content") or "")
+            msg["content"] = content[: int(budget_tokens * MODEL_CHARS_PER_TOKEN)]
+            message_tokens = _message_token_estimate(msg)
+        selected.append(msg)
+        used_tokens += message_tokens
+
+    selected.reverse()
+    while selected and selected[0].get("role") == "tool":
+        selected.pop(0)
+    if selected and selected[0].get("role") == "assistant" and selected[0].get("tool_calls"):
+        selected.pop(0)
+
+    omitted = len(selected) < len(history_buffer or [])
+    if omitted:
+        selected.insert(0, {
+            "role": "system",
+            "content": "[Earlier conversation compacted to stay within the model context budget.]",
+        })
+        logging.warning(
+            "⚠️ ENGINE: Compacted chat history from %s messages to %s messages at %s%% context budget.",
+            len(history_buffer or []),
+            len(selected),
+            int(CONTEXT_COMPACTION_THRESHOLD * 100),
+        )
+    return selected
+
+
 def _build_ollama_history(history_buffer) -> list[dict]:
+    history_buffer = _compact_history_for_model(history_buffer)
     ollama_history = []
     for msg in history_buffer:
         clean_msg = {"role": msg["role"]}

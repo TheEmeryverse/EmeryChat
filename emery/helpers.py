@@ -12,6 +12,7 @@ from PIL import Image
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
+    FAST_MODEL_CONTEXT_TOKENS, CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN,
     USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
     USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
     OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
@@ -146,6 +147,19 @@ async def query_fast_model(
     Queries the fast text coprocessor model on a secondary endpoint.
     Used to offload non-vision processing tasks from the main model.
     """
+    input_token_budget = max(
+        256,
+        int(FAST_MODEL_CONTEXT_TOKENS * CONTEXT_COMPACTION_THRESHOLD) - 1024,
+    )
+    max_prompt_chars = int(input_token_budget * MODEL_CHARS_PER_TOKEN)
+    if len(prompt) > max_prompt_chars:
+        logging.warning(
+            "⚠️ FAST MODEL: Prompt truncated from %s to %s chars to stay within the input budget.",
+            len(prompt),
+            max_prompt_chars,
+        )
+        prompt = prompt[:max_prompt_chars] + "\n...[prompt truncated for context budget]"
+
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})

@@ -35,6 +35,7 @@ from emery.config import (
     ENABLE_MEALIE, MEALIE_URL, MEALIE_API_KEY, MEALIE_MAX_URLS_PER_MESSAGE,
     _to_bool
 )
+from emery.config import FAST_MODEL_CONTEXT_TOKENS, CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN
 from emery.docling import (
     detect_supported_document_type,
     convert_document_url,
@@ -1318,6 +1319,18 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
 
             if summarize_long and len(cleaned_text) > 1500:
                 logging.debug(f"⚡ FAST MODEL: Summarizing web content of {len(cleaned_text)} chars from {current_url}...")
+                summary_input_tokens = max(
+                    256,
+                    int(FAST_MODEL_CONTEXT_TOKENS * CONTEXT_COMPACTION_THRESHOLD) - 2048,
+                )
+                summary_input_chars = int(summary_input_tokens * MODEL_CHARS_PER_TOKEN)
+                if len(cleaned_text) > summary_input_chars:
+                    logging.warning(
+                        "⚠️ FETCH: Source text truncated from %s to %s chars before fast-model summarization.",
+                        len(cleaned_text),
+                        summary_input_chars,
+                    )
+                    cleaned_text = cleaned_text[:summary_input_chars] + "\n...[source truncated for context budget]"
                 summary_prompt = (
                     f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "
                     f"Keep it objective, concise, and structured under 600 words.\n\n"
