@@ -136,7 +136,7 @@ By default the app expects a primary OpenAI-compatible chat-completions endpoint
 - `MAIN_MODEL_URL=http://127.0.0.1:8081/v1/chat/completions`
 - `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
-- `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed`
+- `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed` (Ollama) or an explicit OpenAI-compatible `/v1/embeddings` URL (such as llama.cpp)
 
 The fast text coprocessor uses an OpenAI-compatible chat-completions endpoint. For a local llama.cpp server, point it at `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`. It is used for delegated text processing and lightweight helper tasks, but it does not inspect or execute tool calls before the main-model turn.
 
@@ -445,7 +445,7 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `VISION_MODEL_ID` | `gemma4:e4b` | Vision/multimodal model; use your local `minicpm4.5:8b` tag if that is your vision server model |
 | `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
-| `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Embedding endpoint |
+| `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Ollama `/api/embed` or OpenAI-compatible `/v1/embeddings` endpoint |
 | `DOCLING_URL` | empty | Optional Docling Serve base URL for PDF, DOCX, and PPTX extraction |
 | `DOCLING_BEARER_TOKEN` | empty | Optional bearer token for Docling Serve |
 | `NOAA_EMAIL` | `example@example.com` | Required for NOAA weather requests |

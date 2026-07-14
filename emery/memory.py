@@ -213,9 +213,9 @@ def _resolve_embedding_url() -> str:
     url = (EMBEDDING_OLLAMA_URL or "").strip()
     if not url:
         return ""
-    if url.endswith("/api/embed") or url.endswith("/api/embeddings"):
-        return url
     url = url.rstrip("/")
+    if url.endswith(("/api/embed", "/api/embeddings", "/v1/embeddings")):
+        return url
     if not url.endswith("/api"):
         url += "/api"
     return url + "/embed"
@@ -230,14 +230,13 @@ async def _get_text_embedding(text: str) -> list[float]:
     if not url:
         return []
 
-    payload = {
-        "model": EMBEDDING_MODEL_ID,
-        "input": text,
-        "keep_alive": -1,
-    }
+    is_openai_api = url.endswith("/v1/embeddings")
+    payload = {"model": EMBEDDING_MODEL_ID, "input": text}
+    if not is_openai_api:
+        payload["keep_alive"] = -1
     try:
         response = await globals.http_client.post(url, json=payload, timeout=120)
-        if response.status_code != 200 and url.endswith("/embed"):
+        if response.status_code != 200 and not is_openai_api and url.endswith("/embed"):
             fallback_url = url[:-len("/embed")] + "/embeddings"
             response = await globals.http_client.post(
                 fallback_url,
@@ -260,6 +259,11 @@ async def _get_text_embedding(text: str) -> list[float]:
             first = embeddings[0]
             if isinstance(first, list):
                 return [float(value) for value in first]
+        openai_data = data.get("data")
+        if isinstance(openai_data, list) and openai_data:
+            first = openai_data[0]
+            if isinstance(first, dict) and isinstance(first.get("embedding"), list):
+                return [float(value) for value in first["embedding"]]
         return []
     except Exception as e:
         logging.warning("⚠️ EMBEDDINGS: Failed querying %s: %s", EMBEDDING_MODEL_ID, e)
