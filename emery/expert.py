@@ -44,6 +44,7 @@ from emery.config import (
     EXPERT_MAX_SUBTASKS_PER_QUESTION,
     EXPERT_MIN_TARGET_SOURCES,
     MAIN_MODEL_URL,
+    MAIN_MODEL_REASONING_EFFORT,
     MODEL_ID,
     MODEL_NAME,
     SEARXNG_URL,
@@ -1106,7 +1107,7 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
         "presence_penalty": EXPERT_MAIN_PRESENCE_PENALTY,
         "repetition_penalty": EXPERT_MAIN_REPETITION_PENALTY,
         "max_tokens": EXPERT_MAIN_MAX_TOKENS,
-        "chat_template_kwargs": {"enable_thinking": bool(EXPERT_MAIN_ENABLE_THINKING)},
+        "reasoning_effort": MAIN_MODEL_REASONING_EFFORT if EXPERT_MAIN_ENABLE_THINKING else "none",
     }
     try:
         async with globals.main_model_lock:

@@ -12,6 +12,7 @@ from emery.config import (
     MAIN_MODEL_URL,
     MODEL_ID,
     MAIN_MODEL_CONTEXT_TOKENS,
+    MAIN_MODEL_REASONING_EFFORT,
     CONTEXT_COMPACTION_THRESHOLD,
     MODEL_CHARS_PER_TOKEN,
     TOOL_LOOP,
@@ -825,7 +826,7 @@ def _build_main_model_payload(
     allow_tools: bool = True,
     stream: bool = None,
 ) -> tuple[dict, list[dict]]:
-    chat_template_kwargs = {"enable_thinking": bool(THINK)}
+    reasoning_effort = MAIN_MODEL_REASONING_EFFORT if THINK else "none"
     stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
     ollama_history = _build_ollama_history(history_buffer)
 
@@ -837,7 +838,7 @@ def _build_main_model_payload(
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,
-        "chat_template_kwargs": chat_template_kwargs,
+        "reasoning_effort": reasoning_effort,
     }
 
     if allow_tools and tools_schema:
