@@ -1,11 +1,19 @@
 import logging
 import re
+import asyncio
+import html
+import time
 from types import SimpleNamespace
 
 from telegram import ReplyParameters
 from telegram.error import BadRequest
 
-from emery.config import ENABLE_TELEGRAM_RICH_MESSAGES, TELEGRAM_TOKEN
+from emery.config import (
+    ENABLE_TELEGRAM_RICH_MESSAGES,
+    TELEGRAM_TOKEN,
+    LIVE_PROGRESS_MIN_DELAY_SECONDS,
+    LIVE_PROGRESS_EDIT_INTERVAL_SECONDS,
+)
 from emery.telegram_utils import normalize_message_thread_id
 
 
@@ -14,6 +22,95 @@ MAX_TELEGRAM_RICH_MESSAGE_BYTES = 32768
 MIN_TELEGRAM_SPLIT_LEN = 1000
 HTML_TAG_RE = re.compile(r"</?([a-zA-Z][\w:-]*)(?:\s[^<>]*)?>")
 VOID_HTML_TAGS = {"br", "hr", "img"}
+
+
+class TelegramLiveProgress:
+    """Render one throttled, best-effort temporary progress message per turn."""
+
+    def __init__(
+        self,
+        bot,
+        chat_id: int,
+        *,
+        message_thread_id: int = None,
+        min_delay: float = LIVE_PROGRESS_MIN_DELAY_SECONDS,
+        edit_interval: float = LIVE_PROGRESS_EDIT_INTERVAL_SECONDS,
+    ):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
+        self.min_delay = max(0.0, float(min_delay))
+        self.edit_interval = max(0.0, float(edit_interval))
+        self.started_at = time.monotonic()
+        self.last_sent_at = None
+        self.message_id = None
+        self.pending_text = None
+        self.disabled = False
+
+    @staticmethod
+    def _html_text(text: str) -> str:
+        return f"<i>{html.escape(str(text or ''), quote=False)}</i>"
+
+    async def update(self, text: str, *, force: bool = False) -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text or self.disabled:
+            return
+
+        self.pending_text = clean_text
+        now = time.monotonic()
+        if not force and self.message_id is None and now - self.started_at < self.min_delay:
+            return
+
+        if self.message_id is not None and self.last_sent_at is not None:
+            remaining = self.edit_interval - (now - self.last_sent_at)
+            if remaining > 0:
+                if not force:
+                    return
+                await asyncio.sleep(remaining)
+
+        text_to_send = self.pending_text
+        try:
+            if self.message_id is None:
+                sent = await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=self._html_text(text_to_send),
+                    parse_mode="HTML",
+                    message_thread_id=self.message_thread_id,
+                )
+                self.message_id = getattr(sent, "message_id", None)
+            else:
+                await self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=self._html_text(text_to_send),
+                    parse_mode="HTML",
+                )
+            self.pending_text = None
+            self.last_sent_at = time.monotonic()
+        except Exception as exc:
+            self.disabled = True
+            logging.warning(
+                "⚠️ TELEGRAM PROGRESS: unable to update chat_id=%s thread_id=%s: %s",
+                self.chat_id,
+                self.message_thread_id,
+                exc,
+            )
+
+    async def close(self) -> None:
+        if self.message_id is None:
+            return
+        try:
+            await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
+        except Exception as exc:
+            logging.debug(
+                "TELEGRAM PROGRESS: unable to delete temporary message chat_id=%s message_id=%s: %s",
+                self.chat_id,
+                self.message_id,
+                exc,
+            )
+        finally:
+            self.message_id = None
+            self.pending_text = None
 
 
 def _is_inside_html_syntax(text: str, index: int) -> bool:

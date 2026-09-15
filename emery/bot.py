@@ -16,7 +16,7 @@ from emery.config import (
     HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
     ALLOWED_USER_IDS, ALLOWED_BOT_IDS, ENABLE_WEATHER,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
-    ALLOW_UNRESTRICTED_TELEGRAM_ACCESS
+    ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -26,7 +26,12 @@ from emery.helpers import (
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.engine import emery_engine
-from emery.telegram_delivery import send_rich_html_or_split_html_message, send_rich_or_split_html_message, send_split_html_message
+from emery.telegram_delivery import (
+    TelegramLiveProgress,
+    send_rich_html_or_split_html_message,
+    send_rich_or_split_html_message,
+    send_split_html_message,
+)
 from emery.docling import (
     detect_supported_document_type,
     convert_document_bytes,
@@ -160,7 +165,7 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
 def is_user_allowed(update: Update) -> bool:
     """Checks whether the Telegram sender is an allowed human user."""
     user = update.effective_user
-    if not user or user.is_bot:
+    if not user or getattr(user, "is_bot", False):
         return False
 
     if not ALLOWED_USER_IDS:
@@ -530,10 +535,38 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             await asyncio.sleep(4)
 
     typing_task = asyncio.create_task(keep_typing())
+    progress = None
+    if ENABLE_LIVE_PROGRESS:
+        progress = TelegramLiveProgress(
+            globals.application_bot,
+            chat_id,
+            message_thread_id=globals.CURRENT_THREAD_ID.get(),
+        )
+    latest_preamble = ""
+
+    async def handle_engine_event(event: dict) -> None:
+        nonlocal latest_preamble
+        if progress is None:
+            return
+
+        event_type = event.get("type")
+        if event_type == "preamble":
+            latest_preamble = str(event.get("text") or "").strip()
+            await progress.update(f"💭 {latest_preamble}")
+        elif event_type == "tool_started":
+            status = str(event.get("text") or "").strip()
+            if latest_preamble and status:
+                status = f"{latest_preamble}\n\n{status}"
+            latest_preamble = ""
+            await progress.update(status, force=True)
 
     try:
         from emery.engine import emery_engine
-        response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id], model_to_use=model_to_use)
+        response_text, voice_sent_via_tool = await emery_engine(
+            globals.chat_histories[chat_id],
+            model_to_use=model_to_use,
+            on_event=handle_engine_event if progress else None,
+        )
     except Exception as e:
         logging.error(f"Error running engine in debounce worker: {e}", exc_info=True)
         response_text = "EMERYCHAT engine failure."
@@ -541,6 +574,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     finally:
         typing_stop.set()
         await typing_task
+        if progress:
+            await progress.close()
 
     # --- THINKING SPLITTER LOGIC ---
     start_tag = "<" + "think" + ">"

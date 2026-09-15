@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -16,6 +17,8 @@ from emery.config import (
     TOOL_LOOP,
     MODEL_NAME,
     THINK,
+    ENABLE_LIVE_PROGRESS,
+    LIVE_PROGRESS_MAX_CHARS,
 )
 from emery import tool_registry
 import emery.globals as globals
@@ -57,6 +60,194 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
 
 def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
+
+
+class _StreamingModelError(RuntimeError):
+    def __init__(self, message: str, *, events_seen: bool = False):
+        super().__init__(message)
+        self.events_seen = events_seen
+
+
+async def _emit_engine_event(on_event, event: dict) -> None:
+    if not on_event:
+        return
+    try:
+        result = on_event(event)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        logging.warning("⚠️ ENGINE: Progress callback failed for %s: %s", event.get("type"), exc)
+
+
+def _sanitize_model_preamble(text: str) -> str:
+    """Return a short, non-reasoning progress note suitable for Telegram."""
+    cleaned = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
+    cleaned = re.sub(r"<\/?progress>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _strip_id_prefix(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return ""
+
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    cleaned = " ".join(sentences[:2]).strip()
+    if len(cleaned) > LIVE_PROGRESS_MAX_CHARS:
+        cleaned = cleaned[:LIVE_PROGRESS_MAX_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return cleaned
+
+
+def _merge_stream_tool_call(tool_calls: dict, fragment: dict, fallback_index: int) -> None:
+    index = fragment.get("index", fallback_index)
+    key = str(index)
+    current = tool_calls.setdefault(
+        key,
+        {
+            "index": index,
+            "id": "",
+            "type": "function",
+            "function": {"name": "", "arguments": ""},
+        },
+    )
+    if fragment.get("id"):
+        current["id"] = fragment["id"]
+    if fragment.get("type"):
+        current["type"] = fragment["type"]
+    function = fragment.get("function") or {}
+    if function.get("name"):
+        current["function"]["name"] += str(function["name"])
+    if function.get("arguments") is not None:
+        current["function"]["arguments"] += str(function["arguments"])
+
+
+def _stream_choice_delta(payload: dict) -> tuple[dict, dict]:
+    choices = payload.get("choices") or []
+    if not choices:
+        return {}, {}
+    choice = choices[0] or {}
+    return choice, choice.get("delta") or choice.get("message") or {}
+
+
+async def _stream_main_model_response(url: str, payload: dict, on_event=None) -> tuple[dict, float]:
+    """Assemble an OpenAI-compatible SSE response without executing partial tool calls."""
+    content_parts = []
+    reasoning_parts = []
+    tool_calls = {}
+    role = "assistant"
+    finish_reason = None
+    usage = None
+    events_seen = False
+    pending_preamble = None
+    progress_emitted = False
+    raw_content = ""
+    request_started = time.perf_counter()
+
+    try:
+        async with globals.http_client.stream("POST", url, json=payload, timeout=900) as response:
+            if response.status_code != 200:
+                raise _StreamingModelError(
+                    f"Main model returned {response.status_code} — {response.text[:200]}",
+                    events_seen=False,
+                )
+
+            async for line in response.aiter_lines():
+                line = str(line or "").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if line.lower().startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    logging.debug("ENGINE: Ignoring non-JSON streaming line: %s", safe_preview(line, max_len=160))
+                    continue
+
+                if not isinstance(chunk, dict):
+                    continue
+                events_seen = True
+                if isinstance(chunk.get("usage"), dict):
+                    usage = chunk["usage"]
+
+                choice, delta = _stream_choice_delta(chunk)
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                if delta.get("role"):
+                    role = delta["role"]
+
+                content = message_content_to_text(delta.get("content"))
+                if content:
+                    content_parts.append(content)
+                    raw_content += content
+                    if not progress_emitted:
+                        tagged = re.search(
+                            r"<progress>(.*?)</progress>",
+                            clean_thinking_tags(normalize_gemma_thinking(raw_content)),
+                            flags=re.DOTALL | re.IGNORECASE,
+                        )
+                        if tagged:
+                            preamble = _sanitize_model_preamble(tagged.group(1))
+                            if preamble:
+                                pending_preamble = preamble
+
+                reasoning = message_content_to_text(
+                    delta.get("reasoning_content") or delta.get("thinking") or delta.get("reasoning")
+                )
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+
+                fragments = delta.get("tool_calls") or []
+                if isinstance(fragments, dict):
+                    fragments = [fragments]
+                for fragment_index, fragment in enumerate(fragments):
+                    if isinstance(fragment, dict):
+                        if pending_preamble and not progress_emitted:
+                            progress_emitted = True
+                            await _emit_engine_event(
+                                on_event,
+                                {"type": "preamble", "text": pending_preamble, "source": "model"},
+                            )
+                        _merge_stream_tool_call(tool_calls, fragment, fragment_index)
+
+                function_call = delta.get("function_call")
+                if isinstance(function_call, dict):
+                    if pending_preamble and not progress_emitted:
+                        progress_emitted = True
+                        await _emit_engine_event(
+                            on_event,
+                            {"type": "preamble", "text": pending_preamble, "source": "model"},
+                        )
+                    _merge_stream_tool_call(
+                        tool_calls,
+                        {"index": 0, "type": "function", "function": function_call},
+                        0,
+                    )
+    except _StreamingModelError:
+        raise
+    except Exception as exc:
+        raise _StreamingModelError(str(exc), events_seen=events_seen) from exc
+
+    if not events_seen:
+        raise _StreamingModelError("Main model returned an empty stream.", events_seen=False)
+
+    message = {
+        "role": role,
+        "content": "".join(content_parts),
+    }
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        message["tool_calls"] = [
+            {key: value for key, value in call.items() if key != "index"}
+            for call in sorted(tool_calls.values(), key=lambda item: item["index"])
+        ]
+
+    response_json = {
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+    }
+    if usage:
+        response_json["usage"] = usage
+    return response_json, time.perf_counter() - request_started
 
 
 _SEARCH_SUMMARY_TIMEOUT_SECONDS = 8.0
@@ -504,6 +695,18 @@ def _normalize_tool_arguments(arguments):
     return arguments or {}
 
 
+def _parse_tool_arguments(arguments):
+    """Parse a complete tool argument object, returning None for malformed input."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            return None
+    if arguments is None:
+        return {}
+    return arguments if isinstance(arguments, dict) else None
+
+
 def _log_main_model_perf(response_json: dict, wall_seconds: float) -> None:
     logging.info(format_llama_perf_line("MAIN", response_json, wall_seconds))
 
@@ -620,6 +823,7 @@ def _build_main_model_payload(
     top_p: float = 0.95,
     top_k: int = 20,
     allow_tools: bool = True,
+    stream: bool = None,
 ) -> tuple[dict, list[dict]]:
     chat_template_kwargs = {"enable_thinking": bool(THINK)}
     stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
@@ -628,7 +832,7 @@ def _build_main_model_payload(
     payload = {
         "model": model_to_use,
         "messages": stable_prefix + ollama_history,
-        "stream": False,
+        "stream": ENABLE_LIVE_PROGRESS if stream is None else bool(stream),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
@@ -642,16 +846,22 @@ def _build_main_model_payload(
     return payload, ollama_history
 
 
-async def _send_tool_status(fn: str, args: dict) -> None:
+async def _send_tool_status(fn: str, args: dict, on_event=None) -> None:
     if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
+        return
+
+    status_msg = await _format_tool_status_message(fn, args)
+    if on_event:
+        await _emit_engine_event(
+            on_event,
+            {"type": "tool_started", "tool": fn, "text": status_msg, "source": "application"},
+        )
         return
 
     chat_id = globals.TARGET_CHAT_ID.get()
     thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
     if chat_id is None:
         return
-
-    status_msg = await _format_tool_status_message(fn, args)
     try:
         await globals.application_bot.send_message(
             chat_id=chat_id,
@@ -693,6 +903,7 @@ async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: s
         top_p=1.0,
         top_k=1,
         allow_tools=True,
+        stream=False,
     )
 
     try:
@@ -766,7 +977,7 @@ TOOL_STATUS_MESSAGES = {
 
 
 # --- THE UNIFIED ENGINE ---
-async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
+async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, on_event=None):
     url = MAIN_MODEL_URL
     # Find the latest sender info from the history buffer.
     sender_user_id = None
@@ -794,18 +1005,49 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
             async with globals.main_model_lock:
                 request_started = time.perf_counter()
-                r = await globals.http_client.post(url, json=payload, timeout=900)
-                request_wall_seconds = time.perf_counter() - request_started
-            
-            if r.status_code != 200:
-                logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
-                return "Main model connection error.", False
- 
-            res = r.json()
-            _log_main_model_perf(res, request_wall_seconds)
+                streamed = bool(payload.get("stream"))
+                if streamed:
+                    try:
+                        res, request_wall_seconds = await _stream_main_model_response(url, payload, on_event=on_event)
+                    except _StreamingModelError as stream_error:
+                        if stream_error.events_seen:
+                            logging.error("❌ ENGINE: Main model stream failed after partial output: %s", stream_error)
+                            await _emit_engine_event(
+                                on_event,
+                                {"type": "stream_error", "text": "Main model stream failed after partial output."},
+                            )
+                            return "Main model stream error.", False
+
+                        logging.warning("⚠️ ENGINE: Streaming unavailable; retrying once without streaming: %s", stream_error)
+                        payload["stream"] = False
+                        r = await globals.http_client.post(url, json=payload, timeout=900)
+                        request_wall_seconds = time.perf_counter() - request_started
+                        if r.status_code != 200:
+                            logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
+                            return "Main model connection error.", False
+                        res = r.json()
+                        _log_main_model_perf(res, request_wall_seconds)
+                else:
+                    r = await globals.http_client.post(url, json=payload, timeout=900)
+                    request_wall_seconds = time.perf_counter() - request_started
+                    if r.status_code != 200:
+                        logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
+                        return "Main model connection error.", False
+                    res = r.json()
+                    _log_main_model_perf(res, request_wall_seconds)
+
             msg = _extract_response_message(res)
             raw_content = message_content_to_text(msg.get("content"))
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
+            had_progress_markup = bool(
+                re.search(r"<progress>.*?</progress>", raw_content, flags=re.DOTALL | re.IGNORECASE)
+            )
+            cleaned_msg_content = re.sub(
+                r"<progress>(.*?)</progress>",
+                lambda match: _sanitize_model_preamble(match.group(1)),
+                cleaned_msg_content,
+                flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
             reasoning = message_content_to_text(
                 msg.get("reasoning_content") or msg.get("thinking") or msg.get("reasoning")
             )
@@ -816,6 +1058,31 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                 thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
 
             if allow_tools and msg.get("tool_calls"):
+                if not had_progress_markup:
+                    preamble = _sanitize_model_preamble(cleaned_msg_content)
+                    if preamble:
+                        await _emit_engine_event(
+                            on_event,
+                            {"type": "preamble", "text": preamble, "source": "model"},
+                        )
+                parsed_tool_calls = []
+                for tc in msg["tool_calls"]:
+                    function = tc.get("function") or {}
+                    fn = function.get("name")
+                    args = _parse_tool_arguments(function.get("arguments", {}))
+                    if not fn or fn not in AVAILABLE_TOOLS or args is None:
+                        logging.error(
+                            "❌ ENGINE: Refusing malformed or unknown streamed tool call: name=%r args=%r",
+                            fn,
+                            safe_preview(function.get("arguments", ""), max_len=240),
+                        )
+                        await _emit_engine_event(
+                            on_event,
+                            {"type": "stream_error", "text": "Model returned an invalid tool call."},
+                        )
+                        return "Main model tool-call error.", False
+                    parsed_tool_calls.append((tc, fn, args))
+
                 assistant_tool_msg = {
                     "role": msg.get("role", "assistant"),
                     "content": cleaned_msg_content,
@@ -823,11 +1090,9 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                 }
                 history_buffer.append(assistant_tool_msg)
                 ollama_history.append(assistant_tool_msg)
-                for tc in assistant_tool_msg['tool_calls']:
-                    fn = tc['function']['name']
-                    args = _normalize_tool_arguments(tc['function'].get('arguments', {}))
+                for tc, fn, args in parsed_tool_calls:
                     
-                    await _send_tool_status(fn, args)
+                    await _send_tool_status(fn, args, on_event=on_event)
                     thinking_timeline.append(_format_tool_timeline_entry(fn))
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
@@ -844,6 +1109,10 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True):
                         
                     history_buffer.append(tool_response)
                     ollama_history.append(tool_response)
+                    await _emit_engine_event(
+                        on_event,
+                        {"type": "tool_finished", "tool": fn},
+                    )
                 continue
             
             content = cleaned_msg_content
