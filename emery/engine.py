@@ -930,6 +930,9 @@ async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: s
 TOOL_STATUS_MESSAGES = {
     "delegate_to_coprocessor": f"{MODEL_NAME} is delegating a task to the coprocessor...",
     "save_user_memory": f"{MODEL_NAME} is writing this down in memory...",
+    "jot_down_note": f"{MODEL_NAME} is jotting down a working note...",
+    "read_scratchpad": f"{MODEL_NAME} is checking the scratchpad...",
+    "clear_scratchpad": f"{MODEL_NAME} is clearing the scratchpad...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_youtube_transcript": f"{MODEL_NAME} is reading the video transcript...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",

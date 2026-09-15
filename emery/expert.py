@@ -84,6 +84,8 @@ DEFAULT_MAX_ROUNDS = 6
 FETCHES_PER_ROUND = 6
 SEARCH_RESULTS_PER_QUERY = 8
 ECON_REQUESTS_PER_ROUND = 3
+RESEARCH_NOTE_MAX_COUNT = 128
+RESEARCH_NOTE_MAX_CHARS = 420
 AGENDA_PRIORITY_ORDER = {"core": 0, "supporting": 1, "optional": 2}
 EVALUATION_STATUSES = {"answered", "needs_more", "sufficient_with_gaps", "exhausted"}
 
@@ -165,6 +167,7 @@ class ExpertSession:
     user_inputs: list[dict] = field(default_factory=list)
     research_agenda: list[dict] = field(default_factory=list)
     research_packets: list[dict] = field(default_factory=list)
+    research_notes: list[dict] = field(default_factory=list)
     new_questions_added: int = 0
     final_report: str = ""
     final_report_versions: list[dict] = field(default_factory=list)
@@ -371,6 +374,106 @@ def _research_packet_digest(session: ExpertSession, limit: int = 8) -> str:
             f"Gaps: {'; '.join(str(gap) for gap in (packet.get('gaps') or [])[:4])}"
         )
     return "\n\n".join(chunks)
+
+
+def _research_note_text(raw_note) -> str:
+    """Extract one compact note from model output without trusting its shape."""
+    if isinstance(raw_note, dict):
+        raw_note = (
+            raw_note.get("text")
+            or raw_note.get("note")
+            or raw_note.get("finding")
+            or raw_note.get("claim")
+        )
+    if not isinstance(raw_note, str):
+        return ""
+    text = re.sub(r"\s+", " ", raw_note).strip(" -*•\t\r\n")
+    if len(text) < 8:
+        return ""
+    if len(text) > RESEARCH_NOTE_MAX_CHARS:
+        text = text[: RESEARCH_NOTE_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _add_research_note(
+    session: ExpertSession,
+    raw_note,
+    *,
+    category: str,
+    question_id: str = "",
+    source_ids: list[str] | None = None,
+    econ_result_ids: list[str] | None = None,
+) -> bool:
+    """Add one deduplicated, bounded note to the session scratchpad."""
+    text = _research_note_text(raw_note)
+    if not text:
+        return False
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    for note in session.research_notes:
+        if note.get("normalized") != normalized:
+            continue
+        note["source_ids"] = sorted(set(note.get("source_ids") or []) | set(source_ids or []))
+        note["econ_result_ids"] = sorted(set(note.get("econ_result_ids") or []) | set(econ_result_ids or []))
+        return False
+
+    if len(session.research_notes) >= RESEARCH_NOTE_MAX_COUNT:
+        logging.info(
+            "EXPERT MODE %s scratchpad reached its %s-note limit; ignoring another %s note.",
+            session.id,
+            RESEARCH_NOTE_MAX_COUNT,
+            category,
+        )
+        return False
+
+    session.research_notes.append({
+        "id": f"N{len(session.research_notes) + 1}",
+        "category": category,
+        "text": text,
+        "normalized": normalized,
+        "question_id": str(question_id or ""),
+        "source_ids": sorted(set(str(item) for item in (source_ids or []) if item)),
+        "econ_result_ids": sorted(set(str(item) for item in (econ_result_ids or []) if item)),
+        "created_at": _now_label(),
+    })
+    session.touch()
+    return True
+
+
+def _record_packet_notes(session: ExpertSession, packet: dict) -> int:
+    """Persist the high-value packet fields as durable-in-session scratch notes."""
+    common = {
+        "question_id": packet.get("question_id") or "",
+        "source_ids": packet.get("source_ids") or [],
+        "econ_result_ids": packet.get("econ_result_ids") or [],
+    }
+    added = 0
+    for category, value in (("summary", packet.get("summary")),):
+        added += int(_add_research_note(session, value, category=category, **common))
+    for category, values in (
+        ("finding", packet.get("key_findings")),
+        ("contradiction", packet.get("contradictions")),
+        ("gap", packet.get("gaps")),
+    ):
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            added += int(_add_research_note(session, value, category=category, **common))
+    return added
+
+
+def _research_notes_digest(session: ExpertSession) -> str:
+    if not session.research_notes:
+        return "No research scratchpad notes yet."
+    lines = []
+    for note in session.research_notes:
+        sources = ", ".join(note.get("source_ids") or []) or "none"
+        question_id = note.get("question_id") or "general"
+        lines.append(
+            f"{note.get('id')} | {note.get('category')} | {question_id} | sources: {sources}\n"
+            f"{note.get('text')}"
+        )
+    return "\n\n".join(lines)
 
 
 def _select_next_agenda_question(session: ExpertSession) -> dict | None:
@@ -1534,6 +1637,7 @@ async def _plan_subagent_research(session: ExpertSession, question: dict) -> dic
             f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
             f"Already Fetched Source Domains: {existing_domains}\n\n"
             f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+            f"Cumulative research scratchpad:\n{_research_notes_digest(session)}\n\n"
             f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
             "### CURRENT ASSIGNED TASK (REDUCED PASS) ###\n"
             f"Assigned question: {question.get('id')} - {question.get('question')}\n"
@@ -1563,6 +1667,7 @@ async def _plan_subagent_research(session: ExpertSession, question: dict) -> dic
             f"Previously Attempted Queries (Do NOT repeat): {attempted_queries}\n"
             f"Already Fetched Source Domains: {existing_domains}\n\n"
             f"Existing agenda:\n{_agenda_digest(session)}\n\n"
+            f"Cumulative research scratchpad:\n{_research_notes_digest(session)}\n\n"
             f"Recent packets:\n{_research_packet_digest(session, limit=4)}\n\n"
             "### CURRENT ASSIGNED TASK (DYNAMIC SUFFIX) ###\n"
             f"Assigned question: {question.get('id')} - {question.get('question')}\n"
@@ -1653,12 +1758,14 @@ async def _run_research_subtask(bot, session: ExpertSession, question: dict) -> 
         **packet_notes,
     }
     session.research_packets.append(packet)
+    notes_added = _record_packet_notes(session, packet)
     _record_event(
         session,
         "research_packet",
         f"Completed {packet['id']} for {question_id}: {packet.get('summary')[:240]}",
         source_ids=packet["source_ids"],
         econ_result_ids=packet["econ_result_ids"],
+        notes_added=notes_added,
     )
     return packet
 
@@ -1698,6 +1805,8 @@ async def _evaluate_research_packet(session: ExpertSession, question: dict, pack
         "Use the full evidence inventory below to score every agenda question. Do not base coverage decisions on only the latest packet.\n"
         f"Total sources fetched: {_source_count(session)}\n"
         f"Total structured data results: {len(session.econ_results)}\n\n"
+        "Cumulative research scratchpad notes:\n"
+        f"{_research_notes_digest(session)}\n\n"
         "All source summaries (titles, summaries, key claims):\n"
         # Bounded to most-recent successful evidence; prevents prompt bloat on large sessions
         f"{_source_items_digest(session.sources, limit=20, include_failed=False)}\n\n"
@@ -1958,6 +2067,7 @@ async def _build_final_report(session: ExpertSession) -> str:
         f"User follow-up inputs: {json.dumps(session.user_inputs, ensure_ascii=True)}\n\n"
         f"{_model_display_name()} research agenda:\n{_agenda_digest(session)}\n\n"
         f"Research packets:\n{_research_packet_digest(session, limit=20)}\n\n"
+        f"Cumulative research scratchpad:\n{_research_notes_digest(session)}\n\n"
         f"Source notes:\n{_source_digest(session, limit=40)}\n\n"
         f"Structured data notes:\n{_econ_digest(session, limit=20)}"
     )
@@ -2230,6 +2340,17 @@ def _render_loop_markdown(session: ExpertSession) -> str:
     for query in session.search_queries:
         lines.append(f"- {query}")
 
+    lines.extend(["", "## Research Scratchpad"])
+    if not session.research_notes:
+        lines.append("No research scratchpad notes were recorded.")
+    else:
+        for note in session.research_notes:
+            sources = ", ".join(note.get("source_ids") or []) or "none"
+            lines.append(
+                f"- **{note.get('id')} [{note.get('category')}]** "
+                f"(question {note.get('question_id') or 'general'}; sources: {sources}): {note.get('text')}"
+            )
+
     lines.extend(["", "## Research Agenda"])
     for item in session.research_agenda:
         lines.append(f"### {item.get('id')}: {item.get('question')}")
@@ -2322,6 +2443,7 @@ def _expert_help_text() -> str:
         "",
         "/expert &lt;detailed research question&gt; - Start a focused research session.",
         "/expert help - Show this help.",
+        "/expert notes - Show the active research scratchpad.",
         "/expert list - Show archived research sessions.",
         "/expert status - Show the active research session status.",
         "/expert resume &lt;id&gt; - Resume an archived research session.",
@@ -2335,6 +2457,36 @@ def _expert_help_text() -> str:
 
 async def _send_expert_help(update) -> None:
     await update.message.reply_text(_expert_help_text(), parse_mode="HTML")
+
+
+async def _send_expert_notes(update, context) -> None:
+    session = _active_session_for_update(update)
+    if not session:
+        await update.message.reply_text(f"No active {_model_display_name()} research session in this chat/thread.")
+        return
+
+    lines = [
+        f"# {_model_display_name()} Research Scratchpad",
+        f"{len(session.research_notes)} notes recorded for this session.",
+        "",
+    ]
+    if not session.research_notes:
+        lines.append("No notes yet.")
+    else:
+        for note in session.research_notes:
+            sources = ", ".join(note.get("source_ids") or []) or "none"
+            lines.append(
+                f"- **{note.get('id')} · {note.get('category')}** "
+                f"(question {note.get('question_id') or 'general'}; sources: {sources}) — {note.get('text')}"
+            )
+    text = "\n".join(lines)
+    await send_rich_or_split_html_message(
+        context.bot,
+        session.chat_id,
+        text,
+        fallback_html_text=emery_format(text),
+        message_thread_id=session.message_thread_id,
+    )
 
 
 async def _clear_archived_reports(update) -> None:
@@ -2503,6 +2655,9 @@ async def handle_expert_command(update, context) -> None:
     subcommand = args[0].lower()
     if subcommand == "help":
         await _send_expert_help(update)
+        return
+    if subcommand == "notes":
+        await _send_expert_notes(update, context)
         return
     if subcommand == "list":
         await _send_expert_list(update, context)

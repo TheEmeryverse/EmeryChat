@@ -1,5 +1,6 @@
 from emery.config import ENABLE_MEMORY, REOLINK_CAMERAS
 from emery.memory import save_user_memory, get_camera_security_log
+from emery.scratchpad import clear_scratchpad, jot_down_note, read_scratchpad
 
 from emery.tools import (
     get_calendar_events,
@@ -41,6 +42,58 @@ def is_enabled(var_name):
 
 AVAILABLE_TOOLS = {}
 tools_schema = []
+
+# --- General Scratchpad (always enabled) ---
+AVAILABLE_TOOLS["jot_down_note"] = jot_down_note
+AVAILABLE_TOOLS["read_scratchpad"] = read_scratchpad
+AVAILABLE_TOOLS["clear_scratchpad"] = clear_scratchpad
+tools_schema.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "jot_down_note",
+            "description": (
+                "Save a concise intermediate fact, source takeaway, decision, or open question to the current chat/thread scratchpad. "
+                "Use this during multi-step work or research when the information should remain available after older chat context is compacted. "
+                "This is temporary working context, not durable personal memory. Do not save secrets or private facts unless the user explicitly asks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "One self-contained working note; include enough context to understand it later.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional short label such as 'Finding', 'Decision', or 'Open question'.",
+                    },
+                },
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_scratchpad",
+            "description": (
+                "Read all working notes saved for the current chat/thread. Use before answering a multi-step task when earlier research or decisions may be outside the active conversation context."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_scratchpad",
+            "description": (
+                "Clear the current chat/thread scratchpad. Use only when the user explicitly asks to clear, reset, or forget the working notes; do not clear it merely because a task is complete."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+])
 
 # --- Conditional Tool Registration ---
 if is_enabled("ENABLE_CALENDAR"):

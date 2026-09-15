@@ -25,6 +25,7 @@ from emery.helpers import (
 )
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
+from emery.scratchpad import clear_scratchpad, read_scratchpad
 from emery.engine import emery_engine
 from emery.telegram_delivery import (
     TelegramLiveProgress,
@@ -282,6 +283,8 @@ def _help_text() -> str:
         "<b>General</b>",
         "/help - Show this command list.",
         "/clear - Clear this chat's active context history.",
+        "/notes - Show the current chat/thread scratchpad.",
+        "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
         "/bridge &lt;message&gt; - Send an authenticated request to Hermes.",
         "",
@@ -326,6 +329,37 @@ async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if chat_id in globals.chat_histories:
         globals.chat_histories[chat_id].clear()
     await update.message.reply_text("Context cleared.")
+
+
+async def handle_notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the persistent scratchpad for the current chat/thread."""
+    if not is_user_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(
+        normalize_message_thread_id(chat_id, update.message.message_thread_id if update.message else None)
+    )
+    scratchpad = await read_scratchpad()
+    await send_rich_or_split_html_message(
+        context.bot,
+        chat_id,
+        f"# Scratchpad\n\n{scratchpad}",
+        fallback_html_text=emery_format(f"# Scratchpad\n\n{scratchpad}"),
+        message_thread_id=globals.CURRENT_THREAD_ID.get(),
+    )
+
+
+async def handle_clear_notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear the persistent scratchpad for the current chat/thread."""
+    if not is_user_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(
+        normalize_message_thread_id(chat_id, update.message.message_thread_id if update.message else None)
+    )
+    await update.message.reply_text(await clear_scratchpad())
 
 async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for /wipe command."""

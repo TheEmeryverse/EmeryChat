@@ -21,6 +21,7 @@ from emery.config import (
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
+from emery.scratchpad import get_scratchpad_snapshot
 
 def normalize_gemma_thinking(text: str) -> str:
     if not text:
@@ -568,6 +569,14 @@ async def get_current_system_prompt(user_query="", user_id=None): # Builds dynam
             "\n- When you do save memory, write one clean factual statement with no filler, no commentary, and no surrounding explanation."
         )
 
+    scratchpad_instruction = (
+        "\n- You have a general chat/thread scratchpad through `jot_down_note`, `read_scratchpad`, and `clear_scratchpad`."
+        "\n- Decide when a general chat/thread scratchpad would help; use `jot_down_note` for important confirmed facts, source takeaways, decisions, and unresolved questions during multi-step work or research."
+        "\n- Use `read_scratchpad` when earlier working context may be outside the active conversation, and use `clear_scratchpad` only when the user explicitly asks."
+        "\n- Do not save every search result, private secrets, or durable personal facts to the scratchpad; use long-term memory only for durable user facts."
+    )
+    scratchpad_section = get_scratchpad_snapshot()
+
     scheduler_instruction = ""
     if str(ENABLE_SCHEDULER).lower() == "true":
         scheduler_instruction = (
@@ -674,6 +683,6 @@ This context is current for this request. It is not the user's newest message.
 - User's name: {user_name}
 - User's birthday: {user_birthday}
 - User's family: {user_family}
-- User's profession: {user_profession}{relationship_line}{group_privacy_instruction}{notifications}{memory_section}{camera_log_hint}"""
+- User's profession: {user_profession}{relationship_line}{group_privacy_instruction}{notifications}{memory_section}{scratchpad_instruction}{scratchpad_section}{camera_log_hint}"""
 
     return prompt

@@ -285,6 +285,8 @@ Then:
 Built-in slash commands:
 
 - `/clear` clears the active chat context history
+- `/notes` shows the current chat/thread scratchpad
+- `/clear_notes` clears the current chat/thread scratchpad
 - `/wipe` resets the current user's persistent memory file
 
 Most other behavior is natural-language driven through the model and enabled tools.
@@ -303,6 +305,7 @@ Most other behavior is natural-language driven through the model and enabled too
 ### Personal context and memory
 
 - Persistent local memory in `data/memory/memory_store.json`
+- Persistent per-chat/thread scratchpad for intermediate facts, decisions, and open questions
 - Memory wipe and consolidation
 - Cross-chat recent-topic recall
 - Secondary-user segmented memory
@@ -337,6 +340,7 @@ Routing behavior:
 - `/expert resume <id>` restores an archived session into the current chat/thread without auto-continuing research
 - `/expert open <id>` sends the archived report back through the rich Telegram delivery path
 - `/expert status` shows the current active expert session state
+- `/expert notes` shows the active expert session's research scratchpad
 - `/expert clear` deletes all archived expert reports and clears the archive index
 - `/expert cancel` cancels the active expert session in the current chat/thread
 - `/debate <topic>` starts a foreground four-role debate with Moderator, two named sides, and Clerk research
@@ -511,6 +515,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `ENABLE_DOCLING`, `DOCLING_URL`, `DOCLING_BEARER_TOKEN` | Docling-backed document extraction for Telegram uploads and fetched PDF/DOCX/PPTX URLs |
 | `ENABLE_YOUTUBE_TRANSCRIPT` | YouTube transcript fetch for normal chat and `/expert` YouTube sources |
 | `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, archive resume/open behavior, and expert-specific model tuning |
+| `SCRATCHPAD_STORE_PATH` | Persistent general scratchpad JSON path; defaults to `data/scratchpad/scratchpad_store.json` |
 | `DEBATE_ARCHIVE_DIR`, `DEBATE_INDEX_PATH` | `/debate` memo, transcript, source appendix, and archive index paths |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |

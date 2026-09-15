@@ -12,6 +12,8 @@ from emery.bot import (
     error_handler,
     handle_help_command,
     handle_clear_command,
+    handle_notes_command,
+    handle_clear_notes_command,
     handle_wipe_command,
     handle_message,
     handle_reaction,
@@ -81,6 +83,8 @@ if __name__ == '__main__':
         )
     application.add_handler(CommandHandler("help", handle_help_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("clear", handle_clear_command, filters=HUMAN_SENDER))
+    application.add_handler(CommandHandler("notes", handle_notes_command, filters=HUMAN_SENDER))
+    application.add_handler(CommandHandler("clear_notes", handle_clear_notes_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("wipe", handle_wipe_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("expert", handle_expert_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("debate", handle_debate_command, filters=HUMAN_SENDER))
