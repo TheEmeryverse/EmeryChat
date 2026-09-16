@@ -2,6 +2,7 @@ import re
 import logging
 import asyncio
 import base64
+import time as clock
 from datetime import datetime, time
 from collections import deque
 
@@ -17,7 +18,7 @@ from emery.config import (
     ALLOWED_USER_IDS, ALLOWED_BOT_IDS, ENABLE_WEATHER,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
     ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS,
-    LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS, ENABLE_LIVE_STEERING,
+    ENABLE_LIVE_STEERING,
     LIVE_STEERING_MAX_PENDING
 )
 import emery.globals as globals
@@ -44,6 +45,32 @@ from emery.docling import (
 )
 from emery.tools import get_noaa_weather_alerts, get_voice_audio
 from emery.telegram_utils import normalize_message_thread_id
+
+
+LIVE_PROGRESS_INTERVAL_SECONDS = 10.0
+LIVE_PREFILL_MESSAGES = [
+    "💭 I’m taking a moment to understand your request…",
+    "💭 I’m thinking through the best way to help…",
+    "💭 I’m gathering the context I need…",
+    "💭 I’m working through the details…",
+    "💭 I’m considering the relevant pieces…",
+    "💭 I’m organizing my response…",
+    "💭 I’m checking the path to a useful answer…",
+    "💭 I’m connecting this with what you asked…",
+    "💭 I’m making sure I cover the important parts…",
+    "💭 I’m weighing the details carefully…",
+    "💭 I’m shaping the answer now…",
+    "💭 I’m taking another pass for completeness…",
+]
+
+TOOL_DISPLAY_NAMES = {
+    "get_noaa_weather": "weather lookup",
+    "get_noaa_weather_alerts": "weather alerts lookup",
+    "get_stock_snapshot": "stock lookup",
+    "web_search": "web search",
+    "search_query": "web search",
+    "get_voice_audio": "voice generation",
+}
 
 
 _heartbeat_last_evaluation = {}
@@ -613,11 +640,19 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     typing_task = asyncio.create_task(keep_typing())
     progress = None
+    tool_progress = None
     progress_stop = asyncio.Event()
     progress_task = None
-    tool_active = False
+    tool_close_task = None
+    progress_phase = "prefill"
+    tool_generation = 0
     if ENABLE_LIVE_PROGRESS:
         progress = TelegramLiveProgress(
+            globals.application_bot,
+            chat_id,
+            message_thread_id=globals.CURRENT_THREAD_ID.get(),
+        )
+        tool_progress = TelegramLiveProgress(
             globals.application_bot,
             chat_id,
             message_thread_id=globals.CURRENT_THREAD_ID.get(),
@@ -626,39 +661,111 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         async def keep_progress_updated():
             await progress.run_heartbeat(
                 progress_stop,
-                [
-                    f"💭 {MODEL_NAME} is working through it…",
-                    "💭 Still checking the details…",
-                    "💭 Working through the remaining steps…",
-                ],
-                interval=LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS,
-                should_update=lambda: not tool_active,
+                LIVE_PREFILL_MESSAGES,
+                interval=LIVE_PROGRESS_INTERVAL_SECONDS,
+                should_update=lambda: progress_phase == "prefill",
             )
 
         progress_task = asyncio.create_task(keep_progress_updated())
-    latest_preamble = ""
+
+    def friendly_tool_name(event: dict) -> str:
+        explicit_name = (
+            event.get("friendly_name")
+            or event.get("display_name")
+            or event.get("tool_label")
+            or event.get("label")
+        )
+        if explicit_name:
+            return str(explicit_name).strip()
+
+        raw_name = event.get("name") or event.get("tool_name") or event.get("fn")
+        if raw_name:
+            raw_name = str(raw_name).strip()
+            return TOOL_DISPLAY_NAMES.get(
+                raw_name,
+                raw_name.replace("_", " ").replace("-", " ").strip().lower(),
+            )
+        return "a tool"
+
+    async def cancel_tool_close_task() -> None:
+        nonlocal tool_close_task
+        if tool_close_task is None:
+            return
+        task = tool_close_task
+        tool_close_task = None
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def wait_for_tool_close_task() -> None:
+        nonlocal tool_close_task
+        if tool_close_task is None:
+            return
+        task = tool_close_task
+        tool_close_task = None
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def finish_tool_message(generation: int) -> None:
+        if tool_progress is None:
+            return
+        if generation != tool_generation:
+            return
+        await tool_progress.close_after_minimum(10.0)
 
     async def handle_engine_event(event: dict) -> None:
-        nonlocal latest_preamble, tool_active
+        nonlocal progress_phase, tool_generation, tool_close_task
         if progress is None:
             return
 
         event_type = event.get("type")
-        if event_type == "preamble":
-            tool_active = False
-            latest_preamble = str(event.get("text") or "").strip()
-            await progress.update(f"💭 {latest_preamble}")
+        if event_type == "prefill_started":
+            progress_phase = "prefill"
+        elif event_type == "reasoning_started":
+            progress_phase = "reasoning"
+        elif event_type == "reasoning_summary":
+            progress_phase = "reasoning"
+            summary = str(event.get("text") or event.get("summary") or "").strip()
+            if summary:
+                await progress.update(f"💭 {summary}")
+        elif event_type == "preamble":
+            progress_phase = "reasoning"
+            preamble = str(event.get("text") or "").strip()
+            if preamble:
+                await progress.update(f"💭 {preamble}")
         elif event_type == "tool_started":
-            tool_active = True
+            progress_phase = "reasoning"
+            tool_generation += 1
+            await cancel_tool_close_task()
+            if tool_progress.message_id is not None:
+                tool_progress.visible_since = clock.monotonic()
             status = str(event.get("text") or "").strip()
-            if latest_preamble and status:
-                status = f"{latest_preamble}\n\n{status}"
-            latest_preamble = ""
-            await progress.update(status, force=True)
+            name = friendly_tool_name(event)
+            explicit_name = str(
+                event.get("friendly_name")
+                or event.get("display_name")
+                or event.get("tool_label")
+                or event.get("label")
+                or ""
+            ).strip()
+            if status and explicit_name and explicit_name == status:
+                tool_text = f"🔧 {status}"
+            elif status:
+                tool_text = f"🔧 {name}\n{status}"
+            else:
+                tool_text = f"🔧 Using {name}…"
+            await tool_progress.update(tool_text, force=True)
         elif event_type == "tool_finished":
-            tool_active = False
+            generation = tool_generation
+            await cancel_tool_close_task()
+            tool_close_task = asyncio.create_task(finish_tool_message(generation))
         elif event_type in {"steering_queued", "steering_applied", "steering_deferred"}:
-            tool_active = False
+            progress_phase = "reasoning"
             await progress.update(f"💭 {str(event.get('text') or '').strip()}", force=True)
 
     turn_key = (
@@ -704,8 +811,11 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         progress_stop.set()
         if progress_task:
             await progress_task
+        await wait_for_tool_close_task()
         if progress:
             await progress.close()
+        if tool_progress:
+            await tool_progress.close()
 
     # --- THINKING SPLITTER LOGIC ---
     start_tag = "<" + "think" + ">"

@@ -89,6 +89,9 @@ DEFAULT_ENV = {
     "GOOGLE_TOKEN_PATH": "secrets/google/token.json",
     "NEST_TOKEN_PATH": "secrets/google/nest_token.json",
     "TOOL_LOOP": "15",
+    "MAX_TOOL_CALLS_PER_TURN": "8",
+    "MAX_WEB_SEARCHES_PER_TURN": "2",
+    "MAX_WEB_FETCHES_PER_TURN": "4",
     "CHAT_DEBOUNCE_DELAY": "4.0",
     "EXPERT_ARCHIVE_DIR": "data/expert",
     "EXPERT_INDEX_PATH": "config/expert_sessions.json",
@@ -658,6 +661,9 @@ def build_env_content(env_data):
         "",
         "# Runtime tuning",
         "TOOL_LOOP=" + env_value(env_data["TOOL_LOOP"]),
+        "MAX_TOOL_CALLS_PER_TURN=" + env_value(env_data["MAX_TOOL_CALLS_PER_TURN"]),
+        "MAX_WEB_SEARCHES_PER_TURN=" + env_value(env_data["MAX_WEB_SEARCHES_PER_TURN"]),
+        "MAX_WEB_FETCHES_PER_TURN=" + env_value(env_data["MAX_WEB_FETCHES_PER_TURN"]),
         "CHAT_DEBOUNCE_DELAY=" + env_value(env_data["CHAT_DEBOUNCE_DELAY"]),
         "EXPERT_ARCHIVE_DIR=" + maybe_quote(env_data["EXPERT_ARCHIVE_DIR"]),
         "EXPERT_INDEX_PATH=" + maybe_quote(env_data["EXPERT_INDEX_PATH"]),
@@ -1068,6 +1074,9 @@ def ask_runtime(env_seed):
     print_section("Runtime Tuning")
     env_seed["CHAT_DEBOUNCE_DELAY"] = str(prompt_float("Chat debounce delay seconds", parse_float(env_seed.get("CHAT_DEBOUNCE_DELAY"), 4.0)))
     env_seed["TOOL_LOOP"] = str(prompt_int("Max tool loop count", parse_int(env_seed.get("TOOL_LOOP"), 15)))
+    env_seed["MAX_TOOL_CALLS_PER_TURN"] = str(prompt_int("Max total tool calls per normal chat turn", parse_int(env_seed.get("MAX_TOOL_CALLS_PER_TURN"), 8)))
+    env_seed["MAX_WEB_SEARCHES_PER_TURN"] = str(prompt_int("Max web searches per normal chat turn", parse_int(env_seed.get("MAX_WEB_SEARCHES_PER_TURN"), 2)))
+    env_seed["MAX_WEB_FETCHES_PER_TURN"] = str(prompt_int("Max web fetches per normal chat turn", parse_int(env_seed.get("MAX_WEB_FETCHES_PER_TURN"), 4)))
     env_seed["MEMORY_THRESHOLD"] = str(prompt_int("Memory threshold characters", parse_int(env_seed.get("MEMORY_THRESHOLD"), 4000)))
     env_seed["HEARTBEAT_INTERVAL_SECONDS"] = str(prompt_int("Heartbeat check interval seconds", parse_int(env_seed.get("HEARTBEAT_INTERVAL_SECONDS"), 3600)))
     env_seed["HEARTBEAT_SILENCE_THRESHOLD_SECONDS"] = str(prompt_int("Heartbeat silence threshold seconds", parse_int(env_seed.get("HEARTBEAT_SILENCE_THRESHOLD_SECONDS"), 14400)))

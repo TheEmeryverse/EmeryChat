@@ -329,7 +329,7 @@ if is_enabled("ENABLE_SEARCH"):
         "type": "function", 
         "function": {
             "name": "web_search", 
-            "description": "Search the public web for current information, unfamiliar topics, news, or broad research questions. Use when no more specific structured tool applies, or when finance/tools do not cover the needed context. After searching, use `fetch_web_content` to read a promising specific result when the answer requires article-level detail; search again with a narrower query if the results are insufficient. Do not use this for a URL the user already supplied or for direct structured finance data when a finance tool applies. Keep raw result URLs out of the final user-facing response unless the user asks for them.",
+            "description": "Search the public web only when current or unfamiliar information is needed and no more specific structured tool applies. Start with one targeted search. Use at most one follow-up search, and only when the first results are empty or genuinely contradictory; never repeat the same query. If the user supplied a URL, use `fetch_web_content` instead. Do not use this for direct structured finance data when a finance tool applies. Keep raw result URLs out of the final user-facing response unless the user asks for them.",
             "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The web-search query describing the information or topic to find."}}, "required": ["query"]}
         }
     })
@@ -382,7 +382,7 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Fetch and extract the readable content of one specific public webpage or document URL. Use after `web_search` when a result needs close reading, or when the user gives you a URL and asks for a summary, analysis, or key details. Do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, and extracted text, possibly truncated.",
+            "description": "Fetch and extract the readable content of one specific public webpage or document URL. For ordinary questions, fetch at most one promising result after `web_search`; fetch additional pages only when the user explicitly asks for comparison or deep research. If the user gives you a URL, fetch that URL directly. Never fetch the same URL twice in one turn and do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, and extracted text, possibly truncated.",
             "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "The single HTTP or HTTPS URL to read."}}, "required": ["url"]}
         }
     })

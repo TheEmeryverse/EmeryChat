@@ -45,6 +45,7 @@ class TelegramLiveProgress:
         self.started_at = time.monotonic()
         self.last_sent_at = None
         self.message_id = None
+        self.visible_since = None
         self.pending_text = None
         self.disabled = False
 
@@ -106,6 +107,7 @@ class TelegramLiveProgress:
                     message_thread_id=self.message_thread_id,
                 )
                 self.message_id = getattr(sent, "message_id", None)
+                self.visible_since = time.monotonic()
             else:
                 await self.bot.edit_message_text(
                     chat_id=self.chat_id,
@@ -124,6 +126,18 @@ class TelegramLiveProgress:
                 exc,
             )
 
+    async def close_after_minimum(self, minimum_visible_seconds: float = 10.0) -> None:
+        """Delete the message after it has been visible for the requested minimum."""
+        if self.message_id is None:
+            return
+
+        minimum_visible_seconds = max(0.0, float(minimum_visible_seconds))
+        if self.visible_since is not None:
+            remaining = minimum_visible_seconds - (time.monotonic() - self.visible_since)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        await self.close()
+
     async def close(self) -> None:
         if self.message_id is None:
             return
@@ -138,6 +152,7 @@ class TelegramLiveProgress:
             )
         finally:
             self.message_id = None
+            self.visible_since = None
             self.pending_text = None
 
 

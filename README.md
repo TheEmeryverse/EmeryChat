@@ -477,6 +477,9 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
+| `MAX_TOOL_CALLS_PER_TURN` | `8` | Maximum total tool calls in one normal chat turn |
+| `MAX_WEB_SEARCHES_PER_TURN` | `2` | Maximum public web searches in one normal chat turn |
+| `MAX_WEB_FETCHES_PER_TURN` | `4` | Maximum webpage fetches in one normal chat turn |
 
 Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. This applies to normal chat turns, reaction-triggered evaluations, heartbeat evaluations, and non-routine scheduled jobs. Routine jobs are still executed in isolated one-shot contexts, but their delivered results may be compacted and deferred before they are added back to chat history so closely spaced routines do not churn the prompt cache. After the last nearby routine has finished, Emery can issue a tiny discarded warmup completion against the full chat context so the next human query does not pay the full prefill cost. Use `/clear` only when you intentionally want to reset the in-memory prompt context for that chat.
 
