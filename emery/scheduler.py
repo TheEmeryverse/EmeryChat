@@ -17,6 +17,7 @@ from emery.config import (
 import emery.globals as globals
 from emery.telegram_delivery import try_send_rich_or_split_html_message, try_send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
+from emery.session_context import get_session_context, get_turn_context, set_current_context
 
 WEEKDAYS = {
     "monday": 0, "mon": 0,
@@ -923,7 +924,7 @@ async def _execute_custom_job(bot, job_data: dict, *, deferred_reason: str | Non
         f" after deferral ({deferred_reason})" if deferred_reason else "",
     )
     from emery.engine import emery_engine
-    from emery.helpers import clean_thinking_tags, emery_format, telegram_escape, get_current_system_prompt
+    from emery.helpers import clean_thinking_tags, emery_format, telegram_escape
 
     try:
         active_user_id = globals.current_user_id.get() or user_id
@@ -979,12 +980,22 @@ async def _execute_custom_job(bot, job_data: dict, *, deferred_reason: str | Non
             description=description,
         )
 
-        runtime_context = await get_current_system_prompt(exec_prompt, active_user_id)
         now_dt = datetime.now(USER_TIMEZONE)
+        session_context = await get_session_context(
+            chat_id=chat_id,
+            thread_id=message_thread_id,
+            user_id=active_user_id,
+            session_variant="scheduled",
+        )
+        turn_context = await get_turn_context(
+            exec_prompt,
+            active_user_id,
+            session=session_context,
+        )
+        set_current_context(session_context, turn_context)
         scheduled_trigger = {
             "role": "user",
             "content": (
-                f"{runtime_context}\n\n"
                 "# Scheduled Job Trigger\n"
                 f"[{now_dt.strftime('%A, %B %d, %Y at %I:%M %p')}] "
                 f"Run scheduled job '{description}' ({job_id}): {exec_prompt}"
@@ -996,7 +1007,11 @@ async def _execute_custom_job(bot, job_data: dict, *, deferred_reason: str | Non
         }
         job_history = deque([scheduled_trigger])
 
-        res_text, voice_sent_via_tool = await emery_engine(job_history)
+        res_text, voice_sent_via_tool = await emery_engine(
+            job_history,
+            session_context=session_context.prompt,
+            turn_context=turn_context.prompt,
+        )
         if not use_compact_routine_history:
             globals.chat_histories[chat_id].extend(job_history)
         clean_res_text = clean_thinking_tags(res_text).strip()

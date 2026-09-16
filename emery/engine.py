@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import copy
 import inspect
 import json
 import logging
@@ -14,6 +15,9 @@ from emery.config import (
     MODEL_ID,
     MAIN_MODEL_CONTEXT_TOKENS,
     MAIN_MODEL_REASONING_EFFORT,
+    MAIN_MODEL_MAX_TOKENS,
+    MAIN_MODEL_REASONING_BUDGET,
+    MAIN_MODEL_REASONING_BUDGET_MESSAGE,
     CONTEXT_COMPACTION_THRESHOLD,
     MODEL_CHARS_PER_TOKEN,
     TOOL_LOOP,
@@ -33,7 +37,25 @@ from emery.helpers import (
     query_fast_model,
     telegram_escape,
 )
-from emery.logging_utils import format_logging_payload, format_llama_perf_line, safe_preview
+from emery.logging_utils import (
+    format_cache_diagnostics,
+    format_logging_payload,
+    format_llama_perf_line,
+    safe_preview,
+)
+from emery.prompt_cache import (
+    cache_diagnostics,
+    dispatch_tool_call,
+    endpoint_cache_options,
+    clear_prompt_cache,
+    current_prompt_epoch,
+    get_stable_prompt_state,
+    invalidate_prompt_cache,
+    invalidate_prompt_epoch,
+    request_shape_hash as prompt_request_shape_hash,
+    resolve_tooling,
+    stable_hash,
+)
 from emery.telegram_utils import normalize_message_thread_id
 
 AVAILABLE_TOOLS = tool_registry.AVAILABLE_TOOLS
@@ -61,8 +83,65 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     return f"Turn {loop_count + 1}\n{phase}\n\n{thought}"
 
 
+_REASONING_SUMMARY_TIMEOUT_SECONDS = 12.0
+_REASONING_SUMMARY_MAX_TOKENS = 160
+
+
+async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
+    """Convert a completed internal reasoning block into safe, high-level text.
+
+    The main model's reasoning is never used as a fallback here. If the fast
+    model is unavailable, the user still gets the tool timeline without a raw
+    chain-of-thought leak.
+    """
+    reasoning = _strip_id_prefix(reasoning).strip()
+    if not reasoning:
+        return ""
+
+    prompt = (
+        "Rewrite the internal reasoning below as a concise, user-visible high-level rationale. "
+        "Do not reproduce hidden chain-of-thought, private deliberation, or step-by-step reasoning. "
+        "Mention only the relevant goal, decision, or purpose of the next action. "
+        "Return one or two plain-English sentences, with no heading or preamble.\n\n"
+        f"Internal reasoning from model turn {loop_count + 1}:\n{reasoning}"
+    )
+    system_prompt = (
+        "You summarize internal model reasoning for display to an end user. "
+        "Output only a brief high-level rationale; never reveal chain-of-thought."
+    )
+    try:
+        summary = await asyncio.wait_for(
+            query_fast_model(
+                prompt,
+                system_prompt=system_prompt,
+                max_tokens=_REASONING_SUMMARY_MAX_TOKENS,
+                temperature=0.2,
+                enable_thinking=False,
+            ),
+            timeout=_REASONING_SUMMARY_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logging.warning("⚠️ COPROCESSOR: Reasoning summary unavailable: %s", exc)
+        return ""
+
+    summary = _sanitize_model_preamble(summary)
+    if not summary:
+        logging.warning("⚠️ COPROCESSOR: Reasoning summary was empty for model turn %s.", loop_count + 1)
+    return summary
+
+
 def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
+
+
+# These functions are model-facing plumbing for dynamic tool discovery. They
+# should not appear as if Emery is performing a user-requested action.
+_INTERNAL_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+
+
+def _append_tool_timeline_entry(timeline: list[str], fn: str) -> None:
+    if fn not in _INTERNAL_TOOL_NAMES:
+        timeline.append(_format_tool_timeline_entry(fn))
 
 
 class _StreamingModelError(RuntimeError):
@@ -859,11 +938,14 @@ def _build_ollama_history(history_buffer) -> list[dict]:
     history_buffer = _compact_history_for_model(history_buffer)
     ollama_history = []
     for msg in history_buffer:
+        # Never retain references into the caller's history or into prior
+        # request payloads. Tool calls are particularly easy to mutate while
+        # assembling a later loop.
         clean_msg = {"role": msg["role"]}
 
         # Preserve tool calling fields if present in history
         if "tool_calls" in msg:
-            clean_msg["tool_calls"] = msg["tool_calls"]
+            clean_msg["tool_calls"] = copy.deepcopy(msg["tool_calls"])
         if "tool_call_id" in msg:
             clean_msg["tool_call_id"] = msg["tool_call_id"]
         if "name" in msg:
@@ -918,36 +1000,72 @@ def _build_main_model_payload(
     *,
     history_buffer,
     model_to_use=MODEL_ID,
-    max_tokens: int = 8192,
+    max_tokens: int = None,
     temperature: float = 0.8,
     top_p: float = 0.95,
     top_k: int = 20,
     allow_tools: bool = True,
     stream: bool = None,
+    session_context=None,
+    turn_context=None,
+    prompt_epoch: int | None = None,
+    tools_schema_override=None,
 ) -> tuple[dict, list[dict]]:
+    if max_tokens is None:
+        max_tokens = MAIN_MODEL_MAX_TOKENS
     reasoning_effort = MAIN_MODEL_REASONING_EFFORT if THINK else "none"
-    stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
+    resolved_schema = tools_schema if tools_schema_override is None else tools_schema_override
+    prompt_state = get_stable_prompt_state(
+        stable_system_prompt=get_stable_system_prompt(),
+        model=model_to_use,
+        tool_schema=resolved_schema if allow_tools else [],
+        session_context=session_context,
+        prompt_epoch=prompt_epoch,
+    )
     ollama_history = _build_ollama_history(history_buffer)
+
+    # Turn context is request-local. Attach it to the latest user message in
+    # the copied model history, never to the caller's stored history.
+    if turn_context is not None:
+        turn_text = turn_context if isinstance(turn_context, str) else json.dumps(
+            turn_context, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        turn_text = str(turn_text).strip()
+        if turn_text:
+            for index in range(len(ollama_history) - 1, -1, -1):
+                if ollama_history[index].get("role") == "user":
+                    current = ollama_history[index].get("content") or ""
+                    ollama_history[index]["content"] = (
+                        f"{current}\n\n# Turn Context\n{turn_text}" if current else f"# Turn Context\n{turn_text}"
+                    )
+                    break
 
     payload = {
         "model": model_to_use,
-        "messages": stable_prefix + ollama_history,
+        "messages": prompt_state.prefix_messages() + copy.deepcopy(ollama_history),
         "stream": ENABLE_LIVE_PROGRESS if stream is None else bool(stream),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,
         "reasoning_effort": reasoning_effort,
+        "reasoning_budget_tokens": MAIN_MODEL_REASONING_BUDGET if THINK else 0,
+        "reasoning_budget_message": MAIN_MODEL_REASONING_BUDGET_MESSAGE,
     }
 
-    if allow_tools and tools_schema:
-        payload["tools"] = tools_schema
+    if allow_tools and resolved_schema:
+        payload["tools"] = prompt_state.tools()
+
+    # These fields are intentionally absent for the custom local endpoint
+    # unless an operator explicitly opts in through environment configuration.
+    payload.update(endpoint_cache_options())
+    logging.debug("ENGINE: Request assembly %s", format_cache_diagnostics(cache_diagnostics(payload, prompt_state)))
 
     return payload, ollama_history
 
 
 async def _send_tool_status(fn: str, args: dict, on_event=None) -> None:
-    if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
+    if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif") or fn in _INTERNAL_TOOL_NAMES:
         return
 
     status_msg = await _format_tool_status_message(fn, args)
@@ -986,15 +1104,31 @@ async def _send_tool_status(fn: str, args: dict, on_event=None) -> None:
         )
 
 
-async def _execute_tool_call(fn: str, args: dict):
+async def _execute_tool_call(fn: str, args: dict, available_tools=None):
     logging.info("🔧 TOOL: %s | Args: %s", fn, format_logging_payload(args))
-    return await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
+    registry = AVAILABLE_TOOLS if available_tools is None else available_tools
+    tool = registry[fn]
+    return await dispatch_tool_call(fn, args, tool)
 
 
-async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: str = "") -> bool:
+async def warm_main_model_cache(
+    history_buffer,
+    model_to_use=MODEL_ID,
+    reason: str = "",
+    session_context=None,
+) -> bool:
     if not history_buffer:
         return False
 
+    if session_context is None:
+        bound_context = globals.CURRENT_SESSION_CONTEXT.get()
+        session_context = getattr(bound_context, "prompt", bound_context)
+
+    _, active_tools_schema, _ = resolve_tooling(
+        AVAILABLE_TOOLS,
+        tools_schema,
+        request_context=session_context,
+    )
     payload, _ = _build_main_model_payload(
         history_buffer=history_buffer,
         model_to_use=model_to_use,
@@ -1004,6 +1138,8 @@ async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: s
         top_k=1,
         allow_tools=True,
         stream=False,
+        session_context=session_context,
+        tools_schema_override=active_tools_schema,
     )
 
     try:
@@ -1091,7 +1227,15 @@ def _consume_steering_messages(steering_state, ollama_history) -> int:
 
 
 # --- THE UNIFIED ENGINE ---
-async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, on_event=None, steering_state=None):
+async def emery_engine(
+    history_buffer,
+    model_to_use=MODEL_ID,
+    allow_tools=True,
+    on_event=None,
+    steering_state=None,
+    session_context=None,
+    turn_context=None,
+):
     url = MAIN_MODEL_URL
     # Find the latest sender info from the history buffer.
     sender_user_id = None
@@ -1107,18 +1251,44 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
         
     voice_sent_via_tool = False
     thinking_timeline = []
+    # Preserve explicit runtime/test registry overrides. The optional
+    # Tool Search hook resolves the canonical registry, so a caller that
+    # intentionally supplies a replacement mapping/schema must bypass it.
+    if AVAILABLE_TOOLS is not tool_registry.AVAILABLE_TOOLS or tools_schema is not tool_registry.tools_schema:
+        active_tools = dict(AVAILABLE_TOOLS)
+        active_tools_schema = copy.deepcopy(list(tools_schema))
+        tooling_source = "explicit-registry-override"
+    else:
+        active_tools, active_tools_schema, tooling_source = resolve_tooling(
+            AVAILABLE_TOOLS,
+            tools_schema,
+            request_context=session_context,
+        )
+    logging.debug("ENGINE: Tool assembly source=%s tools=%s", tooling_source, len(active_tools_schema))
     payload, ollama_history = _build_main_model_payload(
         history_buffer=history_buffer,
         model_to_use=model_to_use,
         allow_tools=allow_tools,
+        session_context=session_context,
+        turn_context=turn_context,
+        tools_schema_override=active_tools_schema,
     )
+    request_diagnostics = {
+        "epoch": current_prompt_epoch(),
+        "model": payload.get("model"),
+        "message_count": len(payload.get("messages") or []),
+        "stable_prefix_hash": stable_hash((payload.get("messages") or [{}])[0]),
+        "tool_schema_hash": stable_hash(payload.get("tools") or []),
+        "request_shape_hash": prompt_request_shape_hash(payload),
+    }
+    stable_messages = copy.deepcopy(payload.get("messages", [])[:1])
     loop_count = 0
     steering_extensions = 0
     while loop_count < TOOL_LOOP + steering_extensions:
         consumed_steers = _consume_steering_messages(steering_state, ollama_history)
         if consumed_steers:
             logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
-        payload["messages"] = [{"role": "system", "content": get_stable_system_prompt()}] + ollama_history
+        payload["messages"] = stable_messages + copy.deepcopy(ollama_history)
         if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
             payload["reasoning_control"] = True
  
@@ -1164,6 +1334,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                     _log_main_model_perf(res, request_wall_seconds)
 
             msg = _extract_response_message(res)
+            logging.debug("ENGINE: Response diagnostics %s", format_cache_diagnostics(request_diagnostics, res))
             raw_content = message_content_to_text(msg.get("content"))
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
             had_progress_markup = bool(
@@ -1178,11 +1349,22 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
             reasoning = message_content_to_text(
                 msg.get("reasoning_content") or msg.get("thinking") or msg.get("reasoning")
             )
+            turn_reasoning_parts = []
             if reasoning:
                 reasoning = _strip_id_prefix(reasoning)
-                thinking_timeline.append(_format_thinking_turn(loop_count, "Reasoning", reasoning))
+                turn_reasoning_parts.append(reasoning)
             for thought in content_thoughts:
-                thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
+                turn_reasoning_parts.append(_strip_id_prefix(thought))
+
+            if turn_reasoning_parts:
+                reasoning_summary = await _summarize_reasoning_block(
+                    "\n\n".join(part for part in turn_reasoning_parts if part),
+                    loop_count=loop_count,
+                )
+                if reasoning_summary:
+                    thinking_timeline.append(
+                        _format_thinking_turn(loop_count, "Summary", reasoning_summary)
+                    )
 
             if allow_tools and msg.get("tool_calls"):
                 if not had_progress_markup:
@@ -1197,7 +1379,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                     function = tc.get("function") or {}
                     fn = function.get("name")
                     args = _parse_tool_arguments(function.get("arguments", {}))
-                    if not fn or fn not in AVAILABLE_TOOLS or args is None:
+                    if not fn or fn not in active_tools or args is None:
                         logging.error(
                             "❌ ENGINE: Refusing malformed or unknown streamed tool call: name=%r args=%r",
                             fn,
@@ -1220,11 +1402,11 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                 for tc, fn, args in parsed_tool_calls:
                     
                     await _send_tool_status(fn, args, on_event=on_event)
-                    thinking_timeline.append(_format_tool_timeline_entry(fn))
+                    _append_tool_timeline_entry(thinking_timeline, fn)
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
-                    result = await _execute_tool_call(fn, args)
+                    result = await _execute_tool_call(fn, args, available_tools=active_tools)
                     
                     tool_response = {
                         "role": "tool",

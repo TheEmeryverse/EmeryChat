@@ -12,6 +12,18 @@ group_chat_id = TELEGRAM_GROUP_CHAT_ID
 
 TARGET_CHAT_ID = contextvars.ContextVar("TARGET_CHAT_ID", default=group_chat_id)
 CURRENT_THREAD_ID = contextvars.ContextVar("CURRENT_THREAD_ID", default=None)
+# Runtime context is deliberately kept out of ``chat_histories``.  The engine
+# consumes these values for the active task; history remains durable, compact,
+# and compatible with entries written by older Emery versions.
+CURRENT_SESSION_CONTEXT = contextvars.ContextVar("CURRENT_SESSION_CONTEXT", default=None)
+CURRENT_TURN_CONTEXT = contextvars.ContextVar("CURRENT_TURN_CONTEXT", default=None)
+
+# Immutable SessionContext instances are cached by emery.session_context.  The
+# cache is process-local and keyed by chat/thread/variant; group-chat keys do
+# not contain a user ID, so one user's private profile can never be returned
+# as another user's group context.
+SESSION_CONTEXT_CACHE = {}
+session_context_cache = SESSION_CONTEXT_CACHE
 
 http_client = httpx.AsyncClient(timeout=900, verify=False, follow_redirects=True)
 application_bot = None  # Populated dynamically by main.py

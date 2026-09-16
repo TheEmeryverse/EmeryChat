@@ -68,6 +68,90 @@ def _current_notes(store: dict) -> tuple[str | None, list[dict] | None]:
     return key, notes if isinstance(notes, list) else []
 
 
+def _current_turn_count() -> int:
+    """Count user turns in the active chat/thread history."""
+    chat_id, thread_id = _scope()
+    if chat_id is None:
+        return 0
+
+    history = globals.chat_histories.get(chat_id, [])
+    count = 0
+    for message in history:
+        if message.get("role") != "user":
+            continue
+        message_thread_id = normalize_message_thread_id(
+            chat_id, message.get("message_thread_id")
+        )
+        if message_thread_id == thread_id:
+            count += 1
+    return count
+
+
+def _parse_created_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def get_recent_scratchpad_reminder(max_turns: int = 10) -> str:
+    """Return a reminder when a note was written within recent chat turns."""
+    if max_turns < 1:
+        return ""
+
+    with _STORE_LOCK:
+        store = _load_store()
+        key, notes = _current_notes(store)
+    if key is None or not notes:
+        return ""
+
+    chat_id, thread_id = _scope()
+    current_turn_count = _current_turn_count()
+    recent_turn_floor = max(0, current_turn_count - max_turns)
+    recent_turns = [
+        message for message in globals.chat_histories.get(chat_id, [])
+        if message.get("role") == "user"
+        and normalize_message_thread_id(chat_id, message.get("message_thread_id")) == thread_id
+    ][-max_turns:]
+    if not recent_turns:
+        return ""
+    oldest_timestamp = recent_turns[0].get("timestamp")
+
+    for note in reversed(notes):
+        note_turn_count = note.get("turn_count")
+        if isinstance(note_turn_count, int):
+            # A turn count greater than the current history count indicates
+            # that the process history was reset after this note was written.
+            if note_turn_count < 0 or note_turn_count > current_turn_count:
+                continue
+            if note_turn_count >= recent_turn_floor:
+                created_at = _parse_created_at(note.get("created_at"))
+                if created_at is not None and isinstance(oldest_timestamp, datetime):
+                    try:
+                        if created_at < oldest_timestamp:
+                            continue
+                    except TypeError:
+                        continue
+                return "The chat/thread scratchpad has been used recently; call `read_scratchpad` if its working notes may help."
+            continue
+
+        # Backward-compatible fallback for notes created before turn_count
+        # was recorded: compare the note timestamp with the oldest recent turn.
+        created_at = _parse_created_at(note.get("created_at"))
+        if created_at is None:
+            continue
+        if isinstance(oldest_timestamp, datetime):
+            try:
+                if created_at >= oldest_timestamp:
+                    return "The chat/thread scratchpad has been used recently; call `read_scratchpad` if its working notes may help."
+            except TypeError:
+                # Avoid treating incomparable naive/aware timestamps as recent.
+                continue
+    return ""
+
+
 def get_scratchpad_snapshot() -> str:
     """Return a bounded prompt section for the current chat/thread."""
     with _STORE_LOCK:
@@ -123,6 +207,7 @@ async def jot_down_note(note: str, title: str = "") -> str:
             "text": clean,
             "normalized": normalized,
             "created_at": datetime.now().astimezone().replace(microsecond=0).isoformat(),
+            "turn_count": _current_turn_count(),
         }
         notes.append(entry)
         store[key] = {

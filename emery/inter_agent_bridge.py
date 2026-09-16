@@ -473,7 +473,8 @@ async def _run_emery_request(body: str, *, sender_id: int, sender_name: str) -> 
     """Run one peer request through Emery's existing engine and peer history."""
     import emery.globals as globals
     from emery.engine import emery_engine
-    from emery.helpers import clean_thinking_tags, get_current_system_prompt
+    from emery.helpers import clean_thinking_tags
+    from emery.session_context import get_session_context, get_turn_context, set_current_context
 
     chat_id = sender_id
     if chat_id not in globals.chat_histories:
@@ -485,12 +486,23 @@ async def _run_emery_request(body: str, *, sender_id: int, sender_name: str) -> 
     thread_token = globals.CURRENT_THREAD_ID.set(None)
     try:
         now = datetime.now(USER_TIMEZONE)
-        runtime_context = await get_current_system_prompt(body, sender_id)
+        session_context = await get_session_context(
+            chat_id=chat_id,
+            thread_id=None,
+            user_id=sender_id,
+            session_variant="inter-agent",
+        )
+        turn_context = await get_turn_context(
+            body,
+            sender_id,
+            session=session_context,
+        )
+        set_current_context(session_context, turn_context)
         history.append(
             {
                 "role": "user",
                 "content": (
-                    f"{runtime_context}\n\n# Inter-agent Message\n"
+                    "# Inter-agent Message\n"
                     f"[{now.strftime('%A, %B %d, %Y at %I:%M %p')}] "
                     f"{sender_name}: {body}"
                 ),
@@ -500,7 +512,12 @@ async def _run_emery_request(body: str, *, sender_id: int, sender_name: str) -> 
                 "is_bridge_message": True,
             }
         )
-        response, _ = await emery_engine(history, model_to_use=MODEL_ID)
+        response, _ = await emery_engine(
+            history,
+            model_to_use=MODEL_ID,
+            session_context=session_context.prompt,
+            turn_context=turn_context.prompt,
+        )
         clean_response = clean_thinking_tags(response).strip() or "DONE"
         history.append(
             {

@@ -56,6 +56,41 @@ def format_logging_payload(value, max_len: int = 240) -> str:
     return safe_preview(text, max_len=max_len)
 
 
+def cache_report(response_json: dict | None) -> dict:
+    """Extract only endpoint-reported cache facts.
+
+    A local endpoint that omits these fields is represented as ``reported:``
+    false; callers must not infer a hit from a warmup request or a hash match.
+    """
+    response_json = response_json if isinstance(response_json, dict) else {}
+    usage = response_json.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or usage.get("prompt_token_details") or {}
+    cached_tokens = first_number(details, "cached_tokens", "cache_read_input_tokens")
+    if cached_tokens is not None:
+        return {"reported": True, "hit": cached_tokens > 0, "cached_tokens": cached_tokens}
+
+    for source in (response_json, usage, details):
+        for key in ("prompt_cache_hit", "cache_hit", "cached"):
+            if key in source and isinstance(source[key], bool):
+                return {"reported": True, "hit": source[key]}
+    return {"reported": False, "hit": None}
+
+
+def format_cache_diagnostics(diagnostics: dict | None, response_json: dict | None = None, max_len: int = 640) -> str:
+    """Format hash/count cache diagnostics without logging prompt contents."""
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    safe = {
+        key: diagnostics.get(key)
+        for key in (
+            "epoch", "model", "message_count", "stable_prefix_hash",
+            "tool_schema_hash", "request_shape_hash",
+        )
+        if key in diagnostics
+    }
+    safe["endpoint_cache"] = cache_report(response_json)
+    return format_logging_payload(safe, max_len=max_len)
+
+
 def first_number(mapping: dict, *keys):
     for key in keys:
         value = mapping.get(key)
