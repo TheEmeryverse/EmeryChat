@@ -16,7 +16,9 @@ from emery.config import (
     HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
     ALLOWED_USER_IDS, ALLOWED_BOT_IDS, ENABLE_WEATHER,
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
-    ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS
+    ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS,
+    LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS, ENABLE_LIVE_STEERING,
+    LIVE_STEERING_MAX_PENDING
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -484,7 +486,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history_content = f"{runtime_context}\n\n# New User Message\n{content}{reply_info}"
 
     logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {safe_preview(content_text, max_len=120)}{reply_info}")
-    globals.chat_histories[chat_id].append({
+    user_history_entry = {
         "role": "user", 
         "content": history_content,
         "message_id": update.message.message_id,
@@ -493,7 +495,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "reply_to_message_id": reply_to.message_id if reply_to else None,
         "message_thread_id": update.message.message_thread_id if update.message else None,
         "timestamp": datetime.now(USER_TIMEZONE)
-    })
+    }
+    globals.chat_histories[chat_id].append(user_history_entry)
     
     # Check if this chat is a group chat
     is_group = (chat_id < 0)
@@ -528,6 +531,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not should_reply:
         logging.debug(f"🤫 SILENT LISTEN: Recorded group message from {sender_name} (chat {chat_id}) for context, but not replying.")
+        return
+
+    turn_key = (
+        chat_id,
+        normalize_message_thread_id(
+            chat_id,
+            update.message.message_thread_id if update.message else None,
+        ),
+    )
+    active_turn = globals.active_turns.get(turn_key)
+    if active_turn and active_turn.accepting:
+        if len(active_turn.pending_messages) >= active_turn.max_pending:
+            await update.message.reply_text(
+                "I’m already adjusting the current response; please wait a moment before sending another change."
+            )
+            return
+
+        active_turn.pending_messages.append(user_history_entry)
+        active_turn.steer_event.set()
+        if active_turn.notify:
+            await active_turn.notify({
+                "type": "steering_queued",
+                "text": "I got that — I’ll adjust course.",
+                "source": "application",
+            })
+        logging.info("🧭 STEERING: queued message for chat=%s thread=%s", chat_id, turn_key[1])
         return
 
     # --- DEBOUNCE LOGIC ---
@@ -570,29 +599,70 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     typing_task = asyncio.create_task(keep_typing())
     progress = None
+    progress_stop = asyncio.Event()
+    progress_task = None
+    tool_active = False
     if ENABLE_LIVE_PROGRESS:
         progress = TelegramLiveProgress(
             globals.application_bot,
             chat_id,
             message_thread_id=globals.CURRENT_THREAD_ID.get(),
         )
+
+        async def keep_progress_updated():
+            await progress.run_heartbeat(
+                progress_stop,
+                [
+                    f"💭 {MODEL_NAME} is working through it…",
+                    "💭 Still checking the details…",
+                    "💭 Working through the remaining steps…",
+                ],
+                interval=LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS,
+                should_update=lambda: not tool_active,
+            )
+
+        progress_task = asyncio.create_task(keep_progress_updated())
     latest_preamble = ""
 
     async def handle_engine_event(event: dict) -> None:
-        nonlocal latest_preamble
+        nonlocal latest_preamble, tool_active
         if progress is None:
             return
 
         event_type = event.get("type")
         if event_type == "preamble":
+            tool_active = False
             latest_preamble = str(event.get("text") or "").strip()
             await progress.update(f"💭 {latest_preamble}")
         elif event_type == "tool_started":
+            tool_active = True
             status = str(event.get("text") or "").strip()
             if latest_preamble and status:
                 status = f"{latest_preamble}\n\n{status}"
             latest_preamble = ""
             await progress.update(status, force=True)
+        elif event_type == "tool_finished":
+            tool_active = False
+        elif event_type in {"steering_queued", "steering_applied", "steering_deferred"}:
+            tool_active = False
+            await progress.update(f"💭 {str(event.get('text') or '').strip()}", force=True)
+
+    turn_key = (
+        chat_id,
+        normalize_message_thread_id(
+            chat_id,
+            update.message.message_thread_id if update.message else None,
+        ),
+    )
+    steering_state = None
+    if ENABLE_LIVE_STEERING:
+        steering_state = globals.ActiveTurnState(
+            chat_id=chat_id,
+            thread_id=turn_key[1],
+            max_pending=LIVE_STEERING_MAX_PENDING,
+        )
+        steering_state.notify = handle_engine_event if progress else None
+        globals.active_turns[turn_key] = steering_state
 
     try:
         from emery.engine import emery_engine
@@ -600,14 +670,22 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             globals.chat_histories[chat_id],
             model_to_use=model_to_use,
             on_event=handle_engine_event if progress else None,
+            steering_state=steering_state,
         )
     except Exception as e:
         logging.error(f"Error running engine in debounce worker: {e}", exc_info=True)
         response_text = "EMERYCHAT engine failure."
         voice_sent_via_tool = False
     finally:
+        if steering_state is not None:
+            steering_state.accepting = False
+            if globals.active_turns.get(turn_key) is steering_state:
+                globals.active_turns.pop(turn_key, None)
         typing_stop.set()
         await typing_task
+        progress_stop.set()
+        if progress_task:
+            await progress_task
         if progress:
             await progress.close()
 

@@ -1,10 +1,11 @@
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from telegram.error import BadRequest
 
@@ -19,6 +20,7 @@ from emery.config import (
     MODEL_NAME,
     THINK,
     ENABLE_LIVE_PROGRESS,
+    ENABLE_LIVE_STEERING,
     LIVE_PROGRESS_MAX_CHARS,
 )
 from emery import tool_registry
@@ -67,6 +69,80 @@ class _StreamingModelError(RuntimeError):
     def __init__(self, message: str, *, events_seen: bool = False):
         super().__init__(message)
         self.events_seen = events_seen
+
+
+def _llama_control_url(url: str) -> str | None:
+    parsed = urlparse(str(url or ""))
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1/chat/completions"):
+        return None
+    return urlunparse(parsed._replace(path=f"{path}/control"))
+
+
+async def _send_llama_reasoning_end(url: str, completion_id: str, model: str = None) -> bool:
+    control_url = _llama_control_url(url)
+    if not control_url or not completion_id:
+        return False
+
+    control_payload = {
+        "id": completion_id,
+        "action": "reasoning_end",
+    }
+    if model:
+        control_payload["model"] = model
+
+    try:
+        response = await globals.http_client.post(control_url, json=control_payload, timeout=10)
+    except Exception as exc:
+        logging.warning("⚠️ ENGINE: llama.cpp reasoning control failed: %s", exc)
+        return False
+
+    if response.status_code != 200:
+        logging.warning(
+            "⚠️ ENGINE: llama.cpp reasoning control returned %s — %s",
+            response.status_code,
+            getattr(response, "text", "")[:200],
+        )
+        return False
+
+    try:
+        result = response.json()
+    except Exception:
+        result = {}
+    if isinstance(result, dict) and result.get("success") is False:
+        logging.warning("⚠️ ENGINE: llama.cpp refused reasoning control: %s", result.get("message", "unknown reason"))
+        return False
+    return True
+
+
+async def _monitor_llama_steering(url: str, payload: dict, steering_state, on_event=None) -> None:
+    while True:
+        await steering_state.steer_event.wait()
+        steering_state.steer_event.clear()
+
+        if not steering_state.stream_active:
+            return
+        if steering_state.control_sent:
+            continue
+        if not steering_state.completion_id:
+            await steering_state.completion_id_event.wait()
+        if not steering_state.stream_active or not steering_state.completion_id:
+            return
+
+        steering_state.control_sent = True
+        applied = await _send_llama_reasoning_end(
+            url,
+            steering_state.completion_id,
+            model=payload.get("model"),
+        )
+        await _emit_engine_event(
+            on_event,
+            {
+                "type": "steering_applied" if applied else "steering_deferred",
+                "text": "I’m adjusting course." if applied else "I’ll apply that after this step.",
+                "source": "application",
+            },
+        )
 
 
 async def _emit_engine_event(on_event, event: dict) -> None:
@@ -127,7 +203,7 @@ def _stream_choice_delta(payload: dict) -> tuple[dict, dict]:
     return choice, choice.get("delta") or choice.get("message") or {}
 
 
-async def _stream_main_model_response(url: str, payload: dict, on_event=None) -> tuple[dict, float]:
+async def _stream_main_model_response(url: str, payload: dict, on_event=None, steering_state=None) -> tuple[dict, float]:
     """Assemble an OpenAI-compatible SSE response without executing partial tool calls."""
     content_parts = []
     reasoning_parts = []
@@ -140,6 +216,17 @@ async def _stream_main_model_response(url: str, payload: dict, on_event=None) ->
     progress_emitted = False
     raw_content = ""
     request_started = time.perf_counter()
+    control_task = None
+
+    if steering_state is not None:
+        steering_state.completion_id = None
+        steering_state.completion_id_event.clear()
+        steering_state.control_sent = False
+        steering_state.stream_active = True
+        if payload.get("reasoning_control"):
+            control_task = asyncio.create_task(
+                _monitor_llama_steering(url, payload, steering_state, on_event=on_event)
+            )
 
     try:
         async with globals.http_client.stream("POST", url, json=payload, timeout=900) as response:
@@ -167,6 +254,10 @@ async def _stream_main_model_response(url: str, payload: dict, on_event=None) ->
                 if not isinstance(chunk, dict):
                     continue
                 events_seen = True
+                completion_id = chunk.get("id")
+                if steering_state is not None and completion_id and not steering_state.completion_id:
+                    steering_state.completion_id = str(completion_id)
+                    steering_state.completion_id_event.set()
                 if isinstance(chunk.get("usage"), dict):
                     usage = chunk["usage"]
 
@@ -227,6 +318,14 @@ async def _stream_main_model_response(url: str, payload: dict, on_event=None) ->
         raise
     except Exception as exc:
         raise _StreamingModelError(str(exc), events_seen=events_seen) from exc
+    finally:
+        if steering_state is not None:
+            steering_state.stream_active = False
+            steering_state.completion_id_event.set()
+        if control_task is not None:
+            control_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await control_task
 
     if not events_seen:
         raise _StreamingModelError("Main model returned an empty stream.", events_seen=False)
@@ -980,8 +1079,19 @@ TOOL_STATUS_MESSAGES = {
 }
 
 
+def _consume_steering_messages(steering_state, ollama_history) -> int:
+    if steering_state is None or not steering_state.pending_messages:
+        return 0
+
+    pending_messages = list(steering_state.pending_messages)
+    steering_state.pending_messages.clear()
+    steering_state.steer_event.clear()
+    ollama_history.extend(_build_ollama_history(pending_messages))
+    return len(pending_messages)
+
+
 # --- THE UNIFIED ENGINE ---
-async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, on_event=None):
+async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, on_event=None, steering_state=None):
     url = MAIN_MODEL_URL
     # Find the latest sender info from the history buffer.
     sender_user_id = None
@@ -1002,8 +1112,15 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
         model_to_use=model_to_use,
         allow_tools=allow_tools,
     )
-    for loop_count in range(TOOL_LOOP):
+    loop_count = 0
+    steering_extensions = 0
+    while loop_count < TOOL_LOOP + steering_extensions:
+        consumed_steers = _consume_steering_messages(steering_state, ollama_history)
+        if consumed_steers:
+            logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
         payload["messages"] = [{"role": "system", "content": get_stable_system_prompt()}] + ollama_history
+        if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
+            payload["reasoning_control"] = True
  
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
@@ -1012,7 +1129,12 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                 streamed = bool(payload.get("stream"))
                 if streamed:
                     try:
-                        res, request_wall_seconds = await _stream_main_model_response(url, payload, on_event=on_event)
+                        res, request_wall_seconds = await _stream_main_model_response(
+                            url,
+                            payload,
+                            on_event=on_event,
+                            steering_state=steering_state if ENABLE_LIVE_STEERING else None,
+                        )
                     except _StreamingModelError as stream_error:
                         if stream_error.events_seen:
                             logging.error("❌ ENGINE: Main model stream failed after partial output: %s", stream_error)
@@ -1024,6 +1146,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
 
                         logging.warning("⚠️ ENGINE: Streaming unavailable; retrying once without streaming: %s", stream_error)
                         payload["stream"] = False
+                        payload.pop("reasoning_control", None)
                         r = await globals.http_client.post(url, json=payload, timeout=900)
                         request_wall_seconds = time.perf_counter() - request_started
                         if r.status_code != 200:
@@ -1117,6 +1240,17 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                         on_event,
                         {"type": "tool_finished", "tool": fn},
                     )
+                if steering_state is not None and steering_state.pending_messages and loop_count + 1 >= TOOL_LOOP:
+                    steering_extensions = min(steering_extensions + 1, steering_state.max_pending)
+                loop_count += 1
+                continue
+
+            if steering_state is not None and steering_state.pending_messages:
+                _consume_steering_messages(steering_state, ollama_history)
+                logging.info("🧭 ENGINE: Deferring intermediate response to apply queued steering.")
+                if loop_count + 1 >= TOOL_LOOP:
+                    steering_extensions = min(steering_extensions + 1, steering_state.max_pending)
+                loop_count += 1
                 continue
             
             content = cleaned_msg_content

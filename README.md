@@ -180,6 +180,7 @@ Keep these details intact:
 - Keep `--swa-full` for Qwen3.6/SWA models; without it, llama.cpp may invalidate checkpoints and force full prompt reprocessing.
 - Keep `--cache-prompt`, `--cache-reuse`, `--ctx-checkpoints`, and `--checkpoint-min-step` enabled for prompt reuse.
 - Do not wrap or split long flags accidentally; for example, `--ctx-checkpoints` and `--cache-idle-slots` must remain single flags.
+- Keep `ENABLE_LIVE_STEERING=true` to allow a new user message during reasoning to ask llama.cpp to end the current reasoning block and continue with the new instruction. This uses llama.cpp's `/v1/chat/completions/control` endpoint and requires a recent server build with `reasoning_control` support.
 
 Healthy llama.cpp logs should show checkpoint restoration and a small suffix eval after the first turn:
 
@@ -462,6 +463,8 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | --- | --- | --- |
 | `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS` | `false` | Allows Telegram users not listed in `config/users.json` |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
+| `ENABLE_LIVE_STEERING` | `true` | Queues user updates during an active llama.cpp reasoning turn |
+| `LIVE_STEERING_MAX_PENDING` | `4` | Maximum queued updates per active turn |
 | `ENABLE_TELEGRAM_RICH_MESSAGES` | `true` | Sends model-authored text with Telegram Bot API rich Markdown and falls back to legacy HTML |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |

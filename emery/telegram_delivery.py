@@ -13,6 +13,7 @@ from emery.config import (
     TELEGRAM_TOKEN,
     LIVE_PROGRESS_MIN_DELAY_SECONDS,
     LIVE_PROGRESS_EDIT_INTERVAL_SECONDS,
+    LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS,
 )
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -46,6 +47,33 @@ class TelegramLiveProgress:
         self.message_id = None
         self.pending_text = None
         self.disabled = False
+
+    async def run_heartbeat(
+        self,
+        stop_event: asyncio.Event,
+        messages: list[str],
+        *,
+        interval: float = LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS,
+        should_update=None,
+    ) -> None:
+        """Keep long model turns visibly active without exposing internal reasoning."""
+        heartbeat_messages = [str(message).strip() for message in messages if str(message).strip()]
+        if not heartbeat_messages:
+            return
+
+        interval = max(0.1, float(interval))
+        message_index = 0
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            if should_update is not None and not should_update():
+                continue
+            await self.update(heartbeat_messages[message_index % len(heartbeat_messages)])
+            message_index += 1
 
     @staticmethod
     def _html_text(text: str) -> str:

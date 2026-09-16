@@ -20,6 +20,7 @@ reolink_thread_trackers = {}  # Tracks camera alerts: camera_name -> {"message_i
 chat_reply_targets = {}       # Tracks custom reply message ID per chat: chat_id -> message_id
 current_user_id = contextvars.ContextVar("current_user_id", default=None)
 chat_debounce_tasks = {}  # Tracks active debounce timers: chat_id -> asyncio.Task
+active_turns = {}  # Tracks active normal chat turns: (chat_id, thread_id) -> ActiveTurnState
 active_foreground_loops = {}  # Tracks foreground agent loops: loop_id -> metadata
 
 
@@ -29,6 +30,23 @@ fast_model_lock = asyncio.Semaphore(1)
 reolink_snapshot_lock = asyncio.Lock()
 
 learned_stickers = {}  # Tracks learned sticker file IDs: emoji -> file_id
+
+
+class ActiveTurnState:
+    """Mutable coordination state for one steerable normal-chat turn."""
+
+    def __init__(self, *, chat_id: int, thread_id=None, max_pending: int = 4):
+        self.chat_id = chat_id
+        self.thread_id = thread_id
+        self.pending_messages = deque()
+        self.max_pending = max(1, int(max_pending))
+        self.steer_event = asyncio.Event()
+        self.completion_id_event = asyncio.Event()
+        self.completion_id = None
+        self.control_sent = False
+        self.stream_active = False
+        self.accepting = True
+        self.notify = None
 
 
 def register_foreground_loop(loop_id: str, **metadata) -> None:
