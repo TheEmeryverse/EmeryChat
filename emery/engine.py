@@ -89,12 +89,22 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
 _REASONING_SUMMARY_TIMEOUT_SECONDS = 60.0
 _REASONING_SUMMARY_MAX_TOKENS = 4096
 _REASONING_SUMMARY_MAX_WORDS = 300
-_LIVE_REASONING_INTERVAL_SECONDS = 10.0
+_LIVE_REASONING_INTERVAL_SECONDS = 5.0
+_LIVE_REASONING_WINDOW_SECONDS = 5.0
 _FORCED_TEXT_COMPLETION_PROMPT = (
     "The tool-call budget or tool loop has been reached. Do not call any tools. "
     "Answer the user's original request now using the information already gathered. "
     "If something is incomplete, state that plainly. Return only the final user-facing answer."
 )
+
+
+class _ReasoningChunk(str):
+    """Keep stream text joinable while retaining when it was received."""
+
+    def __new__(cls, text: str, *, timestamp: float | None = None):
+        chunk = super().__new__(cls, text)
+        chunk.timestamp = time.perf_counter() if timestamp is None else float(timestamp)
+        return chunk
 
 
 def _clean_reasoning_summary(text: str) -> str:
@@ -214,18 +224,33 @@ async def _run_live_reasoning_summaries(
     loop_count: int,
     on_event=None,
 ) -> None:
-    """Summarize newly received reasoning slices without interrupting SSE consumption."""
+    """Summarize only reasoning received during the current five-second window."""
     cursor = 0
     next_tick = time.perf_counter() + _LIVE_REASONING_INTERVAL_SECONDS
     try:
         while True:
             await asyncio.sleep(max(0.0, next_tick - time.perf_counter()))
             next_tick += _LIVE_REASONING_INTERVAL_SECONDS
-            combined = "".join(reasoning_parts)
-            if len(combined) <= cursor:
+            timed_parts = [
+                part for part in reasoning_parts
+                if getattr(part, "timestamp", None) is not None
+            ]
+            if timed_parts:
+                window_start = time.perf_counter() - _LIVE_REASONING_WINDOW_SECONDS
+                snapshot = "".join(
+                    str(part)
+                    for part in timed_parts
+                    if part.timestamp >= window_start
+                )
+            else:
+                # Keep compatibility with callers that provide plain strings.
+                combined = "".join(reasoning_parts)
+                if len(combined) <= cursor:
+                    continue
+                snapshot = combined[cursor:]
+                cursor = len(combined)
+            if not snapshot.strip():
                 continue
-            snapshot = combined[cursor:]
-            cursor = len(combined)
             summary = await _summarize_live_reasoning(snapshot, loop_count=loop_count)
             if summary:
                 await _emit_engine_event(
@@ -503,7 +528,9 @@ async def _stream_main_model_response(
                         )
                         inline_reasoning = "\n\n".join(inline_parts)
                         if len(inline_reasoning) > inline_reasoning_cursor:
-                            reasoning_parts.append(inline_reasoning[inline_reasoning_cursor:])
+                            reasoning_parts.append(
+                                _ReasoningChunk(inline_reasoning[inline_reasoning_cursor:])
+                            )
                             inline_reasoning_cursor = len(inline_reasoning)
                     if not progress_emitted:
                         tagged = re.search(
@@ -521,7 +548,7 @@ async def _stream_main_model_response(
                 )
                 if reasoning:
                     await start_reasoning_phase()
-                    reasoning_parts.append(reasoning)
+                    reasoning_parts.append(_ReasoningChunk(reasoning))
 
                 fragments = delta.get("tool_calls") or []
                 if isinstance(fragments, dict):
@@ -1623,6 +1650,16 @@ async def emery_engine(
                 if reasoning_summary:
                     thinking_timeline.append(
                         _format_thinking_turn(loop_count, "Summary", reasoning_summary)
+                    )
+                    await _emit_engine_event(
+                        on_event,
+                        {
+                            "type": "reasoning_summary",
+                            "text": reasoning_summary,
+                            "loop": loop_count,
+                            "source": "coprocessor",
+                            "final": True,
+                        },
                     )
 
             if allow_tools and not forced_text_only and msg.get("tool_calls"):
