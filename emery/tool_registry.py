@@ -25,7 +25,7 @@ from emery.tools import (
     delegate_to_coprocessor, react_to_message, reply_to_message,
     send_sticker, send_gif,
     list_portainer_environments, list_portainer_containers, update_portainer_container,
-    import_recipe_to_mealie, send_inter_agent_message
+    import_recipe_to_mealie
 )
 
 # Helper to check if a feature is enabled
@@ -322,39 +322,6 @@ if is_enabled("ENABLE_HISTORY"):
             "parameters": {}
         }
     })
-
-# --- Inter-Agent Bridge (always enabled) ---
-AVAILABLE_TOOLS["send_inter_agent_message"] = send_inter_agent_message
-tools_schema.append({
-    "type": "function",
-    "function": {
-        "name": "send_inter_agent_message",
-        "description": (
-            "Send a self-contained task to Hermes and wait for its response. Use this only when the user explicitly "
-            "asks for Hermes, or when the task materially requires capabilities Emery does not have directly: inspecting "
-            "the local environment, running commands, testing or debugging code, reviewing a repository, or interacting "
-            "with a graphical browser. Do not use it for simple questions, ordinary web research, or work already covered "
-            "by Emery's direct tools. Include the relevant context, constraints, and desired output. Keep the task within "
-            "the user's authorization; do not delegate destructive, irreversible, credential-sensitive, or externally "
-            "consequential actions without explicit authorization. Evaluate Hermes's response before using it in the final answer."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "recipient_bot_id": {
-                    "type": "integer",
-                    "enum": [8726427681],
-                    "description": "The Hermes bot ID. Must be 8726427681."
-                },
-                "message": {
-                    "type": "string",
-                    "description": "A self-contained task for Hermes, including relevant context, constraints, and the desired result or response format."
-                }
-            },
-            "required": ["recipient_bot_id", "message"]
-        }
-    }
-})
 
 if is_enabled("ENABLE_SEARCH"):
     AVAILABLE_TOOLS["web_search"] = web_search
