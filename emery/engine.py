@@ -83,8 +83,21 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     return f"Turn {loop_count + 1}\n{phase}\n\n{thought}"
 
 
-_REASONING_SUMMARY_TIMEOUT_SECONDS = 12.0
-_REASONING_SUMMARY_MAX_TOKENS = 160
+_REASONING_SUMMARY_TIMEOUT_SECONDS = 60.0
+_REASONING_SUMMARY_MAX_TOKENS = 4096
+_REASONING_SUMMARY_MAX_WORDS = 300
+
+
+def _clean_reasoning_summary(text: str) -> str:
+    """Keep the coprocessor's answer concise without the live-progress cap."""
+    cleaned = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
+    cleaned = _strip_id_prefix(cleaned)
+    cleaned = re.sub(r"^(?:summary|rationale)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    words = cleaned.split()
+    if len(words) > _REASONING_SUMMARY_MAX_WORDS:
+        cleaned = " ".join(words[:_REASONING_SUMMARY_MAX_WORDS]).rstrip(" ,;:-") + "…"
+    return cleaned
 
 
 async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
@@ -99,15 +112,16 @@ async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
         return ""
 
     prompt = (
-        "Rewrite the internal reasoning below as a concise, user-visible high-level rationale. "
-        "Do not reproduce hidden chain-of-thought, private deliberation, or step-by-step reasoning. "
-        "Mention only the relevant goal, decision, or purpose of the next action. "
-        "Return one or two plain-English sentences, with no heading or preamble.\n\n"
+        "Summarize the internal reasoning below for the user. Be concise, but include every relevant "
+        "detail needed to understand the goal, important decisions, constraints, uncertainties, and "
+        "the purpose of any next action or tool call. Compress repetition and omit irrelevant deliberation. "
+        "Do not reproduce hidden chain-of-thought or private step-by-step reasoning. Return only a clear, "
+        "high-level summary in no more than six concise sentences or 300 words, with no heading or preamble.\n\n"
         f"Internal reasoning from model turn {loop_count + 1}:\n{reasoning}"
     )
     system_prompt = (
         "You summarize internal model reasoning for display to an end user. "
-        "Output only a brief high-level rationale; never reveal chain-of-thought."
+        "Be concise while preserving all relevant details. Never reveal chain-of-thought."
     )
     try:
         summary = await asyncio.wait_for(
@@ -116,7 +130,7 @@ async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
                 system_prompt=system_prompt,
                 max_tokens=_REASONING_SUMMARY_MAX_TOKENS,
                 temperature=0.2,
-                enable_thinking=False,
+                enable_thinking=True,
             ),
             timeout=_REASONING_SUMMARY_TIMEOUT_SECONDS,
         )
@@ -124,7 +138,7 @@ async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
         logging.warning("⚠️ COPROCESSOR: Reasoning summary unavailable: %s", exc)
         return ""
 
-    summary = _sanitize_model_preamble(summary)
+    summary = _clean_reasoning_summary(summary)
     if not summary:
         logging.warning("⚠️ COPROCESSOR: Reasoning summary was empty for model turn %s.", loop_count + 1)
     return summary
