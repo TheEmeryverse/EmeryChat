@@ -664,6 +664,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 LIVE_PREFILL_MESSAGES,
                 interval=LIVE_PROGRESS_INTERVAL_SECONDS,
                 should_update=lambda: progress_phase == "prefill",
+                initial_index=1,
             )
 
         progress_task = asyncio.create_task(keep_progress_updated())
@@ -726,13 +727,14 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         event_type = event.get("type")
         if event_type == "prefill_started":
             progress_phase = "prefill"
+            await progress.update(LIVE_PREFILL_MESSAGES[0], force=True)
         elif event_type == "reasoning_started":
             progress_phase = "reasoning"
         elif event_type == "reasoning_summary":
             progress_phase = "reasoning"
             summary = str(event.get("text") or event.get("summary") or "").strip()
             if summary:
-                await progress.update(f"💭 {summary}")
+                await progress.update(f"💭 {summary}", force=True)
         elif event_type == "preamble":
             progress_phase = "reasoning"
             preamble = str(event.get("text") or "").strip()

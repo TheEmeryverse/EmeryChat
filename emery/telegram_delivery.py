@@ -56,6 +56,7 @@ class TelegramLiveProgress:
         *,
         interval: float = LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS,
         should_update=None,
+        initial_index: int = 0,
     ) -> None:
         """Keep long model turns visibly active without exposing internal reasoning."""
         heartbeat_messages = [str(message).strip() for message in messages if str(message).strip()]
@@ -63,7 +64,7 @@ class TelegramLiveProgress:
             return
 
         interval = max(0.1, float(interval))
-        message_index = 0
+        message_index = int(initial_index) % len(heartbeat_messages)
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
