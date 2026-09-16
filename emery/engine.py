@@ -1215,11 +1215,24 @@ TOOL_STATUS_MESSAGES = {
 }
 
 
+_STEERING_MESSAGE_PREFIX = (
+    "[Mid-turn user update]\n"
+    "Incorporate this new instruction into the active request. Preserve and "
+    "complete every other part of the original request that is still unanswered "
+    "unless the user explicitly cancels or replaces it.\n\n"
+)
+
+
 def _consume_steering_messages(steering_state, ollama_history) -> int:
     if steering_state is None or not steering_state.pending_messages:
         return 0
 
-    pending_messages = list(steering_state.pending_messages)
+    pending_messages = []
+    for message in steering_state.pending_messages:
+        adjusted = dict(message)
+        content = message_content_to_text(adjusted.get("content"))
+        adjusted["content"] = f"{_STEERING_MESSAGE_PREFIX}{content}" if content else _STEERING_MESSAGE_PREFIX.rstrip()
+        pending_messages.append(adjusted)
     steering_state.pending_messages.clear()
     steering_state.steer_event.clear()
     ollama_history.extend(_build_ollama_history(pending_messages))
