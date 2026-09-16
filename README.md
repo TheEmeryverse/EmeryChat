@@ -473,7 +473,7 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
 | `ENABLE_LIVE_STEERING` | `true` | Queues user updates during an active llama.cpp reasoning turn |
 | `LIVE_STEERING_MAX_PENDING` | `4` | Maximum queued updates per active turn |
-| `ENABLE_TELEGRAM_RICH_MESSAGES` | `true` | Sends model-authored text with Telegram Bot API rich Markdown and falls back to legacy HTML |
+| `ENABLE_TELEGRAM_RICH_MESSAGES` | `false` | Opts into Telegram Bot API rich Markdown; disabled by default for client compatibility, with HTML formatting used otherwise |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 | `TOOL_LOOP` | `15` | Max tool iterations in one turn |
