@@ -53,9 +53,8 @@ tools_schema.extend([
         "function": {
             "name": "jot_down_note",
             "description": (
-                "Save a concise intermediate fact, source takeaway, decision, or open question to the current chat/thread scratchpad. "
-                "Use this during multi-step work or research when the information should remain available after older chat context is compacted. "
-                "This is temporary working context, not durable personal memory. Do not save secrets or private facts unless the user explicitly asks."
+                "Store temporary working context in the current chat/thread scratchpad. Use during multi-step work or research for confirmed facts, source takeaways, decisions, and open questions that may need to survive context compaction. "
+                "This is not durable personal memory; do not save secrets, private facts, or every intermediate result unless the user explicitly asks."
             ),
             "parameters": {
                 "type": "object",
@@ -78,7 +77,7 @@ tools_schema.extend([
         "function": {
             "name": "read_scratchpad",
             "description": (
-                "Read all working notes saved for the current chat/thread. Use before answering a multi-step task when earlier research or decisions may be outside the active conversation context."
+                "Read all temporary working notes saved for the current chat/thread. Use before continuing a multi-step task when earlier research, decisions, or unresolved questions may be outside the active conversation context. Do not use it as a substitute for long-term personal memory."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -88,7 +87,7 @@ tools_schema.extend([
         "function": {
             "name": "clear_scratchpad",
             "description": (
-                "Clear the current chat/thread scratchpad. Use only when the user explicitly asks to clear, reset, or forget the working notes; do not clear it merely because a task is complete."
+                "Delete all temporary working notes for the current chat/thread. Use only when the user explicitly asks to clear, reset, or forget the scratchpad; never clear it merely because a task is complete."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -102,7 +101,7 @@ if is_enabled("ENABLE_CALENDAR"):
         "type": "function", 
         "function": {
             "name": "get_calendar_events", 
-            "description": "Fetch User's Google Calendar events.",
+            "description": "List today's events from the user's configured Google Calendars, ordered by start time. Use when the user asks what is on their calendar today or what appointments/events they have today. This tool does not accept a date; ask for clarification rather than implying it can retrieve an arbitrary date.",
             "parameters": {"type": "object", "properties": {}}
         }
     })
@@ -116,7 +115,7 @@ if is_enabled("ENABLE_NEST"):
             "type": "function",
             "function": {
                 "name": "get_nest_thermostats",
-                "description": "Fetch the list of all Nest thermostats and their current status (ambient temperature, humidity, mode, target temperature setpoints, and HVAC state).",
+                "description": "Read all configured Nest thermostats and their current state, including name, device ID, ambient temperature, humidity, mode, target setpoints, HVAC state, and available modes. Use for status questions; this tool does not change thermostat settings.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -124,7 +123,7 @@ if is_enabled("ENABLE_NEST"):
             "type": "function",
             "function": {
                 "name": "set_nest_thermostat_mode",
-                "description": "Set the operating mode for a Nest Thermostat.",
+                "description": "Change a Nest thermostat's operating mode. Use only when the user explicitly asks to heat, cool, use heat/cool range mode, or turn the thermostat off. Obtain the exact device ID from `get_nest_thermostats`; allowed modes are HEAT, COOL, HEATCOOL, and OFF.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -134,7 +133,7 @@ if is_enabled("ENABLE_NEST"):
                         },
                         "mode": {
                             "type": "string",
-                            "description": "The mode to set: HEAT, COOL, HEATCOOL, or OFF."
+                            "description": "The target operating mode: HEAT, COOL, HEATCOOL, or OFF."
                         }
                     },
                     "required": ["device_id", "mode"]
@@ -145,7 +144,7 @@ if is_enabled("ENABLE_NEST"):
             "type": "function",
             "function": {
                 "name": "set_nest_thermostat_temperature",
-                "description": "Set the target temperature for a Nest Thermostat. Specify temperature in Celsius. Convert Fahrenheit to Celsius if user requests it.",
+                "description": "Change a Nest thermostat's target temperature. Use only when the user explicitly asks to change the setpoint. Pass Celsius values; convert a Fahrenheit request to Celsius. The tool reads the current mode: use `temp_celsius` for HEAT or COOL, and use `heat_temp_celsius` and/or `cool_temp_celsius` for HEATCOOL. It cannot set a temperature while the thermostat is OFF.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -155,15 +154,15 @@ if is_enabled("ENABLE_NEST"):
                         },
                         "temp_celsius": {
                             "type": "number",
-                            "description": "The target temperature in Celsius (used for single-setpoint modes like HEAT or COOL)."
+                            "description": "Target temperature in Celsius for the current HEAT or COOL mode; convert from Fahrenheit if needed."
                         },
                         "heat_temp_celsius": {
                             "type": "number",
-                            "description": "The target heat temperature in Celsius (used for range mode HEATCOOL)."
+                            "description": "Optional heat-side target in Celsius for HEATCOOL range mode."
                         },
                         "cool_temp_celsius": {
                             "type": "number",
-                            "description": "The target cool temperature in Celsius (used for range mode HEATCOOL)."
+                            "description": "Optional cool-side target in Celsius for HEATCOOL range mode."
                         }
                     },
                     "required": ["device_id"]
@@ -182,27 +181,27 @@ if is_enabled("ENABLE_SEERR"):
     tools_schema.extend([
         {"type": "function", "function": {
             "name": "overseer_search_movie", 
-            "description": "Search for a movie. Query MUST contain ONLY the title (no years/actors). Use FIRST when the User asks you to add a movie or request a movie. Return the results in a numbered list, and DO NOT include the ID in the response.", 
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+            "description": "Search the user's media server for a movie by title. Use this FIRST when the user asks to add or request a movie, before calling `overseer_request_movie`. Pass only the movie title—do not add years, actors, or other filters. Present the numbered matches to the user and wait for them to select one; do not request a movie during the search step.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Movie title only; omit year, actors, and other search qualifiers."}}, "required": ["query"]}
         }},
         {"type": "function", "function": {
             "name": "overseer_request_movie", 
-            "description": "Request a movie to the User's media server using its TMDB ID. Use AFTER the user selects a movie from the search results from overseer_search_movie. Call the tool using the ID from the search results.", 
-            "parameters": {"type": "object", "properties": {"tmdb_id": {"type": "integer"}}, "required": ["tmdb_id"]}
+            "description": "Request one movie on the user's media server. Use only after the user selects a result from `overseer_search_movie`, and pass that result's TMDB ID. Do not guess an ID or call this merely because the user mentioned a movie; obtain confirmation when multiple matches exist.",
+            "parameters": {"type": "object", "properties": {"tmdb_id": {"type": "integer", "description": "TMDB ID from the movie selected in `overseer_search_movie`."}}, "required": ["tmdb_id"]}
         }},
         {"type": "function", "function": {
             "name": "overseer_search_tv", 
-            "description": "Search for a TV show. Query MUST contain ONLY the title. Use FIRST when the User asks you to add a TV show or request a TV show. Return the results in a numbered list, and DO NOT include the ID in the response.", 
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+            "description": "Search the user's media server for a TV show by title. Use this FIRST when the user asks to add or request a show, before calling `overseer_request_tv_season`. Pass only the show title. Present the numbered matches and wait for the user to select one; do not request a season during the search step.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "TV show title only; omit year, actors, and other search qualifiers."}}, "required": ["query"]}
         }},
         {"type": "function", "function": {
             "name": "overseer_request_tv_season", 
-            "description": "Request a specific season of a TV show to the User's media server using its TMDB ID. Use AFTER the user selects a TV show from the search results from overseer_search_tv. Call the tool using the ID from the search results.", 
+            "description": "Request a season of one TV show on the user's media server. Use only after the user selects a result from `overseer_search_tv`, and pass that result's TMDB ID plus the requested season number. Use season 0 only when the user asks for all seasons; otherwise pass the specific season number. Do not guess the ID or infer a season the user did not request.",
             "parameters": {
                 "type": "object", 
                 "properties": {
-                    "tmdb_id": {"type": "integer"},
-                    "season_number": {"type": "integer", "description": "0 for all, or specific number."}
+                    "tmdb_id": {"type": "integer", "description": "TMDB ID from the selected `overseer_search_tv` result."},
+                    "season_number": {"type": "integer", "description": "The requested season number; use 0 for all seasons, otherwise a specific positive season number."}
                 }, 
                 "required": ["tmdb_id", "season_number"]
             }
@@ -219,22 +218,22 @@ if is_enabled("ENABLE_WEATHER"):
             "type": "function",
             "function": {
                 "name": "get_noaa_weather",
-                "description": "Get weather for a user-specified U.S. place like 'Houston', 'Houston, TX', a ZIP code, street address, or a saved alias like 'home', 'work', or 'school'. If no location is provided, use the saved 'home' alias first, then the optional env fallback if configured.",
+                "description": "Get current NOAA/NWS weather for a U.S. place, including a city, state, ZIP code, street address, or saved alias such as home or work. Use for forecasts, hourly conditions, or weather alerts. Prefer the location stated by the user; if none is stated, use a saved home alias only when available, otherwise ask for a place rather than inventing one.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description": "Optional place name, ZIP, address, or saved alias such as home/work/school."
+                            "description": "Optional U.S. city, state, ZIP code, street address, or saved weather alias such as home or work."
                         },
                         "timeframe": {
                             "type": "string",
                             "enum": ["forecast", "hourly"],
-                            "description": "Use 'forecast' for the standard period forecast or 'hourly' for the next several hourly slices."
+                            "description": "Use forecast for the standard multi-period forecast or hourly for the next several hourly periods."
                         },
                         "include_alerts": {
                             "type": "boolean",
-                            "description": "Whether to include active NOAA/NWS weather alerts for that area."
+                            "description": "Set true to include active NOAA/NWS alerts for the location; defaults to true."
                         }
                     }
                 }
@@ -244,7 +243,7 @@ if is_enabled("ENABLE_WEATHER"):
             "type": "function",
             "function": {
                 "name": "set_weather_location_alias",
-                "description": "Save or update a persistent weather alias like 'home', 'work', or 'school' from a natural-language location. Use this when the user explicitly asks to set, save, update, or change one of their named places. This tool is the correct way to handle requests such as 'set my home to Houston, TX' or 'make work Chicago'. Do not claim you cannot set locations when this tool is available.",
+                "description": "Save or replace a persistent weather location alias. Use only when the user explicitly asks to set, save, update, or change a named place such as home, work, school, or office. Resolve the natural-language location as supplied by the user; this changes future weather lookups and should not be done implicitly.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -265,7 +264,7 @@ if is_enabled("ENABLE_WEATHER"):
             "type": "function",
             "function": {
                 "name": "remove_weather_location_alias",
-                "description": "Delete a saved weather alias like 'home', 'work', or 'school'. Use this when the user explicitly asks to clear, remove, or delete a saved location alias.",
+                "description": "Delete one saved weather location alias. Use only when the user explicitly asks to clear, remove, or delete a named place such as home or work; do not remove aliases as cleanup or because a lookup failed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -282,7 +281,7 @@ if is_enabled("ENABLE_WEATHER"):
             "type": "function",
             "function": {
                 "name": "list_weather_location_aliases",
-                "description": "List the saved persistent weather aliases like home, work, school, or office.",
+                "description": "List all saved persistent weather location aliases and their resolved places. Use when the user asks which named weather locations are configured or wants to check a saved alias before changing it.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -297,7 +296,7 @@ if is_enabled("ENABLE_NEWS"):
         "type": "function", 
         "function": {
             "name": "get_news_headlines", 
-            "description": "Get news headlines.", 
+            "description": "Fetch the latest headlines from the bot's configured RSS news feeds. Use for a current headline roundup or a quick 'what's in the news' request. Do not use for deep research, a specific article, or a topic that needs web search and source inspection.",
             "parameters": {}
         }
     })
@@ -308,7 +307,7 @@ if is_enabled("ENABLE_NASA"):
         "type": "function", 
         "function": {
             "name": "get_nasa_apod", 
-            "description": "Get NASA APOD. You ***MUST*** include the RAW URL in the response. Do NOT use an embed URL.", 
+            "description": "Fetch NASA's Astronomy Picture of the Day for today, including its title, explanation, and media URL. Use when the user asks for NASA APOD, NASA's picture of the day, or today's astronomy image. Include the raw media URL in the final response when presenting the result; do not substitute an embed URL.",
             "parameters": {}
         }
     })
@@ -319,7 +318,7 @@ if is_enabled("ENABLE_HISTORY"):
         "type": "function", 
         "function": {
             "name": "get_today_in_history", 
-            "description": "Get events from history for today.", 
+            "description": "Fetch notable historical events, births, and deaths associated with today's calendar date. Use for questions such as 'what happened on this day in history?' or 'who was born today'; it is not a general historical search for another date or topic.",
             "parameters": {}
         }
     })
@@ -331,18 +330,13 @@ tools_schema.append({
     "function": {
         "name": "send_inter_agent_message",
         "description": (
-            "Send a message to Hermes through the inter-agent bridge and wait for Hermes's response. "
-            "Hermes is especially useful for substantial research, investigating unfamiliar or current topics, "
-            "coding and debugging, reviewing repositories, and collaborating with Codex on software tasks. "
-            "Hermes can run commands on the system and use computer-control tools to open and interact with "
-            "browser windows, so delegate work that requires inspecting the local environment, executing commands, "
-            "testing code, or navigating a graphical website. Use Hermes when the user explicitly asks for it, "
-            "when its capabilities materially improve the result, or when Emery's own tools are insufficient; do "
-            "not delegate simple questions Emery can answer directly. Give Hermes the relevant context, the exact "
-            "task, constraints, and desired output. Keep delegated actions within the user's request, and do not ask "
-            "Hermes to perform destructive, irreversible, credential-sensitive, or externally consequential actions "
-            "without the user's authorization. After Hermes responds, evaluate its answer and incorporate the useful "
-            "parts into the response to the user."
+            "Send a self-contained task to Hermes and wait for its response. Use this only when the user explicitly "
+            "asks for Hermes, or when the task materially requires capabilities Emery does not have directly: inspecting "
+            "the local environment, running commands, testing or debugging code, reviewing a repository, or interacting "
+            "with a graphical browser. Do not use it for simple questions, ordinary web research, or work already covered "
+            "by Emery's direct tools. Include the relevant context, constraints, and desired output. Keep the task within "
+            "the user's authorization; do not delegate destructive, irreversible, credential-sensitive, or externally "
+            "consequential actions without explicit authorization. Evaluate Hermes's response before using it in the final answer."
         ),
         "parameters": {
             "type": "object",
@@ -368,8 +362,8 @@ if is_enabled("ENABLE_SEARCH"):
         "type": "function", 
         "function": {
             "name": "web_search", 
-            "description": "Search web, use when needing a deep dive, research, or a query you lack knowledge about. After you receive the results, ask youself if you need to perform another search. If the results are not sufficent, call this tool again with a more specific query. You can and should also use the fetch_web_content tool to get the content of specific results if needed. ***DO NOT INCLUDE URLS IN YOUR RESPONSE***", 
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+            "description": "Search the public web for current information, unfamiliar topics, news, or broad research questions. Use when no more specific structured tool applies, or when finance/tools do not cover the needed context. After searching, use `fetch_web_content` to read a promising specific result when the answer requires article-level detail; search again with a narrower query if the results are insufficient. Do not use this for a URL the user already supplied or for direct structured finance data when a finance tool applies. Keep raw result URLs out of the final user-facing response unless the user asks for them.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The web-search query describing the information or topic to find."}}, "required": ["query"]}
         }
     })
 
@@ -379,8 +373,8 @@ if is_enabled("ENABLE_IMAGEGEN"):
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "Generate an image. Enhance the prompt with as much detail as possible to get the best results, while staying true to the original request. ***DO NOT INCLUDE URLS IN YOUR RESPONSE***", 
-            "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]}
+            "description": "Generate a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image; do not use for ordinary text descriptions, image analysis, or finding an existing image. Expand the prompt with useful visual details while preserving the user's subject, style, composition, and constraints.",
+            "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "A self-contained visual prompt describing the requested subject, style, composition, and important constraints."}}, "required": ["prompt"]}
         }
     })
 
@@ -390,7 +384,7 @@ if is_enabled("ENABLE_VOICE"):
         "type": "function", 
         "function": {
             "name": "speak_message", 
-            "description": "Convert text to speech and send as a voice memo to User. Use this when User explicitly asks to 'speak', 'say', or 'send a voice message'. The text must be a natural spoken script, like a person talking directly to the listener. Do NOT write it like an article, newsletter, report, outline, or written briefing. Do NOT include markdown, headings, titles, bullets, numbered lists, section labels, emojis, or symbols in the tool call. Use conversational transitions instead of labels like 'Today's News' or 'Domestic Job Market'. ***ONLY USE IF THE MOST CURRENT MESSAGE EXPLICITLY ASKS FOR SPOKEN CONTENT OR A VOICE MEMO***", 
+            "description": "Convert a natural spoken script to audio and send it as a voice memo. Use only when the user's most recent message explicitly asks to speak, say something aloud, or send a voice message. Do not use for an ordinary written answer. The script must be conversational prose with no Markdown, headings, lists, labels, emojis, or symbols.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -410,7 +404,7 @@ if is_enabled("ENABLE_SYSTEM_STATS"):
         "type": "function", 
         "function": {
             "name": "get_system_stats", 
-            "description": "Get system stats.", 
+            "description": "Read the current CPU and RAM utilization of the Emery host. Use for questions about this bot's current resource usage or whether the host is under load; this is not a general system diagnostic or historical metrics tool.",
             "parameters": {}
         }
     })
@@ -421,8 +415,8 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Fetch and parse the content of a specific URL. Use this when you need to read an article, blog, or specific webpage content. It returns the title, URL, and the main text content (truncated if long). Use AFTER web_search to do deep research, a deep dive, a report, etc. if needed. MUST pass only the URL as a string. Do not pass any other arguments.", 
-            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+            "description": "Fetch and extract the readable content of one specific public webpage or document URL. Use after `web_search` when a result needs close reading, or when the user gives you a URL and asks for a summary, analysis, or key details. Do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, and extracted text, possibly truncated.",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "The single HTTP or HTTPS URL to read."}}, "required": ["url"]}
         }
     })
 
@@ -432,7 +426,7 @@ if is_enabled("ENABLE_YOUTUBE_TRANSCRIPT"):
         "type": "function",
         "function": {
             "name": "get_youtube_transcript",
-            "description": "Fetch the full transcript/captions for a YouTube video URL or video ID. Use this for requests to summarize, quote, analyze, search, or retrieve a YouTube video's transcript. It works only when the video has public manual or auto-generated captions available.",
+            "description": "Retrieve the available captions/transcript for one YouTube video. Use when the user asks to summarize, quote, analyze, search within, or otherwise work from a video's spoken content. Accept a YouTube URL or exact 11-character video ID; do not guess an ID. This works only when public manual or auto-generated captions are available, and is not a general video-metadata or web-search tool.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -479,12 +473,12 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "search_fred_series",
-                "description": "Discovery tool for FRED. Use this FIRST when the user wants macroeconomic data but you do not know the exact FRED series ID yet. Search by topic or keyword, then inspect the returned candidate IDs and choose the best one. After this, call `get_fred_series_observations` with the chosen series ID. Do NOT use this tool when the user already gave you a specific FRED series ID.",
+                "description": "Discover the correct FRED series ID from a topic or keyword. Use this FIRST when the user asks for a specific economic indicator but has not supplied its FRED ID, such as 'core CPI', 'unemployment', 'real GDP', or 'the 2-year Treasury yield'. Inspect the returned titles, frequency, and units, then call `get_fred_series_observations` with the best matching ID. Do not use this when the user already gave an exact FRED series ID or when a high-level dashboard directly answers a broad question.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Keywords such as 'core CPI', 'unemployment rate', 'real GDP', or '2 year treasury yield'."},
-                        "limit": {"type": "integer", "description": "Optional. Number of results to return, up to 12."}
+                        "query": {"type": "string", "description": "A topic or indicator phrase, not necessarily an ID, such as 'core CPI', 'unemployment rate', 'real GDP', or '2 year treasury yield'."},
+                        "limit": {"type": "integer", "description": "Optional number of candidate series to return; maximum 12."}
                     },
                     "required": ["query"]
                 }
@@ -494,16 +488,16 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_fred_series_observations",
-                "description": "Data retrieval tool for FRED. Use this when you already know the exact FRED series ID, either because the user gave it to you directly or because you just discovered it with `search_fred_series`. Use it to pull recent or historical observations, metadata, units, and frequency. If you do not know the correct FRED ID yet, call `search_fred_series` first instead of guessing.",
+                "description": "Retrieve observations and metadata for one known FRED series. Use this when the user supplied an exact FRED series ID or after `search_fred_series` identified the correct ID. It returns the series title, frequency, units, latest value, and recent observations, with optional date bounds, unit transformation, frequency aggregation, and row limit. If you do not know the exact ID, use `search_fred_series` first; for broad multi-indicator questions, prefer a dashboard.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "series_id": {"type": "string", "description": "A FRED series ID such as CPIAUCSL, UNRATE, FEDFUNDS, GDPC1, or DGS10."},
-                        "observation_start": {"type": "string", "description": "Optional start date in YYYY-MM-DD format."},
-                        "observation_end": {"type": "string", "description": "Optional end date in YYYY-MM-DD format."},
-                        "units": {"type": "string", "description": "Optional FRED units transform such as lin, chg, pch, or pc1."},
-                        "frequency": {"type": "string", "description": "Optional FRED frequency aggregation like d, w, bw, m, q, or a."},
-                        "limit": {"type": "integer", "description": "Optional. Number of returned observations, up to 24."}
+                        "series_id": {"type": "string", "description": "The exact FRED series ID, such as CPIAUCSL, UNRATE, FEDFUNDS, GDPC1, or DGS10."},
+                        "observation_start": {"type": "string", "description": "Optional inclusive start date in YYYY-MM-DD format."},
+                        "observation_end": {"type": "string", "description": "Optional inclusive end date in YYYY-MM-DD format."},
+                        "units": {"type": "string", "description": "Optional FRED transformation such as lin (level), chg (change), pch (percent change), or pc1 (percent change from one year ago). Defaults to lin."},
+                        "frequency": {"type": "string", "description": "Optional aggregation frequency: d (daily), w (weekly), bw (biweekly), m (monthly), q (quarterly), or a (annual)."},
+                        "limit": {"type": "integer", "description": "Optional number of observations to return; maximum 24. Results are newest first."}
                     },
                     "required": ["series_id"]
                 }
@@ -513,12 +507,12 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "search_imf_indicators",
-                "description": "Discovery tool for IMF DataMapper. Use this FIRST when the user wants IMF or cross-country macro data but you do not know the exact IMF indicator code yet. Search by concept, then choose the best returned code. After this, call `get_imf_datamapper_series` with the chosen code. Do NOT use this tool when the user already provided a specific IMF indicator code.",
+                "description": "Discover the correct IMF DataMapper indicator code from a concept or keyword. Use this FIRST for a specific IMF or cross-country economic measure when the user has not supplied the code, such as real GDP growth, inflation, government debt, or the current account. Inspect the returned labels and descriptions, then call `get_imf_datamapper_series` with the best code. Do not use this when the user already gave an exact IMF indicator code or when a broad dashboard is sufficient.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Keywords such as 'real gdp growth', 'inflation', 'government debt', or 'current account'."},
-                        "limit": {"type": "integer", "description": "Optional. Number of results to return, up to 12."}
+                        "query": {"type": "string", "description": "A concept or keyword, such as 'real GDP growth', 'inflation', 'government debt', or 'current account'."},
+                        "limit": {"type": "integer", "description": "Optional number of candidate indicators to return; maximum 12."}
                     },
                     "required": ["query"]
                 }
@@ -528,14 +522,14 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_imf_datamapper_series",
-                "description": "Data retrieval tool for IMF DataMapper. Use this when you already know the exact IMF indicator code, either because the user supplied it or because you discovered it with `search_imf_indicators`. Use it to compare one or more countries across time. If you do not know the correct IMF indicator code yet, call `search_imf_indicators` first instead of guessing.",
+                "description": "Retrieve one known IMF DataMapper indicator for one or more countries across years. Use this when the user supplied an exact indicator code or after `search_imf_indicators` identified it. If you do not know the code, discover it first instead of guessing. For broad cross-country questions covering several standard measures, prefer `get_global_macro_dashboard`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "indicator": {"type": "string", "description": "An IMF indicator code such as NGDP_RPCH, PCPIPCH, or GGXWDG_NGDP."},
-                        "countries": {"type": "string", "description": "Comma-separated ISO-3 country codes such as USA,CAN,MEX. Defaults to USA."},
-                        "start_year": {"type": "integer", "description": "Optional start year such as 2015."},
-                        "end_year": {"type": "integer", "description": "Optional end year such as 2026."}
+                        "indicator": {"type": "string", "description": "The exact IMF indicator code, such as NGDP_RPCH, PCPIPCH, or GGXWDG_NGDP."},
+                        "countries": {"type": "string", "description": "Optional comma-separated ISO-3 country codes such as USA,CAN,MEX. Defaults to USA."},
+                        "start_year": {"type": "integer", "description": "Optional first year of the comparison window."},
+                        "end_year": {"type": "integer", "description": "Optional last year of the comparison window."}
                     },
                     "required": ["indicator"]
                 }
@@ -545,7 +539,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_stock_snapshot",
-                "description": "Use this for current market snapshots and basic fundamentals for a stock or ETF ticker. It is the correct tool when the user asks for current price, intraday high or low, 52-week range, market cap, EBITDA, valuation context, or recent earnings details. If the user instead wants a sequence of recent historical daily prices or OHLCV rows, use `get_stock_price_history`.",
+                "description": "Get a current stock or ETF snapshot plus basic fundamentals. Use for a ticker's current price, day range, previous close, 52-week range, market cap, EBITDA, P/E, EPS, beta, business summary, or recent quarterly earnings. If the user wants multiple daily prices, a chart-like time sequence, or OHLCV history, use `get_stock_price_history` instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -559,13 +553,13 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_stock_price_history",
-                "description": "Use this for recent historical daily price data for a stock or ETF ticker. It returns daily open, high, low, close, and volume rows. Use this when the user wants recent price action, a trading range over time, OHLCV history, or multiple daily closes. If the user instead wants a current quote or fundamentals like EBITDA or market cap, use `get_stock_snapshot`.",
+                "description": "Get recent historical daily OHLCV data for one stock or ETF ticker. Use when the user asks about price action over time, a recent trading range, multiple daily closes, or daily open/high/low/close/volume rows. This is daily history, not an intraday quote. For the current quote, valuation, fundamentals, or earnings context, use `get_stock_snapshot` instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string", "description": "Ticker symbol such as AAPL, MSFT, BRK.B, or SPY."},
-                        "outputsize": {"type": "string", "description": "Optional. Use 'compact' for recent history or 'full' for full daily history."},
-                        "limit": {"type": "integer", "description": "Optional. Number of daily rows to return, up to 30."}
+                        "outputsize": {"type": "string", "description": "Optional. Use 'compact' for recent history or 'full' when the requested dates may be older."},
+                        "limit": {"type": "integer", "description": "Optional number of newest daily rows to return; maximum 30."}
                     },
                     "required": ["symbol"]
                 }
@@ -575,7 +569,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_bond_market_dashboard",
-                "description": "High-level bond-market bundle. Use this FIRST for broad questions about the bond market, yields, the yield curve, credit spreads, or how bonds relate to the economy. This tool returns a curated pack of relevant series so you do not have to discover each FRED ID one by one. After reading it, explain the current bond-market regime and how it relates to policy, growth, labor, and equities.",
+                "description": "Get a curated bond-market dashboard. Use this FIRST for broad questions about bonds, Treasury yields, the yield curve, mortgage rates, credit spreads, inflation expectations, or how rates relate to policy, growth, labor, and equities. It bundles the relevant FRED series; do not use it when the user asks for one exact FRED series ID, which should use `get_fred_series_observations`.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -583,7 +577,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_inflation_dashboard",
-                "description": "High-level inflation bundle. Use this FIRST for broad inflation questions when you need headline and core inflation context plus market-based inflation expectations. This tool is preferred over manually searching multiple inflation series one by one unless the user explicitly requests a particular FRED series ID.",
+                "description": "Get a curated inflation dashboard covering headline and core CPI, headline and core PCE, and market-based inflation expectations. Use this FIRST for broad questions about inflation, disinflation, price pressures, or inflation expectations. If the user asks for one exact FRED series, use `get_fred_series_observations` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -591,7 +585,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_us_macro_dashboard",
-                "description": "High-level U.S. macro bundle. Use this FIRST for broad questions about the overall U.S. economy, growth, labor, activity, and policy context. This tool returns a curated macro dashboard so you can ground your answer in multiple datasets before explaining what they imply.",
+                "description": "Get a curated U.S. macroeconomic dashboard covering real GDP, unemployment, payrolls, retail sales, industrial production, the Fed funds rate, and the 10-year Treasury yield. Use this FIRST for broad questions about the U.S. economy, growth, labor, activity, recession risk, or policy context. For one exact FRED series, use `get_fred_series_observations` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -599,7 +593,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_equity_market_dashboard",
-                "description": "High-level equity-market bundle. Use this FIRST for broad questions about the stock market, market performance, risk sentiment, and cross-asset context. This tool returns a curated pack of equity, volatility, rates, credit, and dollar indicators. If the user asks about a specific stock ticker instead of the broad market, use `get_stock_snapshot` or `get_stock_price_history` instead.",
+                "description": "Get a curated broad equity-market dashboard covering the S&P 500, Nasdaq, VIX, Treasury yields, high-yield credit spreads, and the dollar. Use this FIRST for questions about the overall stock market, market performance, risk sentiment, or cross-asset conditions. If the user names a specific stock or ETF ticker, use `get_stock_snapshot` or `get_stock_price_history` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -607,13 +601,13 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_global_macro_dashboard",
-                "description": "High-level global macro bundle. Use this FIRST for broad questions about the global economy, cross-country growth, inflation, labor conditions, public debt, or external balances. This tool returns a curated IMF-based cross-country dashboard so you can ground global-macro answers in structured international data before explaining what it implies.",
+                "description": "Get a curated IMF-based global macro dashboard comparing real GDP growth, inflation, unemployment, government debt, and current-account balances across countries. Use this FIRST for broad cross-country or global-economy questions. Optional countries are comma-separated ISO-3 codes; use `get_imf_datamapper_series` instead for one exact IMF indicator or a custom single-measure comparison.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "countries": {"type": "string", "description": "Optional comma-separated ISO-3 country codes. Defaults to USA,CHN,EAQ,JPN,GBR,IND."},
-                        "start_year": {"type": "integer", "description": "Optional start year for the comparison window. Defaults to 2022."},
-                        "end_year": {"type": "integer", "description": "Optional end year for the comparison window. Defaults to the current year."}
+                        "countries": {"type": "string", "description": "Optional comma-separated ISO-3 country or area codes. Defaults to USA,CHN,EAQ,JPN,GBR,IND."},
+                        "start_year": {"type": "integer", "description": "Optional first year of the comparison window; defaults to 2022."},
+                        "end_year": {"type": "integer", "description": "Optional last year of the comparison window; defaults to the current year."}
                     }
                 }
             }
@@ -622,7 +616,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_housing_consumer_dashboard",
-                "description": "High-level housing-and-consumer bundle. Use this FIRST for broad questions about housing, affordability, construction, household spending, consumer credit, or the health of the consumer. This tool returns a curated dashboard covering mortgage rates, home prices, housing activity, consumer spending, and credit stress so you can explain the household side of the economy with data.",
+                "description": "Get a curated housing-and-consumer dashboard covering mortgage rates, home prices, housing starts, building permits, consumer spending, consumer credit, and delinquency stress. Use this FIRST for broad questions about housing, affordability, construction, household spending, credit, or consumer health. For one exact FRED series, use `get_fred_series_observations` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -630,7 +624,7 @@ if is_enabled("ENABLE_FINANCE"):
             "type": "function",
             "function": {
                 "name": "get_labor_market_dashboard",
-                "description": "High-level labor-market bundle. Use this FIRST for broad questions about jobs, unemployment, layoffs, hiring, participation, quits, or wage growth. This tool returns a curated labor dashboard so you can ground labor-market answers in multiple datasets before explaining what they imply.",
+                "description": "Get a curated labor-market dashboard covering unemployment, payrolls, initial and continuing claims, job openings, quits, participation, employment utilization, and wage growth. Use this FIRST for broad questions about jobs, layoffs, hiring, labor supply, wage growth, or labor-market conditions. For one exact FRED series, use `get_fred_series_observations` instead.",
                 "parameters": {"type": "object", "properties": {}}
             }
         }
@@ -651,13 +645,13 @@ if is_enabled("ENABLE_REOLINK"):
             "type": "function",
             "function": {
                 "name": "get_reolink_snapshot",
-                "description": "Get a live image stream and AI analysis from a home security camera. Use whenever the user asks to check, look at, view, or patrol a camera location.",
+                "description": "Capture a live snapshot from one configured Reolink security camera and return an AI scene/threat analysis. Use when the user asks to check, look at, view, or patrol a specific camera. This is for the current live scene; use `get_camera_security_log` for past activity and `get_available_cameras` when the camera name is unknown.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "camera_name": {
                             "type": "string",
-                            "description": f"The exact name of the camera to check. You MUST choose exactly one option from this list: {camera_list_str}."
+                            "description": f"The configured camera name to check. Choose exactly one option from this list: {camera_list_str}. Do not invent a camera name; call `get_available_cameras` first if the user did not identify one."
                         }
                     },
                     "required": ["camera_name"]
@@ -668,7 +662,7 @@ if is_enabled("ENABLE_REOLINK"):
             "type": "function",
             "function": {
                 "name": "get_available_cameras",
-                "description": "Get a list of all configured and online home security camera names. Use when the user asks what cameras they have, what camera feeds are available, or lists of security cameras.",
+                "description": "List the configured and currently reachable home security camera names. Use when the user asks what cameras or feeds are available, or before a snapshot when the requested camera name is ambiguous or unknown. This does not capture a live image.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -679,17 +673,17 @@ if is_enabled("ENABLE_REOLINK"):
             "type": "function",
             "function": {
                 "name": "get_camera_security_log",
-                "description": "Retrieve recent security camera activity logs including AI threat reports and scene descriptions. Use when the user asks what happened on a camera, what activity was detected, or wants a security summary.",
+                "description": "Read recent recorded security-camera activity, including AI threat reports and scene descriptions. Use when the user asks what happened, what was detected, or wants a recent security summary. This is historical log data, not a live camera snapshot; omit `camera_name` to review all cameras.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "camera_name": {
                             "type": "string",
-                            "description": "Optional. Filter by a specific camera name (e.g. 'frontdoor'). Omit to get all cameras."
+                            "description": "Optional configured camera name (for example, frontdoor) to filter by. Omit to include all cameras."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max number of recent log entries to return. Default 10."
+                            "description": "Optional maximum number of recent log entries; defaults to 10."
                         }
                     }
                 }
@@ -703,13 +697,13 @@ if ENABLE_MEMORY:
         "type": "function", 
         "function": {
             "name": "save_user_memory", 
-            "description": "Persist one durable memory item for future conversations. Use ONLY for long-term facts likely to matter again after chat history is cleared: preferences, recurring constraints, names, relationships, household facts, long-term projects, owned devices/services, or future-relevant standing instructions. Do NOT use for temporary chatter, one-off status updates, obvious short-lived context, jokes, or facts already clearly stored. In group chats, be conservative about saving sensitive private facts.", 
+            "description": "Persist one durable, future-relevant fact for later conversations. Use only for stable preferences, recurring constraints, names or relationships, household facts, long-term projects, owned devices/services, or standing instructions that should survive after chat history is cleared. Do not save temporary context, one-off updates, jokes, facts already stored, secrets, or sensitive private information in a group chat unless clearly appropriate and explicitly requested.",
             "parameters": {
                 "type": "object", 
                 "properties": {
                     "fact": {
                         "type": "string",
-                        "description": "One clean factual statement to remember, with no filler or commentary (e.g. 'Hudson prefers tabs over spaces in code editors.')."
+                        "description": "One concise, self-contained factual statement with no filler or commentary, such as 'Hudson prefers tabs over spaces in code editors.'"
                     }
                 }, 
                 "required": ["fact"]
@@ -726,7 +720,7 @@ if is_enabled("ENABLE_PORTAINER"):
             "type": "function",
             "function": {
                 "name": "list_portainer_environments",
-                "description": "List all active environments configured in Portainer. Use this to find the target environment names and IDs.",
+                "description": "List Portainer environments with their names, IDs, types, and online/offline status. Use this read-only tool first when you need to identify an environment before listing or updating its containers.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -734,13 +728,13 @@ if is_enabled("ENABLE_PORTAINER"):
             "type": "function",
             "function": {
                 "name": "list_portainer_containers",
-                "description": "List all containers (running and stopped) in a specific Portainer environment.",
+                "description": "List all running and stopped Docker containers in one Portainer environment, including container name, state, and image. Use after identifying the exact environment name; this tool is read-only and does not start, stop, or update containers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "environment_name": {
                             "type": "string",
-                            "description": "The exact name of the Portainer environment (e.g., 'emeryverse', 'thegrand')."
+                            "description": "The exact Portainer environment name, obtained from `list_portainer_environments` (for example, emeryverse or thegrand)."
                         }
                     },
                     "required": ["environment_name"]
@@ -751,17 +745,17 @@ if is_enabled("ENABLE_PORTAINER"):
             "type": "function",
             "function": {
                 "name": "update_portainer_container",
-                "description": "Update, recreate, and upgrade a specific container in a Portainer environment. This stops, pulls the latest image, deletes, and recreates the container, preserving its original configuration. WARNING: This is a powerful administrative action. DO NOT invoke this tool unless the user has explicitly asked you to update, restart, or recreate a container.",
+                "description": "Pull the latest image, stop, delete, recreate, and start one Docker container in Portainer while preserving its inspected configuration. This is a powerful, disruptive administrative action. Use only when the user explicitly asks to update, restart, recreate, or upgrade that specific container; never infer authorization from a status question or a general request to inspect containers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "environment_name": {
                             "type": "string",
-                            "description": "The exact name of the Portainer environment (e.g., 'emeryverse', 'thegrand')."
+                            "description": "The exact Portainer environment name, obtained from `list_portainer_environments`."
                         },
                         "container_name": {
                             "type": "string",
-                            "description": "The name of the container to update (e.g., 'seerr', 'plex')."
+                            "description": "The exact container name to recreate, obtained from `list_portainer_containers` (for example, seerr or plex)."
                         }
                     },
                     "required": ["environment_name", "container_name"]
@@ -776,13 +770,13 @@ if is_enabled("ENABLE_MEALIE"):
         "type": "function",
         "function": {
             "name": "import_recipe_to_mealie",
-            "description": "Import a recipe from a web URL into the Mealie recipe manager. Pass the recipe URL as a string. Accepts a single URL at a time. Use when the user shares a recipe link or explicitly asks to save a recipe to their Mealie collection.",
+            "description": "Import one recipe from a web URL into the user's Mealie recipe collection. Use when the user shares a recipe link or explicitly asks to save/import a recipe. Pass exactly one HTTP or HTTPS recipe URL; do not use for general webpage summaries or multiple links in one call.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The HTTP or HTTPS URL of the recipe to import into Mealie."
+                        "description": "Exactly one HTTP or HTTPS URL for the recipe to import."
                     }
                 },
                 "required": ["url"]
@@ -803,34 +797,34 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "add_scheduled_job",
-                "description": "Create a scheduled reminder, recurring routine, or future automated check. Use ONLY when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something in the future. Do NOT create jobs proactively just because it seems helpful. For one-off reminders with a calendar date but no time, ask the user what time before calling this tool.",
+                "description": "Create one future reminder, recurring reminder, routine, monitor, or automated check. Use only when the user explicitly asks to schedule, remind, repeat, monitor, check later, or automate something; never create a job proactively. For a one-off calendar date without a time, ask for the time first. Put the complete action or reminder content in `prompt`, not only in the short label.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "schedule_type": {
                             "type": "string",
                             "enum": ["daily", "interval", "once", "weekly", "monthly", "yearly"],
-                            "description": "The schedule trigger type: 'daily' (HH:MM time format), 'interval' (repeating delay), 'once' (one-off localized date-time or relative delay), 'weekly' (e.g. Monday 08:30), 'monthly' (e.g. 1 12:00), or 'yearly' (e.g. 12-19 08:30). Personal recurring reminders should still use the recurring schedule type; the scheduler will route them privately when target_user/wording indicates a personal reminder."
+                            "description": "Trigger type: daily, interval, once, weekly, monthly, or yearly. Use once for a one-off reminder; use a recurring type for repeated reminders or routines. Personal recurring reminders still use their recurring schedule type and are routed privately when target_user/wording indicates that they are personal."
                         },
                         "schedule_value": {
                             "type": "string",
-                            "description": "Trigger specification. 'daily' requires 'HH:MM' (24-hour format, e.g. '08:30'). 'interval' requires a duration (e.g. '30m', '1h', or seconds like '3600'). 'once' requires a localized datetime string 'YYYY-MM-DD HH:MM:SS' or relative delay (e.g. '15m'); do not pass date-only values like '2026-06-07' or 'June 7'. 'weekly' requires '<day_name> <HH:MM>' (e.g. 'Monday 08:30'). 'monthly' requires '<day_of_month> <HH:MM>' (e.g. '1 12:00'). 'yearly' requires '<MM-DD> <HH:MM>' (e.g. '12-19 08:30')."
+                            "description": "Trigger value: daily requires HH:MM in 24-hour time; interval requires a duration such as 30m, 1h, or 3600 seconds; once requires localized YYYY-MM-DD HH:MM:SS or a relative delay such as 15m; weekly requires <day_name> <HH:MM>; monthly requires <day_of_month> <HH:MM>; yearly requires <MM-DD> <HH:MM>. Do not pass a date-only value for once."
                         },
                         "prompt": {
                             "type": "string",
-                            "description": "The exact instruction/query the bot will run when triggered (e.g. 'Check the NOAA weather using get_noaa_weather and send weather summary with clothing recommendations')."
+                            "description": "The complete instruction the bot will execute when triggered, including the actual reminder content or the tool/action to perform. Do not use a vague label such as 'send reminder about groceries'."
                         },
                         "description": {
                             "type": "string",
-                            "description": "A short, user-friendly label/description of the job (e.g. 'Daily Weather Briefing')."
+                            "description": "A short user-facing label for the job, such as Daily Weather Briefing. Keep actionable details in prompt."
                         },
                         "target_user": {
                             "type": "string",
-                            "description": "Optional name or alias of the family member this job/reminder is targeted at (e.g. 'Alice', 'Bob', 'me', 'us', or 'both'). In group chats, personal wording like 'remind me' routes to the asker's DM. Shared wording like 'remind us' routes to the configured group chat topic."
+                            "description": "Optional person or audience: a family member name/alias, me, us, or both. In group chats, me routes a personal reminder to the asker; us/both routes a shared reminder to the group topic."
                         },
                         "route_to_routines": {
                             "type": "boolean",
-                            "description": "Optional. True routines/automation such as recurring briefings, checks, and monitoring should set this true so they route to the routines topic. Personal reminders and shared reminders do not need this; the scheduler chooses DM or group chat-topic routing from target_user and wording."
+                            "description": "Optional. Set true for shared recurring briefings, checks, monitoring, or automation that should go to the routines topic. Leave false for personal reminders; routing otherwise follows target_user and wording."
                         }
                     },
                     "required": ["schedule_type", "schedule_value", "prompt", "description"]
@@ -841,7 +835,7 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "list_scheduled_jobs",
-                "description": "List the currently configured scheduled jobs. Use when the user asks what is scheduled, what reminders/routines exist, or wants to inspect existing jobs before changing them.",
+                "description": "List currently configured scheduled jobs with their IDs, schedules, labels, prompts, and routing details. Use when the user asks what is scheduled or wants to inspect an existing reminder/routine before changing or removing it. This tool does not modify jobs.",
                 "parameters": {"type": "object", "properties": {}}
             }
         },
@@ -849,13 +843,13 @@ if is_enabled("ENABLE_SCHEDULER"):
             "type": "function",
             "function": {
                 "name": "remove_scheduled_job",
-                "description": "Cancel and delete a scheduled job by ID. Use ONLY when the user clearly asks to cancel, stop, delete, or remove an existing scheduled job.",
+                "description": "Cancel and delete one existing scheduled job by ID. Use only when the user clearly asks to cancel, stop, delete, or remove that reminder/routine. List jobs first if the correct ID is not already known; do not remove jobs merely because they are complete or unfamiliar.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "job_id": {
                             "type": "string",
-                            "description": "The unique ID of the scheduled job to remove."
+                            "description": "The exact unique job ID returned by `list_scheduled_jobs`."
                         }
                     },
                     "required": ["job_id"]
@@ -869,17 +863,17 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "delegate_to_coprocessor",
-        "description": "Delegate heavy text-only processing to the fast coprocessor. Use for long summarization, extraction, classification, cleanup, formatting, or document parsing tasks, especially when source text is over about 1,500 characters or highly repetitive. Do NOT use for ordinary short conversational replies, direct factual answers, or actions that should be handled by another tool instead.",
+        "description": "Delegate long or mechanical text-only processing to the fast coprocessor. Use for summarization, extraction, classification, cleanup, formatting, or document parsing when the source is roughly over 1,500 characters, highly repetitive, or expensive to process inline. Do not use for ordinary conversation, direct factual answers, tasks requiring another tool, or work that needs independent reasoning rather than text transformation.",
         "parameters": {
             "type": "object",
             "properties": {
                 "task_prompt": {
                     "type": "string",
-                    "description": "The specific instruction for the coprocessor (e.g., 'Extract all dates and times', 'Summarize this page')."
+                    "description": "The exact text-processing instruction, such as 'Extract all dates and times' or 'Summarize this page'."
                 },
                 "content_to_process": {
                     "type": "string",
-                    "description": "The target text block, CSV data, email, or webpage content to process."
+                    "description": "The complete text, CSV, email, transcript, or webpage content to process. Do not pass a URL alone when the task requires fetching it first."
                 }
             },
             "required": ["task_prompt", "content_to_process"]
@@ -892,17 +886,17 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "react_to_message",
-        "description": "React to a chat message with an emoji. Use only when a lightweight social reaction is natural and a full text reply is unnecessary, or as a small addition to text. Do NOT use reactions as a substitute when the user asked a substantive question or requested work.",
+        "description": "Add one lightweight Telegram emoji reaction to a chat message. Use when a simple reaction is natural, either instead of a response when no text is needed or as a small addition to text. Do not use it instead of answering a substantive question or completing requested work; use the optional message ID only when reacting to an older message.",
         "parameters": {
             "type": "object",
             "properties": {
                 "emoji": {
                     "type": "string",
-                    "description": "The emoji to react with. Must be one of standard Telegram reaction emojis: '👍', '👎', '❤️', '🔥', '👏', '😂', '😮', '😢', '🎉', '🤔', '👀'."
+                    "description": "One supported Telegram reaction emoji: 👍, 👎, ❤️, 🔥, 👏, 😂, 😮, 😢, 🎉, 🤔, or 👀."
                 },
                 "message_id": {
                     "type": "integer",
-                    "description": "Optional. The ID of the message to react to. If omitted, defaults to the latest user message in history."
+                    "description": "Optional ID of the message to react to. If omitted, the tool targets the latest user message in the current history."
                 }
             },
             "required": ["emoji"]
@@ -915,13 +909,13 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "reply_to_message",
-        "description": "Direct the bot's final response to reply to a specific earlier message ID. Use ONLY when the user is asking about a specific prior message or when explicitly threading to an older message adds important clarity. Do NOT use for normal back-and-forth replies.",
+        "description": "Make the bot's final response a Telegram reply to one specific earlier message. Use only when the user explicitly refers to that older message or threading materially clarifies the response. Do not use for normal back-and-forth conversation.",
         "parameters": {
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "integer",
-                    "description": "The message ID to reply to."
+                    "description": "The exact earlier message ID to quote/reply to."
                 }
             },
             "required": ["message_id"]
@@ -934,13 +928,13 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "send_sticker",
-        "description": "Sends a Telegram sticker to the chat. You can specify a standard emoji (e.g. '👍', '❤️', '🔥') to look up a sticker in your library, or pass a direct sticker file ID.",
+        "description": "Send one Telegram sticker to the current chat. Use when the user asks for a sticker or when a lightweight sticker response is natural. Pass a supported emoji to look up a sticker in the learned library, or pass a direct Telegram sticker file ID; this sends media and is not an emoji reaction.",
         "parameters": {
             "type": "object",
             "properties": {
                 "sticker_id_or_emoji": {
                     "type": "string",
-                    "description": "The emoji (e.g. '👍') or sticker file ID to send."
+                    "description": "A supported lookup emoji such as 👍, ❤️, or 🔥, or a direct Telegram sticker file ID."
                 }
             },
             "required": ["sticker_id_or_emoji"]
@@ -953,13 +947,13 @@ tools_schema.append({
     "type": "function",
     "function": {
         "name": "send_gif",
-        "description": "Sends a GIF (animation) to the chat. You can pass a direct URL to a .gif / .mp4 file, or a search query (e.g. 'happy dance', 'confused') to automatically search and send a matching GIF.",
+        "description": "Send one animated GIF to the current chat. Use when the user asks for a GIF or when a contextual lightweight animation is natural. Pass a direct HTTP(S) GIF/video URL or a short search query; this sends media and is not a web-search request or an emoji reaction.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query_or_url": {
                     "type": "string",
-                    "description": "The GIF search query or a direct GIF URL to send."
+                    "description": "A direct HTTP(S) GIF/video URL or a concise search query such as 'happy dance' or 'confused'."
                 }
             },
             "required": ["query_or_url"]
