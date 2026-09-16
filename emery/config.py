@@ -460,7 +460,10 @@ ENABLE_HEARTBEAT = _to_bool(os.getenv("ENABLE_HEARTBEAT"), False)
 ENABLE_NEST = _to_bool(os.getenv("ENABLE_NEST"))
 ENABLE_REOLINK = _to_bool(os.getenv("ENABLE_REOLINK"))
 ENABLE_SYSTEM_STATS = _to_bool(os.getenv("ENABLE_SYSTEM_STATS"))
-ENABLE_TELEGRAM_RICH_MESSAGES = _to_bool(os.getenv("ENABLE_TELEGRAM_RICH_MESSAGES"), True)
+# Rich Messages are newer than Telegram's long-established sendMessage
+# formatting and are not rendered consistently by every client. Keep the
+# interoperable HTML path as the default; operators can opt in explicitly.
+ENABLE_TELEGRAM_RICH_MESSAGES = _to_bool(os.getenv("ENABLE_TELEGRAM_RICH_MESSAGES"), False)
 ENABLE_ROUTINE_CACHE_WARMUP = _to_bool(os.getenv("ENABLE_ROUTINE_CACHE_WARMUP"), True)
 ENABLE_MEALIE = _to_bool(os.getenv("ENABLE_MEALIE"), True)
 MEALIE_URL = os.getenv("MEALIE_URL", "").rstrip("/")
