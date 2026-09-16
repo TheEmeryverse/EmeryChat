@@ -960,3 +960,11 @@ tools_schema.append({
         }
     }
 })
+
+# Canonical discovery metadata is layered over (and never replaces) the full
+# internal registry above.  Importing this at the end avoids a circular import
+# and keeps legacy consumers of AVAILABLE_TOOLS/tools_schema unchanged.
+from emery.tool_search_catalog import build_tool_catalog
+
+TOOL_CATALOG = build_tool_catalog(AVAILABLE_TOOLS, tools_schema)
+TOOL_METADATA = TOOL_CATALOG

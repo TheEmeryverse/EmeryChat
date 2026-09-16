@@ -21,8 +21,9 @@ from emery.config import (
 import emery.globals as globals
 from emery.helpers import (
     emery_format, transcribe_audio, compress_image_bytes,
-    get_image_description, clean_thinking_tags, telegram_escape, get_current_system_prompt
+    get_image_description, clean_thinking_tags, telegram_escape
 )
+from emery.session_context import get_session_context, get_turn_context, set_current_context, clear_session_context_cache
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.scratchpad import clear_scratchpad, read_scratchpad
@@ -328,6 +329,7 @@ async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     if chat_id in globals.chat_histories:
         globals.chat_histories[chat_id].clear()
+    clear_session_context_cache(chat_id=chat_id)
     await update.message.reply_text("Context cleared.")
 
 
@@ -480,8 +482,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preview = safe_preview(replied_text, max_len=80)
         reply_info = f" (Replying to message ID {reply_to_id}: '{preview}')"
 
-    runtime_context = await get_current_system_prompt(content_text, update.effective_user.id)
-    history_content = f"{runtime_context}\n\n# New User Message\n{content}{reply_info}"
+    session_context = await get_session_context(
+        chat_id=chat_id,
+        thread_id=globals.CURRENT_THREAD_ID.get(),
+        user_id=update.effective_user.id,
+    )
+    turn_context = await get_turn_context(
+        content_text,
+        update.effective_user.id,
+        session=session_context,
+    )
+    set_current_context(session_context, turn_context)
+    # Runtime context is supplied separately to the engine.  Keep history as
+    # the actual conversation so old histories remain readable and compact.
+    history_content = f"{content}{reply_info}"
 
     logging.info(f"💬 USER (chat {chat_id}): {sender_name} -> {safe_preview(content_text, max_len=120)}{reply_info}")
     globals.chat_histories[chat_id].append({
@@ -600,6 +614,10 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             globals.chat_histories[chat_id],
             model_to_use=model_to_use,
             on_event=handle_engine_event if progress else None,
+            session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
+                             if globals.CURRENT_SESSION_CONTEXT.get() else None),
+            turn_context=(globals.CURRENT_TURN_CONTEXT.get().prompt
+                          if globals.CURRENT_TURN_CONTEXT.get() else None),
         )
     except Exception as e:
         logging.error(f"Error running engine in debounce worker: {e}", exc_info=True)
@@ -802,6 +820,23 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     """Invokes the engine contextually when a user reacts to a message."""
     globals.TARGET_CHAT_ID.set(chat_id)
     globals.current_user_id.set(user_id)
+
+    message_thread_id = None
+    for history_message in globals.chat_histories.get(chat_id, []):
+        if history_message.get("message_id") == message_id or (
+            isinstance(history_message.get("message_ids"), list)
+            and message_id in history_message["message_ids"]
+        ):
+            message_thread_id = history_message.get("message_thread_id")
+            break
+    globals.CURRENT_THREAD_ID.set(message_thread_id)
+    session_context = await get_session_context(chat_id, message_thread_id, user_id)
+    turn_context = await get_turn_context(
+        f"reaction update: {', '.join(emojis)}",
+        user_id,
+        session=session_context,
+    )
+    set_current_context(session_context, turn_context)
     
     msg_text = ""
     for msg in globals.chat_histories.get(chat_id, []):
@@ -848,7 +883,13 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     typing_task = asyncio.create_task(keep_typing())
     
     try:
-        response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id])
+        response_text, voice_sent_via_tool = await emery_engine(
+            globals.chat_histories[chat_id],
+            session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
+                             if globals.CURRENT_SESSION_CONTEXT.get() else None),
+            turn_context=(globals.CURRENT_TURN_CONTEXT.get().prompt
+                          if globals.CURRENT_TURN_CONTEXT.get() else None),
+        )
     finally:
         typing_stop.set()
         await typing_task
@@ -1116,6 +1157,22 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
         silence_seconds = _seconds_since(now, last_time) if last_time else 0
 
     context_packet = await build_heartbeat_context_packet(chat_id, now, silence_seconds)
+
+    heartbeat_user_id = _last_user_id_from_history(globals.chat_histories.get(chat_id, []))
+    if heartbeat_user_id is not None:
+        globals.current_user_id.set(heartbeat_user_id)
+    session_context = await get_session_context(
+        chat_id,
+        message_thread_id,
+        heartbeat_user_id,
+        session_variant="heartbeat",
+    )
+    turn_context = await get_turn_context(
+        "heartbeat check-in",
+        heartbeat_user_id,
+        session=session_context,
+    )
+    set_current_context(session_context, turn_context)
     
     trigger_content = (
         f"[System Trigger (Heartbeat)]: It has been several hours since the last message in this chat. "
@@ -1137,7 +1194,14 @@ async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
     globals.chat_histories[chat_id].append(trigger_msg)
     
     try:
-        response_text, voice_sent_via_tool = await emery_engine(globals.chat_histories[chat_id], allow_tools=False)
+        response_text, voice_sent_via_tool = await emery_engine(
+            globals.chat_histories[chat_id],
+            allow_tools=False,
+            session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
+                             if globals.CURRENT_SESSION_CONTEXT.get() else None),
+            turn_context=(globals.CURRENT_TURN_CONTEXT.get().prompt
+                          if globals.CURRENT_TURN_CONTEXT.get() else None),
+        )
     except Exception as e:
         logging.error(f"Error executing heartbeat engine: {e}")
         response_text = "DONE"

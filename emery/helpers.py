@@ -22,6 +22,16 @@ from emery.config import (
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
 from emery.scratchpad import get_scratchpad_snapshot
+from emery.session_context import (
+    SessionContext,
+    TurnContext,
+    get_session_context,
+    get_turn_context,
+    get_current_session_context,
+    get_current_turn_context,
+    set_current_context,
+    clear_session_context_cache,
+)
 
 def normalize_gemma_thinking(text: str) -> str:
     if not text:
@@ -530,7 +540,7 @@ def get_stable_system_prompt() -> str:
     return _get_compact_stable_system_prompt()
 
 
-async def get_current_system_prompt(user_query="", user_id=None): # Builds dynamic runtime context after the stable system prompt
+async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
     if user_id is None:
         user_id = globals.current_user_id.get()
         
@@ -686,3 +696,14 @@ This context is current for this request. It is not the user's newest message.
 - User's profession: {user_profession}{relationship_line}{group_privacy_instruction}{notifications}{memory_section}{scratchpad_instruction}{scratchpad_section}{camera_log_hint}"""
 
     return prompt
+
+
+async def get_current_system_prompt(user_query="", user_id=None):
+    """Compatibility wrapper for callers that still need one runtime prompt.
+
+    New request paths should bind ``SessionContext`` and ``TurnContext`` and
+    keep their history entries free of runtime prompt text.  This legacy
+    wrapper intentionally retains the old output shape for extensions that
+    have not migrated yet.
+    """
+    return await _build_legacy_dynamic_system_prompt(user_query, user_id)

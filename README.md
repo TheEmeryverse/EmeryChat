@@ -69,7 +69,7 @@ The project is built around a simple operating model:
 1. Telegram delivers a message to `main.py`.
 2. [emery/bot.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/bot.py) normalizes the input, updates chat history, and applies group-chat reply rules.
 3. Debounce logic batches rapid-fire messages into a single turn.
-4. [emery/engine.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/engine.py) builds the prompt, registers the enabled tools, and calls the main model.
+4. [emery/engine.py](/Users/hudson/Documents/GitHub/EmeryChat/emery/engine.py) assembles deterministic request copies, uses the frozen prefix/tool state from `emery/prompt_cache.py`, and calls the main model.
 5. Tool results and the final response are posted back to Telegram.
 
 ### Memory model
@@ -94,6 +94,14 @@ The project is built around a simple operating model:
   - someone replies to one of its messages, or
   - the message is a slash command.
 - Per-user memory and scheduled reminders can target one user or both users.
+
+### Prompt prefix and Tool Search behavior
+
+- Stable system/session context and tool schemas are frozen per prompt epoch; request histories and tool-loop tails are copied before assembly so the reusable prefix cannot be mutated by a later turn.
+- Volatile turn context is attached to the current user message at request time and is not written into stored chat history.
+- When `emery/tool_search.py` is available, the engine uses its visible-schema and bridge-dispatch hooks. The legacy registry remains the fallback boundary for installations without Tool Search.
+- Cache hashes and prefill diagnostics contain counts and SHA-256 hashes only. Emery does not claim a cache hit unless the endpoint reports one.
+- `cache_control` and `prompt_cache_key` are omitted from the local endpoint payload by default. To opt in, set `PROMPT_CACHE_SEND_CACHE_CONTROL=true`; set `PROMPT_CACHE_KEY` (or `MAIN_MODEL_PROMPT_CACHE_KEY`) and `PROMPT_CACHE_SEND_KEY=true` for an explicit cache key.
 
 ## Quick Start
 

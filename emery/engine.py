@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -31,7 +32,25 @@ from emery.helpers import (
     query_fast_model,
     telegram_escape,
 )
-from emery.logging_utils import format_logging_payload, format_llama_perf_line, safe_preview
+from emery.logging_utils import (
+    format_cache_diagnostics,
+    format_logging_payload,
+    format_llama_perf_line,
+    safe_preview,
+)
+from emery.prompt_cache import (
+    cache_diagnostics,
+    dispatch_tool_call,
+    endpoint_cache_options,
+    clear_prompt_cache,
+    current_prompt_epoch,
+    get_stable_prompt_state,
+    invalidate_prompt_cache,
+    invalidate_prompt_epoch,
+    request_shape_hash as prompt_request_shape_hash,
+    resolve_tooling,
+    stable_hash,
+)
 from emery.telegram_utils import normalize_message_thread_id
 
 AVAILABLE_TOOLS = tool_registry.AVAILABLE_TOOLS
@@ -760,11 +779,14 @@ def _build_ollama_history(history_buffer) -> list[dict]:
     history_buffer = _compact_history_for_model(history_buffer)
     ollama_history = []
     for msg in history_buffer:
+        # Never retain references into the caller's history or into prior
+        # request payloads. Tool calls are particularly easy to mutate while
+        # assembling a later loop.
         clean_msg = {"role": msg["role"]}
 
         # Preserve tool calling fields if present in history
         if "tool_calls" in msg:
-            clean_msg["tool_calls"] = msg["tool_calls"]
+            clean_msg["tool_calls"] = copy.deepcopy(msg["tool_calls"])
         if "tool_call_id" in msg:
             clean_msg["tool_call_id"] = msg["tool_call_id"]
         if "name" in msg:
@@ -825,14 +847,41 @@ def _build_main_model_payload(
     top_k: int = 20,
     allow_tools: bool = True,
     stream: bool = None,
+    session_context=None,
+    turn_context=None,
+    prompt_epoch: int | None = None,
+    tools_schema_override=None,
 ) -> tuple[dict, list[dict]]:
     reasoning_effort = MAIN_MODEL_REASONING_EFFORT if THINK else "none"
-    stable_prefix = [{"role": "system", "content": get_stable_system_prompt()}]
+    resolved_schema = tools_schema if tools_schema_override is None else tools_schema_override
+    prompt_state = get_stable_prompt_state(
+        stable_system_prompt=get_stable_system_prompt(),
+        model=model_to_use,
+        tool_schema=resolved_schema if allow_tools else [],
+        session_context=session_context,
+        prompt_epoch=prompt_epoch,
+    )
     ollama_history = _build_ollama_history(history_buffer)
+
+    # Turn context is request-local. Attach it to the latest user message in
+    # the copied model history, never to the caller's stored history.
+    if turn_context is not None:
+        turn_text = turn_context if isinstance(turn_context, str) else json.dumps(
+            turn_context, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        turn_text = str(turn_text).strip()
+        if turn_text:
+            for index in range(len(ollama_history) - 1, -1, -1):
+                if ollama_history[index].get("role") == "user":
+                    current = ollama_history[index].get("content") or ""
+                    ollama_history[index]["content"] = (
+                        f"{current}\n\n# Turn Context\n{turn_text}" if current else f"# Turn Context\n{turn_text}"
+                    )
+                    break
 
     payload = {
         "model": model_to_use,
-        "messages": stable_prefix + ollama_history,
+        "messages": prompt_state.prefix_messages() + copy.deepcopy(ollama_history),
         "stream": ENABLE_LIVE_PROGRESS if stream is None else bool(stream),
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -841,8 +890,13 @@ def _build_main_model_payload(
         "reasoning_effort": reasoning_effort,
     }
 
-    if allow_tools and tools_schema:
-        payload["tools"] = tools_schema
+    if allow_tools and resolved_schema:
+        payload["tools"] = prompt_state.tools()
+
+    # These fields are intentionally absent for the custom local endpoint
+    # unless an operator explicitly opts in through environment configuration.
+    payload.update(endpoint_cache_options())
+    logging.debug("ENGINE: Request assembly %s", format_cache_diagnostics(cache_diagnostics(payload, prompt_state)))
 
     return payload, ollama_history
 
@@ -887,15 +941,31 @@ async def _send_tool_status(fn: str, args: dict, on_event=None) -> None:
         )
 
 
-async def _execute_tool_call(fn: str, args: dict):
+async def _execute_tool_call(fn: str, args: dict, available_tools=None):
     logging.info("🔧 TOOL: %s | Args: %s", fn, format_logging_payload(args))
-    return await AVAILABLE_TOOLS[fn](**args) if args else await AVAILABLE_TOOLS[fn]()
+    registry = AVAILABLE_TOOLS if available_tools is None else available_tools
+    tool = registry[fn]
+    return await dispatch_tool_call(fn, args, tool)
 
 
-async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: str = "") -> bool:
+async def warm_main_model_cache(
+    history_buffer,
+    model_to_use=MODEL_ID,
+    reason: str = "",
+    session_context=None,
+) -> bool:
     if not history_buffer:
         return False
 
+    if session_context is None:
+        bound_context = globals.CURRENT_SESSION_CONTEXT.get()
+        session_context = getattr(bound_context, "prompt", bound_context)
+
+    _, active_tools_schema, _ = resolve_tooling(
+        AVAILABLE_TOOLS,
+        tools_schema,
+        request_context=session_context,
+    )
     payload, _ = _build_main_model_payload(
         history_buffer=history_buffer,
         model_to_use=model_to_use,
@@ -905,6 +975,8 @@ async def warm_main_model_cache(history_buffer, model_to_use=MODEL_ID, reason: s
         top_k=1,
         allow_tools=True,
         stream=False,
+        session_context=session_context,
+        tools_schema_override=active_tools_schema,
     )
 
     try:
@@ -981,7 +1053,14 @@ TOOL_STATUS_MESSAGES = {
 
 
 # --- THE UNIFIED ENGINE ---
-async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, on_event=None):
+async def emery_engine(
+    history_buffer,
+    model_to_use=MODEL_ID,
+    allow_tools=True,
+    on_event=None,
+    session_context=None,
+    turn_context=None,
+):
     url = MAIN_MODEL_URL
     # Find the latest sender info from the history buffer.
     sender_user_id = None
@@ -997,13 +1076,33 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
         
     voice_sent_via_tool = False
     thinking_timeline = []
+    active_tools, active_tools_schema, tooling_source = resolve_tooling(
+        AVAILABLE_TOOLS,
+        tools_schema,
+        request_context=session_context,
+    )
+    logging.debug("ENGINE: Tool assembly source=%s tools=%s", tooling_source, len(active_tools_schema))
     payload, ollama_history = _build_main_model_payload(
         history_buffer=history_buffer,
         model_to_use=model_to_use,
         allow_tools=allow_tools,
+        session_context=session_context,
+        turn_context=turn_context,
+        tools_schema_override=active_tools_schema,
     )
+    request_diagnostics = {
+        "epoch": current_prompt_epoch(),
+        "model": payload.get("model"),
+        "message_count": len(payload.get("messages") or []),
+        "stable_prefix_hash": stable_hash((payload.get("messages") or [{}])[0]),
+        "tool_schema_hash": stable_hash(payload.get("tools") or []),
+        "request_shape_hash": prompt_request_shape_hash(payload),
+    }
+    stable_messages = copy.deepcopy(payload.get("messages", [])[:1])
     for loop_count in range(TOOL_LOOP):
-        payload["messages"] = [{"role": "system", "content": get_stable_system_prompt()}] + ollama_history
+        # Reuse the frozen prefix and copy only the changing conversation
+        # tail for each request. This keeps tool-loop assembly deterministic.
+        payload["messages"] = stable_messages + copy.deepcopy(ollama_history)
  
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
@@ -1041,6 +1140,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                     _log_main_model_perf(res, request_wall_seconds)
 
             msg = _extract_response_message(res)
+            logging.debug("ENGINE: Response diagnostics %s", format_cache_diagnostics(request_diagnostics, res))
             raw_content = message_content_to_text(msg.get("content"))
             content_thoughts, cleaned_msg_content = _extract_thinking_blocks(raw_content)
             had_progress_markup = bool(
@@ -1074,7 +1174,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                     function = tc.get("function") or {}
                     fn = function.get("name")
                     args = _parse_tool_arguments(function.get("arguments", {}))
-                    if not fn or fn not in AVAILABLE_TOOLS or args is None:
+                    if not fn or fn not in active_tools or args is None:
                         logging.error(
                             "❌ ENGINE: Refusing malformed or unknown streamed tool call: name=%r args=%r",
                             fn,
@@ -1101,7 +1201,7 @@ async def emery_engine(history_buffer, model_to_use=MODEL_ID, allow_tools=True, 
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
-                    result = await _execute_tool_call(fn, args)
+                    result = await _execute_tool_call(fn, args, available_tools=active_tools)
                     
                     tool_response = {
                         "role": "tool",
