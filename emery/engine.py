@@ -90,6 +90,11 @@ _REASONING_SUMMARY_TIMEOUT_SECONDS = 60.0
 _REASONING_SUMMARY_MAX_TOKENS = 4096
 _REASONING_SUMMARY_MAX_WORDS = 300
 _LIVE_REASONING_INTERVAL_SECONDS = 10.0
+_FORCED_TEXT_COMPLETION_PROMPT = (
+    "The tool-call budget or tool loop has been reached. Do not call any tools. "
+    "Answer the user's original request now using the information already gathered. "
+    "If something is incomplete, state that plainly. Return only the final user-facing answer."
+)
 
 
 def _clean_reasoning_summary(text: str) -> str:
@@ -1528,11 +1533,20 @@ async def emery_engine(
     web_fetches_used = 0
     seen_web_searches: set[str] = set()
     seen_web_fetches: set[str] = set()
-    while loop_count < TOOL_LOOP + steering_extensions:
+    forced_text_only = False
+    forced_text_attempts = 0
+    while loop_count < TOOL_LOOP + steering_extensions or forced_text_only:
         consumed_steers = _consume_steering_messages(steering_state, ollama_history)
         if consumed_steers:
             logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
         payload["messages"] = stable_messages + copy.deepcopy(ollama_history)
+        if forced_text_only:
+            payload.pop("tools", None)
+            payload.pop("reasoning_control", None)
+            payload["messages"].append({
+                "role": "system",
+                "content": _FORCED_TEXT_COMPLETION_PROMPT,
+            })
         if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
             payload["reasoning_control"] = True
  
@@ -1611,7 +1625,7 @@ async def emery_engine(
                         _format_thinking_turn(loop_count, "Summary", reasoning_summary)
                     )
 
-            if allow_tools and msg.get("tool_calls"):
+            if allow_tools and not forced_text_only and msg.get("tool_calls"):
                 if not had_progress_markup:
                     preamble = _sanitize_model_preamble(cleaned_msg_content)
                     if preamble:
@@ -1659,6 +1673,7 @@ async def emery_engine(
                         result = {"success": False, "error": budget_error}
                         tool_started_at = time.perf_counter()
                         friendly_name = fn
+                        forced_text_only = True
                     else:
                         tool_calls_used += 1
                         if fn == "web_search":
@@ -1703,7 +1718,7 @@ async def emery_engine(
                 if tool_calls_used >= max(0, int(MAX_TOOL_CALLS_PER_TURN)):
                     # Give the model one final text-only completion after the
                     # budget is reached, rather than allowing more requests.
-                    payload.pop("tools", None)
+                    forced_text_only = True
                 if steering_state is not None and steering_state.pending_messages and loop_count + 1 >= TOOL_LOOP:
                     steering_extensions = min(steering_extensions + 1, steering_state.max_pending)
                 loop_count += 1
@@ -1722,6 +1737,13 @@ async def emery_engine(
             content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
             content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
 
+            if forced_text_only and not content:
+                forced_text_attempts += 1
+                if forced_text_attempts < 2:
+                    loop_count += 1
+                    continue
+                logging.error("❌ ENGINE: Forced text-only completion returned no content.")
+
             thinking_char_count = sum(len(entry) for entry in thinking_timeline if entry)
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))
 
@@ -1739,4 +1761,5 @@ async def emery_engine(
             logging.error(f"❌ ENGINE: Crash — {e}", exc_info=True)
             return "EMERYCHAT engine failure.", False
             
-    return "Timeout.", False
+    logging.error("❌ ENGINE: Tool loop ended without a final response.")
+    return "I’m sorry, but I couldn’t complete the request.", False
