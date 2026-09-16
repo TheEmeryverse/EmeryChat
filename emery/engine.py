@@ -78,6 +78,53 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     return f"Turn {loop_count + 1}\n{phase}\n\n{thought}"
 
 
+_REASONING_SUMMARY_TIMEOUT_SECONDS = 12.0
+_REASONING_SUMMARY_MAX_TOKENS = 160
+
+
+async def _summarize_reasoning_block(reasoning: str, *, loop_count: int) -> str:
+    """Convert a completed internal reasoning block into safe, high-level text.
+
+    The main model's reasoning is never used as a fallback here. If the fast
+    model is unavailable, the user still gets the tool timeline without a raw
+    chain-of-thought leak.
+    """
+    reasoning = _strip_id_prefix(reasoning).strip()
+    if not reasoning:
+        return ""
+
+    prompt = (
+        "Rewrite the internal reasoning below as a concise, user-visible high-level rationale. "
+        "Do not reproduce hidden chain-of-thought, private deliberation, or step-by-step reasoning. "
+        "Mention only the relevant goal, decision, or purpose of the next action. "
+        "Return one or two plain-English sentences, with no heading or preamble.\n\n"
+        f"Internal reasoning from model turn {loop_count + 1}:\n{reasoning}"
+    )
+    system_prompt = (
+        "You summarize internal model reasoning for display to an end user. "
+        "Output only a brief high-level rationale; never reveal chain-of-thought."
+    )
+    try:
+        summary = await asyncio.wait_for(
+            query_fast_model(
+                prompt,
+                system_prompt=system_prompt,
+                max_tokens=_REASONING_SUMMARY_MAX_TOKENS,
+                temperature=0.2,
+                enable_thinking=False,
+            ),
+            timeout=_REASONING_SUMMARY_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logging.warning("⚠️ COPROCESSOR: Reasoning summary unavailable: %s", exc)
+        return ""
+
+    summary = _sanitize_model_preamble(summary)
+    if not summary:
+        logging.warning("⚠️ COPROCESSOR: Reasoning summary was empty for model turn %s.", loop_count + 1)
+    return summary
+
+
 def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
 
@@ -1165,11 +1212,22 @@ async def emery_engine(
             reasoning = message_content_to_text(
                 msg.get("reasoning_content") or msg.get("thinking") or msg.get("reasoning")
             )
+            turn_reasoning_parts = []
             if reasoning:
                 reasoning = _strip_id_prefix(reasoning)
-                thinking_timeline.append(_format_thinking_turn(loop_count, "Reasoning", reasoning))
+                turn_reasoning_parts.append(reasoning)
             for thought in content_thoughts:
-                thinking_timeline.append(_format_thinking_turn(loop_count, "Inline thought", thought))
+                turn_reasoning_parts.append(_strip_id_prefix(thought))
+
+            if turn_reasoning_parts:
+                reasoning_summary = await _summarize_reasoning_block(
+                    "\n\n".join(part for part in turn_reasoning_parts if part),
+                    loop_count=loop_count,
+                )
+                if reasoning_summary:
+                    thinking_timeline.append(
+                        _format_thinking_turn(loop_count, "Summary", reasoning_summary)
+                    )
 
             if allow_tools and msg.get("tool_calls"):
                 if not had_progress_markup:
