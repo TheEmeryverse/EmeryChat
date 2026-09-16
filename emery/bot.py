@@ -689,6 +689,14 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         if clean_response:
             sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+        elif not voice_sent_via_tool:
+            logging.error("❌ TELEGRAM: Model returned no final response after reasoning budget enforcement.")
+            sent_msgs = await send_model_text_message_as_reply(
+                chat_id,
+                "I reached the reasoning limit before producing a final answer. Please resend your request.",
+                reply_to_message_id=reply_target_id,
+                message_thread_id=globals.CURRENT_THREAD_ID.get(),
+            )
 
     # Save the assistant text to history
     assistant_entry = {

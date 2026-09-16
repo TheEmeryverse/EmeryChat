@@ -14,6 +14,9 @@ from emery.config import (
     MODEL_ID,
     MAIN_MODEL_CONTEXT_TOKENS,
     MAIN_MODEL_REASONING_EFFORT,
+    MAIN_MODEL_MAX_TOKENS,
+    MAIN_MODEL_REASONING_BUDGET,
+    MAIN_MODEL_REASONING_BUDGET_MESSAGE,
     CONTEXT_COMPACTION_THRESHOLD,
     MODEL_CHARS_PER_TOKEN,
     TOOL_LOOP,
@@ -898,7 +901,7 @@ def _build_main_model_payload(
     *,
     history_buffer,
     model_to_use=MODEL_ID,
-    max_tokens: int = 8192,
+    max_tokens: int = None,
     temperature: float = 0.8,
     top_p: float = 0.95,
     top_k: int = 20,
@@ -909,6 +912,8 @@ def _build_main_model_payload(
     prompt_epoch: int | None = None,
     tools_schema_override=None,
 ) -> tuple[dict, list[dict]]:
+    if max_tokens is None:
+        max_tokens = MAIN_MODEL_MAX_TOKENS
     reasoning_effort = MAIN_MODEL_REASONING_EFFORT if THINK else "none"
     resolved_schema = tools_schema if tools_schema_override is None else tools_schema_override
     prompt_state = get_stable_prompt_state(
@@ -945,6 +950,8 @@ def _build_main_model_payload(
         "top_p": top_p,
         "top_k": top_k,
         "reasoning_effort": reasoning_effort,
+        "reasoning_budget_tokens": MAIN_MODEL_REASONING_BUDGET if THINK else 0,
+        "reasoning_budget_message": MAIN_MODEL_REASONING_BUDGET_MESSAGE,
     }
 
     if allow_tools and resolved_schema:

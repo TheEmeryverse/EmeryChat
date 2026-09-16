@@ -362,6 +362,12 @@ MAIN_MODEL_URL = os.getenv("MAIN_MODEL_URL") or os.getenv("OLLAMA_URL", "http://
 OPEN_WEBUI_KEY = os.getenv("OPEN_WEBUI_KEY", "blank")
 THINK = _to_bool(os.getenv("ENABLE_THINKING") or os.getenv("THINK"), True)
 MAIN_MODEL_REASONING_EFFORT = os.getenv("MAIN_MODEL_REASONING_EFFORT", "medium").strip().lower()
+MAIN_MODEL_MAX_TOKENS = _to_int(os.getenv("MAIN_MODEL_MAX_TOKENS"), 32768)
+MAIN_MODEL_REASONING_BUDGET = _to_int(os.getenv("MAIN_MODEL_REASONING_BUDGET"), 16384)
+MAIN_MODEL_REASONING_BUDGET_MESSAGE = os.getenv(
+    "MAIN_MODEL_REASONING_BUDGET_MESSAGE",
+    "The reasoning budget is exhausted. Stop thinking and provide the final answer now.",
+).strip()
 MODEL_ID = os.getenv("MODEL_ID", "local")
 MAIN_MODEL_CONTEXT_TOKENS = _to_int(os.getenv("MAIN_MODEL_CONTEXT_TOKENS"), 131072)
 ENABLE_LIVE_PROGRESS = _to_bool(os.getenv("ENABLE_LIVE_PROGRESS"), True)
