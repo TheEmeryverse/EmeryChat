@@ -82,6 +82,16 @@ def _format_tool_timeline_entry(fn: str) -> str:
     return f"{MODEL_NAME} used {fn}"
 
 
+# These functions are model-facing plumbing for dynamic tool discovery. They
+# should not appear as if Emery is performing a user-requested action.
+_INTERNAL_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+
+
+def _append_tool_timeline_entry(timeline: list[str], fn: str) -> None:
+    if fn not in _INTERNAL_TOOL_NAMES:
+        timeline.append(_format_tool_timeline_entry(fn))
+
+
 class _StreamingModelError(RuntimeError):
     def __init__(self, message: str, *, events_seen: bool = False):
         super().__init__(message)
@@ -902,7 +912,7 @@ def _build_main_model_payload(
 
 
 async def _send_tool_status(fn: str, args: dict, on_event=None) -> None:
-    if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif"):
+    if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif") or fn in _INTERNAL_TOOL_NAMES:
         return
 
     status_msg = await _format_tool_status_message(fn, args)
@@ -1197,7 +1207,7 @@ async def emery_engine(
                 for tc, fn, args in parsed_tool_calls:
                     
                     await _send_tool_status(fn, args, on_event=on_event)
-                    thinking_timeline.append(_format_tool_timeline_entry(fn))
+                    _append_tool_timeline_entry(thinking_timeline, fn)
                     if fn == "speak_message": 
                         voice_sent_via_tool = True
                     
