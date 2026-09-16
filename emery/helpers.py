@@ -11,17 +11,14 @@ from PIL import Image
 
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
-    VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD, USER_NAME,
+    VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD,
     FAST_MODEL_CONTEXT_TOKENS, CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN,
-    USER_LOCATION, USER_TIMEZONE, USER_BIRTHDAY, USER_FAMILY,
-    USER_PROFESSION, STT_URL, ENABLE_SCHEDULER, USER_RELATIONSHIP, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
-    OLLAMA_VISION_NUM_CTX, ENABLE_REOLINK, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
+    USER_TIMEZONE, STT_URL, ENABLE_SCHEDULER, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
+    OLLAMA_VISION_NUM_CTX, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
     ENABLE_YOUTUBE_TRANSCRIPT,
-    get_user_profile
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
-from emery.scratchpad import get_scratchpad_snapshot
 from emery.session_context import (
     SessionContext,
     TurnContext,
@@ -544,21 +541,14 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
     if user_id is None:
         user_id = globals.current_user_id.get()
         
-    profile = get_user_profile(user_id)
-    user_name = profile["name"]
-    user_birthday = profile["birthday"]
-    user_profession = profile["profession"]
-    user_family = profile["family"]
-
     now = datetime.now(USER_TIMEZONE)
     now_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
     today_date = now.date()
     
-    active_bday = get_active_birthday_info(user_birthday, today_date, user_name)
     active_hols = get_active_holiday_info(today_date)
     notifications = ""
-    if active_bday or active_hols:
-        notifications = f"\n\n# Dynamic Event Alerts{active_bday}{active_hols}"
+    if active_hols:
+        notifications = f"\n\n# Dynamic Event Alerts{active_hols}"
         
     memory_section = ""
     memory_instruction = ""
@@ -569,7 +559,7 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
 
         if recalled:
             memory_section = "\n\n# Long-Term Persistent Memory"
-            memory_section += f"\n## Scoped Memories for {user_name}:\n{recalled}"
+            memory_section += f"\n{recalled}"
         memory_instruction = (
             "\n- You have a persistent memory tool: `save_user_memory`."
             "\n- Use `save_user_memory` ONLY for information that is likely to matter again in a future conversation after chat history is cleared."
@@ -585,7 +575,11 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
         "\n- Use `read_scratchpad` when earlier working context may be outside the active conversation, and use `clear_scratchpad` only when the user explicitly asks."
         "\n- Do not save every search result, private secrets, or durable personal facts to the scratchpad; use long-term memory only for durable user facts."
     )
-    scratchpad_section = get_scratchpad_snapshot()
+    scratchpad_reminder = ""
+    from emery.scratchpad import get_recent_scratchpad_reminder
+    recent_scratchpad_reminder = get_recent_scratchpad_reminder()
+    if recent_scratchpad_reminder:
+        scratchpad_reminder = f"\n\n# Working Context Reminder\n- {recent_scratchpad_reminder}"
 
     scheduler_instruction = ""
     if str(ENABLE_SCHEDULER).lower() == "true":
@@ -657,22 +651,6 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
             "\n- If no default home is saved yet and the user asks for weather without a location, ask them for a place or let them know they can say something like 'Set my home to Houston, TX.'"
         )
 
-    camera_log_hint = ""
-    if ENABLE_REOLINK:
-        try:
-            from emery.memory import get_camera_log_summary
-            summary = get_camera_log_summary()
-            if summary:
-                camera_log_hint = f"\n\n# Security Camera Activity\n- {summary}. Use the `get_camera_security_log` tool to review specific events."
-        except Exception as e:
-            logging.error(f"❌ SYSTEM PROMPT: Failed to generate camera log summary hint: {e}", exc_info=True)
-
-    # Build relationship line for secondary user context
-    from emery.config import SECONDARY_USER_ID, USER_2_NAME
-    relationship_line = ""
-    if SECONDARY_USER_ID != 0 and USER_RELATIONSHIP:
-        relationship_line = f"\n- {USER_NAME} and {USER_2_NAME} are {USER_RELATIONSHIP}."
-
     group_privacy_instruction = ""
     chat_id = globals.TARGET_CHAT_ID.get()
     if chat_id and chat_id < 0:
@@ -686,14 +664,8 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
     prompt = f"""# Dynamic Runtime Context
 This context is current for this request. It is not the user's newest message.
 
-# Context & Profile
-- Location: {USER_LOCATION}
 - Current date and time: {now_str}
-- Timezone: {USER_TIMEZONE}
-- User's name: {user_name}
-- User's birthday: {user_birthday}
-- User's family: {user_family}
-- User's profession: {user_profession}{relationship_line}{group_privacy_instruction}{notifications}{memory_section}{scratchpad_instruction}{scratchpad_section}{camera_log_hint}"""
+{group_privacy_instruction}{notifications}{memory_section}{scratchpad_instruction}{scratchpad_reminder}"""
 
     return prompt
 
@@ -702,8 +674,7 @@ async def get_current_system_prompt(user_query="", user_id=None):
     """Compatibility wrapper for callers that still need one runtime prompt.
 
     New request paths should bind ``SessionContext`` and ``TurnContext`` and
-    keep their history entries free of runtime prompt text.  This legacy
-    wrapper intentionally retains the old output shape for extensions that
-    have not migrated yet.
+    keep their history entries free of runtime prompt text.  This compatibility
+    wrapper keeps the legacy entry point while using the reduced runtime-data set.
     """
     return await _build_legacy_dynamic_system_prompt(user_query, user_id)

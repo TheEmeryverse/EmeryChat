@@ -11,7 +11,6 @@ from typing import Any
 
 from emery.config import (
     ENABLE_MEMORY,
-    ENABLE_REOLINK,
     USER_LOCATION,
     USER_RELATIONSHIP,
     USER_TIMEZONE,
@@ -124,8 +123,8 @@ def _group_privacy_prompt() -> str:
 
 def _build_session_prompt(chat_id: int | None, user_id: int | None, is_group: bool) -> str:
     """Build only data that is stable for the session and safe for its scope."""
-    # A group session is intentionally generic.  Requester-specific profile
-    # data belongs in a private turn only and is never placed in this cache.
+    # A group session is intentionally generic.  Private profile data and
+    # timezone belong in the cache-friendly private session context.
     if is_group:
         return "# Session Context\n" + _group_privacy_prompt()
 
@@ -225,53 +224,27 @@ async def get_turn_context(
         "# Dynamic Runtime Context",
         "This context is current for this request. It is not the user's newest message.",
         f"- Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}",
-        f"- Timezone: {USER_TIMEZONE}",
     ]
 
-    # Group sessions deliberately omit profile, birthday, and memory details.
-    # This avoids turning a per-request context into an accidental disclosure
-    # channel while retaining the old rich context behavior for private chats.
+    # Profile details and timezone live in the cache-friendly session context.
+    # Group sessions deliberately omit requester-specific memory details.
+    from emery.helpers import get_active_holiday_info
+
+    holiday_info = get_active_holiday_info(now.date())
+    if holiday_info:
+        sections.append("\n# Dynamic Event Alerts" + holiday_info)
+
     if not session.is_group:
-        profile = get_user_profile(user_id)
-        from emery.helpers import get_active_birthday_info, get_active_holiday_info
-
-        sections.extend([
-            f"- User's name: {profile['name']}",
-            f"- User's birthday: {profile['birthday']}",
-            f"- User's family: {profile['family']}",
-            f"- User's profession: {profile['profession']}",
-        ])
-        event_sections = [
-            get_active_birthday_info(profile["birthday"], now.date(), profile["name"]),
-            get_active_holiday_info(now.date()),
-        ]
-        if any(event_sections):
-            sections.append("\n# Dynamic Event Alerts" + "".join(event_sections))
-
         memories = await _load_relevant_memories(str(user_query or ""), user_id)
         if memories:
-            sections.append(f"\n# Long-Term Persistent Memory\n## Scoped Memories for {profile['name']}:\n{memories}")
+            sections.append(f"\n# Long-Term Persistent Memory\n{memories}")
 
-        if ENABLE_REOLINK:
-            try:
-                from emery.memory import get_camera_log_summary
-                summary = get_camera_log_summary()
-                if summary:
-                    sections.append(
-                        f"\n\n# Security Camera Activity\n- {summary}. "
-                        "Use the `get_camera_security_log` tool to review specific events."
-                    )
-            except Exception:
-                # Camera hints are optional context and must not break a turn.
-                pass
-
-    # Scratchpads are scoped to the chat/thread rather than the requester, so
-    # a shared group scratchpad remains available without entering the session
-    # cache or carrying any user profile data.
-    from emery.scratchpad import get_scratchpad_snapshot
-    scratchpad = get_scratchpad_snapshot()
-    if scratchpad:
-        sections.append(scratchpad)
+    # Scratchpad contents are intentionally tool-only.  A recent-use reminder
+    # preserves discoverability without copying working notes into every prompt.
+    from emery.scratchpad import get_recent_scratchpad_reminder
+    scratchpad_reminder = get_recent_scratchpad_reminder()
+    if scratchpad_reminder:
+        sections.append(f"\n# Working Context Reminder\n- {scratchpad_reminder}")
 
     return TurnContext(
         session=session,
