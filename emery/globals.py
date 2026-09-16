@@ -17,6 +17,7 @@ CURRENT_THREAD_ID = contextvars.ContextVar("CURRENT_THREAD_ID", default=None)
 # and compatible with entries written by older Emery versions.
 CURRENT_SESSION_CONTEXT = contextvars.ContextVar("CURRENT_SESSION_CONTEXT", default=None)
 CURRENT_TURN_CONTEXT = contextvars.ContextVar("CURRENT_TURN_CONTEXT", default=None)
+CURRENT_MEDIA_TURN = contextvars.ContextVar("CURRENT_MEDIA_TURN", default=None)
 
 # Immutable SessionContext instances are cached by emery.session_context.  The
 # cache is process-local and keyed by chat/thread/variant; group-chat keys do

@@ -16,6 +16,7 @@ from emery.config import (
     USER_TIMEZONE, STT_URL, ENABLE_SCHEDULER, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
     OLLAMA_VISION_NUM_CTX, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
     ENABLE_YOUTUBE_TRANSCRIPT,
+    ENABLE_WEB_SCRAPING,
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
@@ -516,6 +517,13 @@ def _get_compact_stable_system_prompt() -> str:
     if ENABLE_TELEGRAM_RICH_MESSAGES:
         policies.append(
             "- Telegram formatting: use clean Markdown when helpful; do not emit rich-message JSON or invented media blocks."
+        )
+    if ENABLE_WEB_SCRAPING:
+        policies.append(
+            "- Research images: `fetch_web_content` may return image candidates, but candidates are metadata only and must not be sent automatically. "
+            "Use `use_research_image` only when the user asks for a visual or when the subject is inherently visual and one image materially improves comprehension. "
+            "Prefer zero images for ordinary factual research, prefer one when useful, and never exceed the tool's enforced two-image per-turn maximum. "
+            "Do not perform extra searches merely to decorate an answer."
         )
 
     return f"""# Identity

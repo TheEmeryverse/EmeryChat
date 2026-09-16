@@ -11,7 +11,7 @@ from telegram.ext import ContextTypes
 from telegram.error import TimedOut
 
 from emery.config import (
-    MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, USER_BIRTHDAY,
+    MODEL_ID, MODEL_NAME, USER_TIMEZONE, VISION_MODEL_ID, MAIN_MODEL_VISION, USER_BIRTHDAY,
     ENABLE_HEARTBEAT, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SILENCE_THRESHOLD_SECONDS,
     HEARTBEAT_SILENT_RETRY_SECONDS, HEARTBEAT_PROACTIVE_COOLDOWN_SECONDS,
     HEARTBEAT_DAILY_PROACTIVE_LIMIT, HEARTBEAT_SLEEP_START, HEARTBEAT_SLEEP_END,
@@ -451,12 +451,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = update.message.caption or ""
         
         await update.message.reply_chat_action("typing")
-        description = await get_image_description(b64, caption)
-        
+        image_artifact_id = None
+        if MAIN_MODEL_VISION:
+            from emery.media import store_artifact
+            image_artifact_id = store_artifact(
+                bytes(compressed_bytes),
+                mime_type="image/jpeg",
+                label="user image",
+            )
+        description = ""
+        if not MAIN_MODEL_VISION:
+            description = await get_image_description(b64, caption)
+
         content_text = "sent an image."
         if caption:
             content_text += f" Caption: {caption}"
-        content_text += f"\nImage Description: {description}"
+        if description:
+            content_text += f"\nImage Description: {description}"
     elif update.message.sticker:
         sticker = update.message.sticker
         emoji = sticker.emoji or ""
@@ -537,6 +548,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "message_thread_id": update.message.message_thread_id if update.message else None,
         "timestamp": datetime.now(USER_TIMEZONE)
     }
+    if update.message.photo and MAIN_MODEL_VISION:
+        user_history_entry["media_attachments"] = [{
+            "artifact_id": image_artifact_id,
+            "kind": "user_image",
+        }]
     globals.chat_histories[chat_id].append(user_history_entry)
     
     # Check if this chat is a group chat
@@ -621,8 +637,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from emery.config import CHAT_DEBOUNCE_DELAY
     globals.chat_debounce_tasks[chat_id] = asyncio.create_task(debounce_worker(CHAT_DEBOUNCE_DELAY))
 
+async def _deliver_pending_media(chat_id: int, reply_to_message_id: int | None = None) -> list:
+    """Deliver model-approved media after the final text has been produced."""
+    from emery.media import get_artifact, take_outbound_media
+
+    pending = take_outbound_media()
+    if not pending:
+        return []
+
+    thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
+    sent = []
+    for index, item in enumerate(pending):
+        artifact = get_artifact(item.get("artifact_id"))
+        if not artifact:
+            logging.warning("⚠️ TELEGRAM: queued media artifact expired before delivery.")
+            continue
+        reply_params = None
+        if index == 0 and reply_to_message_id:
+            reply_params = ReplyParameters(
+                message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
+            )
+        try:
+            sent_msg = await globals.application_bot.send_photo(
+                chat_id=chat_id,
+                photo=artifact["bytes"],
+                caption=str(item.get("caption") or "").strip()[:1024] or None,
+                reply_parameters=reply_params,
+                message_thread_id=thread_id,
+            )
+            if sent_msg:
+                sent.append(sent_msg)
+        except Exception as exc:
+            logging.error("❌ TELEGRAM: Failed to deliver queued research image: %s", exc, exc_info=True)
+    return sent
+
+
 async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, model_to_use: str, is_input_voice: bool) -> None:
     chat_id = update.effective_chat.id
+    globals.chat_histories.setdefault(chat_id, deque())
+    from emery.media import begin_media_turn, clear_media_turn
+    begin_media_turn()
     
     # Determine final reply target from globals
     reply_target_id = globals.chat_reply_targets.pop(chat_id, None)
@@ -835,12 +890,14 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
         logging.debug("🤫 HANDSHAKE: Suppressed text reply (silent check)")
+        await _deliver_pending_media(chat_id, reply_target_id)
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
             "message_thread_id": globals.CURRENT_THREAD_ID.get(),
             "timestamp": datetime.now(USER_TIMEZONE)
         })
+        clear_media_turn()
         return
 
     # Display the thinking block if one exists
@@ -888,6 +945,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 message_thread_id=globals.CURRENT_THREAD_ID.get(),
             )
 
+    media_msgs = await _deliver_pending_media(chat_id, reply_target_id)
+
     # Save the assistant text to history
     assistant_entry = {
         "role": "assistant", 
@@ -898,7 +957,10 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     if sent_msgs:
         assistant_entry["message_ids"] = [m.message_id for m in sent_msgs]
         assistant_entry["message_id"] = sent_msgs[-1].message_id
+    if media_msgs:
+        assistant_entry["media_message_ids"] = [m.message_id for m in media_msgs if getattr(m, "message_id", None)]
     globals.chat_histories[chat_id].append(assistant_entry)
+    clear_media_turn()
 
     # Trigger background topic summarization
     from emery.memory import summarize_topics_background

@@ -306,6 +306,7 @@ Most other behavior is natural-language driven through the model and enabled too
 
 - Text chat
 - Photo input with vision description
+- Native photo input for the multimodal main model when `MAIN_MODEL_VISION=true`
 - Voice-message transcription
 - Sticker/GIF logging and sending
 - Message reactions
@@ -356,6 +357,7 @@ Routing behavior:
 - `/debate status`, `/debate cancel`, `/debate list`, `/debate open <id>`, and `/debate clear` manage active and archived debates
 - Web search via SearXNG
 - Web content extraction and summarization
+- Bounded research-image discovery, visual inspection, and Telegram delivery
 - YouTube transcript extraction when `ENABLE_YOUTUBE_TRANSCRIPT=true`; expert mode uses transcripts for YouTube sources and does not count transcript failures as gathered sources
 - RSS headline aggregation
 - NASA APOD
@@ -446,6 +448,8 @@ The full env template lives in [example.env](/Users/hudson/Documents/GitHub/Emer
 | `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
 | `MODEL_ID` | Primary model name |
 | `MAIN_MODEL_URL` | Main model chat endpoint |
+| `MAIN_MODEL_VISION` | `false` | Pass the most recent user photo natively to the main model |
+| `MAIN_MODEL_IMAGE_FORMAT` | `openai` | Main-model image format: `openai` data URLs or `ollama` image arrays |
 
 Telegram access is fail-closed by default. Add your Telegram user ID to `config/users.json` through the setup wizard, or explicitly set `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS=true` if you want anyone who can message the bot to use it.
 
@@ -480,6 +484,12 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `MAX_TOOL_CALLS_PER_TURN` | `8` | Maximum total tool calls in one normal chat turn |
 | `MAX_WEB_SEARCHES_PER_TURN` | `2` | Maximum public web searches in one normal chat turn |
 | `MAX_WEB_FETCHES_PER_TURN` | `4` | Maximum webpage fetches in one normal chat turn |
+| `MAX_RESEARCH_IMAGES_PER_TURN` | `2` | Hard maximum of research images sent to Telegram in one turn; Emery normally prefers one |
+| `PREFERRED_RESEARCH_IMAGES_PER_TURN` | `1` | Guidance target for useful visual answers; zero is still allowed |
+| `MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN` | `2` | Maximum selected research images attached to the main model in one turn |
+| `RESEARCH_IMAGE_CACHE_TTL_SECONDS` | `3600` | Lifetime of temporary image artifacts and references |
+| `RESEARCH_IMAGE_MAX_BYTES` | `8000000` | Maximum downloaded research-image size |
+| `RESEARCH_IMAGE_MAX_DIMENSION` | `1600` | Maximum dimension after research-image resizing |
 
 Chat history is append-only during runtime to preserve llama.cpp prompt-cache checkpoint reuse. This applies to normal chat turns, reaction-triggered evaluations, heartbeat evaluations, and non-routine scheduled jobs. Routine jobs are still executed in isolated one-shot contexts, but their delivered results may be compacted and deferred before they are added back to chat history so closely spaced routines do not churn the prompt cache. After the last nearby routine has finished, Emery can issue a tiny discarded warmup completion against the full chat context so the next human query does not pay the full prefill cost. Use `/clear` only when you intentionally want to reset the in-memory prompt context for that chat.
 

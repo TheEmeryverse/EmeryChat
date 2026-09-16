@@ -43,6 +43,16 @@ from emery.docling import (
 )
 import emery.globals as globals
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
+from emery.media import (
+    can_attach_model_image,
+    can_use_research_image,
+    download_research_image,
+    extract_image_candidates,
+    get_research_candidate,
+    queue_model_attachment,
+    queue_outbound_media,
+    register_research_candidates,
+)
 from emery.logging_utils import safe_preview
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -1239,6 +1249,21 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                 }
 
             content_type = response.headers.get("content-type", "")
+            normalized_content_type = content_type.split(";", 1)[0].strip().lower()
+            if normalized_content_type.startswith("image/"):
+                image_candidates = register_research_candidates([{
+                    "url": current_url,
+                    "alt": "Image returned by the fetched URL",
+                    "caption": "",
+                    "source_url": current_url,
+                }])
+                return {
+                    "success": True,
+                    "title": current_url.rsplit("/", 1)[-1] or "Image",
+                    "url": current_url,
+                    "content": "[Image URL fetched; use the returned image candidate if visual inspection or delivery is useful.]",
+                    "images": image_candidates,
+                }
             resolved_document_type = detect_supported_document_type(
                 content_type=content_type,
                 url=current_url,
@@ -1276,6 +1301,7 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                         "title": extraction.get("source_name") or "Document",
                         "url": current_url,
                         "content": content,
+                        "images": [],
                     }
                 error_text = "; ".join(extraction.get("errors") or []) or "Document extraction failed."
                 logging.warning(
@@ -1294,9 +1320,13 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                         f"Docling Status: {extraction.get('docling_status')}\n"
                         f"Docling Note: {error_text}"
                     ),
+                    "images": [],
                 }
 
             soup = BeautifulSoup(response.text, 'html.parser')
+            image_candidates = register_research_candidates(
+                extract_image_candidates(soup, current_url)
+            )
             for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'form', 'noscript', 'svg', 'iframe']):
                 element.decompose()
 
@@ -1314,7 +1344,8 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
             if len(cleaned_text) < 200:
                 return {
                     "success": False,
-                    "error": "The page yielded very little text. It may require JavaScript to render or be a login wall."
+                    "error": "The page yielded very little text. It may require JavaScript to render or be a login wall.",
+                    "images": image_candidates,
                 }
 
             if summarize_long and len(cleaned_text) > 1500:
@@ -1352,10 +1383,77 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                 "success": True,
                 "title": title,
                 "url": current_url,
-                "content": cleaned_text
+                "content": cleaned_text,
+                "images": image_candidates,
             }
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
+
+async def use_research_image(
+    image_id: str,
+    action: str = "inspect",
+    question: str = "",
+    caption: str = "",
+) -> dict:
+    """Inspect, attach, or queue one image discovered by fetch_web_content."""
+    candidate = get_research_candidate(image_id)
+    if not candidate:
+        return {"success": False, "error": "Unknown or expired research image ID. Fetch the source page first."}
+
+    action = str(action or "inspect").strip().lower()
+    if action not in {"inspect", "attach", "send", "inspect_and_send"}:
+        return {"success": False, "error": "Action must be inspect, attach, send, or inspect_and_send."}
+    if action in {"send", "inspect_and_send"} and not can_use_research_image():
+        return {
+            "success": False,
+            "error": "The research-image budget is exhausted. Use no more than one image normally and two images maximum per turn.",
+        }
+    if action == "attach" and not can_attach_model_image():
+        return {"success": False, "error": "The model-image attachment budget is exhausted for this turn."}
+
+    try:
+        artifact = await download_research_image(candidate)
+    except Exception as exc:
+        logging.warning("⚠️ RESEARCH IMAGE: acquisition failed for %s: %s", image_id, exc)
+        return {"success": False, "error": f"Could not safely acquire research image: {exc}"}
+
+    result = {
+        "success": True,
+        "image_id": image_id,
+        "source_url": candidate.get("source_url"),
+        "image_url": artifact.get("resolved_url"),
+        "label": candidate.get("alt") or candidate.get("caption") or "research image",
+    }
+
+    if action in {"inspect", "inspect_and_send"}:
+        encoded = base64.b64encode(artifact["bytes"]).decode("ascii")
+        inspection_question = str(question or "What is shown in this image? Describe only details relevant to the user's request.")
+        result["vision_description"] = await get_image_description(encoded, inspection_question)
+
+    if action == "attach":
+        queue_model_attachment()
+        result["_model_attachment"] = {
+            "artifact_id": artifact.get("id"),
+            "label": result["label"],
+        }
+        result["note"] = "The image was attached to the next main-model request; it was not sent to the user."
+
+    if action in {"send", "inspect_and_send"}:
+        source = candidate.get("source_url") or ""
+        default_caption = result["label"]
+        source_caption = f"Source: {source}" if source else ""
+        final_caption = str(caption or default_caption).strip()
+        if source_caption and source_caption not in final_caption:
+            final_caption = f"{final_caption}\n{source_caption}".strip()
+        queue_outbound_media({
+            "artifact_id": artifact.get("id"),
+            "caption": final_caption[:1024],
+            "source_url": source,
+        })
+        result["note"] = "The image was queued for delivery with the final response."
+
+    return result
+
 
 async def delegate_to_coprocessor(task_prompt: str, content_to_process: str) -> str:
     """

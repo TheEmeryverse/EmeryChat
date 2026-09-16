@@ -14,7 +14,7 @@ from emery.tools import (
     generate_image,
     speak_message,
     get_system_stats,
-    fetch_web_content, get_youtube_transcript,
+    fetch_web_content, use_research_image, get_youtube_transcript,
     search_fred_series, get_fred_series_observations,
     search_imf_indicators, get_imf_datamapper_series,
     get_stock_snapshot, get_stock_price_history,
@@ -378,13 +378,31 @@ if is_enabled("ENABLE_SYSTEM_STATS"):
 
 if is_enabled("ENABLE_WEB_SCRAPING"):
     AVAILABLE_TOOLS["fetch_web_content"] = fetch_web_content
+    AVAILABLE_TOOLS["use_research_image"] = use_research_image
     tools_schema.append({
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Fetch and extract the readable content of one specific public webpage or document URL. For ordinary questions, fetch at most one promising result after `web_search`; fetch additional pages only when the user explicitly asks for comparison or deep research. If the user gives you a URL, fetch that URL directly. Never fetch the same URL twice in one turn and do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, and extracted text, possibly truncated.",
+            "description": "Fetch and extract the readable content of one specific public webpage or document URL. For ordinary questions, fetch at most one promising result after `web_search`; fetch additional pages only when the user explicitly asks for comparison or deep research. If the user gives you a URL, fetch that URL directly. Never fetch the same URL twice in one turn and do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, extracted text, and a small set of image candidates. Image candidates are metadata only and are not downloaded or sent automatically.",
             "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "The single HTTP or HTTPS URL to read."}}, "required": ["url"]}
         }
+    })
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "use_research_image",
+            "description": "Use one image candidate returned by fetch_web_content. Images are optional: do not call this merely because a page contains an image. Use action=send or inspect_and_send only when the user requested a visual or the subject is inherently visual and the image materially improves comprehension. Prefer one image; never exceed the enforced per-turn maximum of two. Use inspect for OCR/visual verification, and attach only when the multimodal main model needs to inspect the pixels; attach does not send the image to the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_id": {"type": "string", "description": "The candidate ID returned by fetch_web_content, such as research_img_abc123."},
+                    "action": {"type": "string", "enum": ["inspect", "attach", "send", "inspect_and_send"], "description": "inspect for vision/OCR, attach to the main model, send to Telegram, or inspect then send."},
+                    "question": {"type": "string", "description": "Optional focused question for vision inspection or OCR."},
+                    "caption": {"type": "string", "description": "Optional concise Telegram caption; source attribution is added automatically."},
+                },
+                "required": ["image_id", "action"],
+            },
+        },
     })
 
 if is_enabled("ENABLE_YOUTUBE_TRANSCRIPT"):

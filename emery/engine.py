@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import copy
+import importlib
 import inspect
 import json
 import logging
@@ -29,9 +30,10 @@ from emery.config import (
     MAX_TOOL_CALLS_PER_TURN,
     MAX_WEB_SEARCHES_PER_TURN,
     MAX_WEB_FETCHES_PER_TURN,
+    MAIN_MODEL_VISION,
 )
 from emery import tool_registry
-import emery.globals as globals
+globals = importlib.import_module("emery.globals")
 from emery.helpers import (
     get_stable_system_prompt,
     message_content_to_text,
@@ -1086,7 +1088,11 @@ def _message_token_estimate(msg: dict) -> int:
     content = msg.get("content")
     if isinstance(content, list):
         content = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-    return max(1, int(len(str(content or "")) / max(MODEL_CHARS_PER_TOKEN, 1.0)) + 16)
+    image_count = len(msg.get("media_attachments") or [])
+    image_count += len(msg.get("images") or [])
+    # Image tokens are backend/model dependent. This deliberately reserves a
+    # conservative amount so compaction does not keep an oversized visual turn.
+    return max(1, int(len(str(content or "")) / max(MODEL_CHARS_PER_TOKEN, 1.0)) + 16 + image_count * 768)
 
 
 def _compact_history_for_model(history_buffer) -> list[dict]:
@@ -1109,7 +1115,18 @@ def _compact_history_for_model(history_buffer) -> list[dict]:
     while selected and selected[0].get("role") == "tool":
         selected.pop(0)
     if selected and selected[0].get("role") == "assistant" and selected[0].get("tool_calls"):
-        selected.pop(0)
+        tool_call_ids = {
+            str(call.get("id"))
+            for call in selected[0].get("tool_calls") or []
+            if isinstance(call, dict) and call.get("id")
+        }
+        paired_tool_ids = {
+            str(msg.get("tool_call_id"))
+            for msg in selected[1:]
+            if msg.get("role") == "tool" and msg.get("tool_call_id")
+        }
+        if not tool_call_ids or not tool_call_ids.intersection(paired_tool_ids):
+            selected.pop(0)
 
     omitted = len(selected) < len(history_buffer or [])
     if omitted:
@@ -1128,8 +1145,14 @@ def _compact_history_for_model(history_buffer) -> list[dict]:
 
 def _build_ollama_history(history_buffer) -> list[dict]:
     history_buffer = _compact_history_for_model(history_buffer)
+    latest_media_index = None
+    if MAIN_MODEL_VISION:
+        for index in range(len(history_buffer) - 1, -1, -1):
+            if history_buffer[index].get("media_attachments"):
+                latest_media_index = index
+                break
     ollama_history = []
-    for msg in history_buffer:
+    for index, msg in enumerate(history_buffer):
         # Never retain references into the caller's history or into prior
         # request payloads. Tool calls are particularly easy to mutate while
         # assembling a later loop.
@@ -1177,7 +1200,35 @@ def _build_ollama_history(history_buffer) -> list[dict]:
 
             if msg_details:
                 prefix = f"[{' | '.join(msg_details)}] "
-                clean_msg["content"] = prefix + content_str
+                content_str = prefix + content_str
+
+            attachments = msg.get("media_attachments") or []
+            if (
+                MAIN_MODEL_VISION
+                and msg.get("role") == "user"
+                and attachments
+                and index == latest_media_index
+            ):
+                from emery.media import artifact_to_model_part
+
+                image_parts = []
+                ollama_images = []
+                for attachment in attachments:
+                    artifact_id = attachment.get("artifact_id") if isinstance(attachment, dict) else attachment
+                    model_part = artifact_to_model_part(artifact_id)
+                    if not model_part:
+                        continue
+                    if model_part.get("type") == "ollama_image":
+                        ollama_images.append(model_part["data"])
+                    else:
+                        image_parts.append(model_part)
+
+                if image_parts:
+                    clean_msg["content"] = [{"type": "text", "text": content_str}, *image_parts]
+                else:
+                    clean_msg["content"] = content_str
+                if ollama_images:
+                    clean_msg["images"] = ollama_images
             else:
                 clean_msg["content"] = content_str
         else:
@@ -1227,9 +1278,20 @@ def _build_main_model_payload(
             for index in range(len(ollama_history) - 1, -1, -1):
                 if ollama_history[index].get("role") == "user":
                     current = ollama_history[index].get("content") or ""
-                    ollama_history[index]["content"] = (
-                        f"{current}\n\n# Turn Context\n{turn_text}" if current else f"# Turn Context\n{turn_text}"
-                    )
+                    if isinstance(current, list):
+                        text_part = next(
+                            (part for part in current if isinstance(part, dict) and part.get("type") == "text"),
+                            None,
+                        )
+                        if text_part is not None:
+                            text_part["text"] = (
+                                f"{text_part.get('text', '')}\n\n# Turn Context\n{turn_text}"
+                                if text_part.get("text") else f"# Turn Context\n{turn_text}"
+                            )
+                    else:
+                        ollama_history[index]["content"] = (
+                            f"{current}\n\n# Turn Context\n{turn_text}" if current else f"# Turn Context\n{turn_text}"
+                        )
                     break
 
     payload = {
@@ -1311,6 +1373,39 @@ async def _execute_tool_call(fn: str, args: dict, available_tools=None):
     registry = AVAILABLE_TOOLS if available_tools is None else available_tools
     tool = registry[fn]
     return await dispatch_tool_call(fn, args, tool)
+
+
+def _append_model_media_from_tool_result(result: dict, ollama_history: list[dict]) -> bool:
+    """Append a tool-selected image only to the current model request history."""
+    if not isinstance(result, dict):
+        return False
+    attachment = result.get("_model_attachment")
+    if not isinstance(attachment, dict):
+        return False
+
+    from emery.media import artifact_to_model_part
+
+    artifact_id = attachment.get("artifact_id")
+    model_part = artifact_to_model_part(artifact_id)
+    if not model_part:
+        return False
+
+    label = str(attachment.get("label") or "Selected research image").strip()
+    if model_part.get("type") == "ollama_image":
+        ollama_history.append({
+            "role": "user",
+            "content": f"[Attached research image for inspection: {label}]",
+            "images": [model_part["data"]],
+        })
+    else:
+        ollama_history.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"[Attached research image for inspection: {label}]"},
+                model_part,
+            ],
+        })
+    return True
 
 
 def _web_search_budget_key(args: dict) -> str:
@@ -1742,6 +1837,8 @@ async def emery_engine(
                         
                     history_buffer.append(tool_response)
                     ollama_history.append(tool_response)
+                    if _append_model_media_from_tool_result(result, ollama_history):
+                        logging.info("🖼️ ENGINE: Attached selected research image to the next main-model request.")
                     await _emit_engine_event(
                         on_event,
                         {
