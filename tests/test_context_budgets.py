@@ -52,6 +52,57 @@ def test_compaction_preserves_single_stable_system_prefix():
     assert any("Earlier conversation compacted" in str(message["content"]) for message in messages)
 
 
+def test_legacy_history_system_messages_fold_into_dynamic_user_context():
+    history = [
+        {"role": "system", "content": "Legacy dynamic context"},
+        {"role": "user", "content": "latest question"},
+    ]
+
+    payload, _ = engine._build_main_model_payload(
+        history_buffer=history,
+        model_to_use="local",
+        allow_tools=False,
+        stream=False,
+    )
+
+    messages = payload["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[0]["content"] == engine.get_stable_system_prompt()
+    assert "Legacy dynamic context" in messages[1]["content"]
+    assert "Earlier conversation compacted" not in messages[1]["content"]
+    assert history[0]["role"] == "system"
+    assert history[1]["content"] == "latest question"
+
+
+def test_runtime_budget_context_stays_after_stable_system_prefix():
+    class CaptureHttpClient:
+        def __init__(self):
+            self.payload = None
+
+        async def post(self, url, **kwargs):
+            self.payload = kwargs["json"]
+            response = Mock(status_code=200)
+            response.json.return_value = {
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+            return response
+
+    client = CaptureHttpClient()
+    history = [{"role": "user", "content": "latest question"}]
+
+    with patch.object(engine.globals, "http_client", client), \
+         patch.object(engine, "ENABLE_LIVE_PROGRESS", False), \
+         patch.object(engine, "TOOL_LOOP", 1):
+        result, voice_sent = __import__("asyncio").run(engine.emery_engine(history))
+
+    assert result == "ok"
+    assert voice_sent is False
+    messages = client.payload["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[0]["content"] == engine.get_stable_system_prompt()
+    assert "Tools this loop" in messages[1]["content"]
+
+
 def test_fast_web_summary_is_capped_before_request():
     response = Mock()
     response.status_code = 200

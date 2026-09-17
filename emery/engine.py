@@ -1100,6 +1100,29 @@ def _message_token_estimate(msg: dict) -> int:
     return max(1, int(len(str(content or "")) / max(MODEL_CHARS_PER_TOKEN, 1.0)) + 16 + image_count * 768)
 
 
+def _attach_history_context(messages: list[dict], context_text: str) -> None:
+    """Attach dynamic history context without adding another system turn."""
+    if not messages or not context_text:
+        return
+
+    target_index = next(
+        (index for index, msg in enumerate(messages) if msg.get("role") == "user"),
+        0,
+    )
+    target = dict(messages[target_index])
+    content = target.get("content")
+    if isinstance(content, list):
+        target["content"] = [
+            {"type": "text", "text": context_text},
+            *copy.deepcopy(content),
+        ]
+    elif content:
+        target["content"] = f"{context_text}\n\n{content}"
+    else:
+        target["content"] = context_text
+    messages[target_index] = target
+
+
 def _compact_history_for_model(history_buffer) -> list[dict]:
     """Keep recent history within budget without adding a dynamic system turn.
 
@@ -1124,6 +1147,21 @@ def _compact_history_for_model(history_buffer) -> list[dict]:
         used_tokens += message_tokens
 
     selected.reverse()
+
+    # Older or externally-created histories can contain dynamic system
+    # messages. The request builder already owns the one stable system
+    # prefix, so fold these messages into user context before role cleanup.
+    history_system_context = []
+    history_without_system = []
+    for msg in selected:
+        if msg.get("role") == "system":
+            content = msg.get("content")
+            if content:
+                history_system_context.append(str(content))
+        else:
+            history_without_system.append(msg)
+    selected = history_without_system
+
     while selected and selected[0].get("role") == "tool":
         selected.pop(0)
     if selected and selected[0].get("role") == "assistant" and selected[0].get("tool_calls"):
@@ -1140,31 +1178,19 @@ def _compact_history_for_model(history_buffer) -> list[dict]:
         if not tool_call_ids or not tool_call_ids.intersection(paired_tool_ids):
             selected.pop(0)
 
-    omitted = len(selected) < len(history_buffer or [])
+    history_message_count = len(history_buffer or []) - len(history_system_context)
+    omitted = len(selected) < history_message_count
     if omitted and selected:
         notice = "[Earlier conversation compacted to stay within the model context budget.]"
-        notice_index = next(
-            (index for index, msg in enumerate(selected) if msg.get("role") == "user"),
-            0,
-        )
-        notice_message = dict(selected[notice_index])
-        content = notice_message.get("content")
-        if isinstance(content, list):
-            notice_message["content"] = [
-                {"type": "text", "text": notice},
-                *copy.deepcopy(content),
-            ]
-        elif content:
-            notice_message["content"] = f"{notice}\n\n{content}"
-        else:
-            notice_message["content"] = notice
-        selected[notice_index] = notice_message
+        _attach_history_context(selected, notice)
         logging.warning(
             "⚠️ ENGINE: Compacted chat history from %s messages to %s messages at %s%% context budget.",
             len(history_buffer or []),
             len(selected),
             int(CONTEXT_COMPACTION_THRESHOLD * 100),
         )
+    if history_system_context and selected:
+        _attach_history_context(selected, "\n\n".join(history_system_context))
     return selected
 
 
@@ -1762,24 +1788,20 @@ async def emery_engine(
         consumed_steers = _consume_steering_messages(steering_state, ollama_history)
         if consumed_steers:
             logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
-        payload["messages"] = stable_messages + copy.deepcopy(ollama_history)
-        payload["messages"].append({
-            "role": "system",
-            "content": _format_budget_context(
-                loop_number=loop_count + 1,
-                loop_tool_calls=loop_tool_calls_used,
-                loop_searches=web_searches_used,
-                loop_fetches=web_fetches_used,
-                total_tool_calls=tool_calls_used,
-            ),
-        })
+        request_history = copy.deepcopy(ollama_history)
+        runtime_context = _format_budget_context(
+            loop_number=loop_count + 1,
+            loop_tool_calls=loop_tool_calls_used,
+            loop_searches=web_searches_used,
+            loop_fetches=web_fetches_used,
+            total_tool_calls=tool_calls_used,
+        )
         if forced_text_only:
             payload.pop("tools", None)
             payload.pop("reasoning_control", None)
-            payload["messages"].append({
-                "role": "system",
-                "content": _FORCED_TEXT_COMPLETION_PROMPT,
-            })
+            runtime_context = f"{runtime_context}\n\n{_FORCED_TEXT_COMPLETION_PROMPT}"
+        _attach_history_context(request_history, runtime_context)
+        payload["messages"] = stable_messages + request_history
         if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
             payload["reasoning_control"] = True
  
