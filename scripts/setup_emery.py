@@ -828,7 +828,10 @@ def ask_core(env_seed):
         env_seed["VISION_MODEL_ID"] = prompt_text("Vision model ID", env_seed.get("VISION_MODEL_ID"), required=True)
         env_seed["VISION_OLLAMA_URL"] = prompt_text("Vision model URL", env_seed.get("VISION_OLLAMA_URL"), required=True, validator=validate_url_prompt)
     else:
-        env_seed["VISION_MODEL_ID"] = env_seed.get("FAST_MODEL_ID", env_seed.get("MODEL_ID", DEFAULT_ENV["MODEL_ID"]))
+        # Keep image analysis on a known vision-capable model even when the
+        # user skips custom vision configuration. Never inherit the primary
+        # model here: it may be text-only.
+        env_seed["VISION_MODEL_ID"] = DEFAULT_ENV["VISION_MODEL_ID"]
         env_seed["VISION_OLLAMA_URL"] = DEFAULT_ENV["VISION_OLLAMA_URL"]
 
     use_embeddings = prompt_yes_no("Configure a separate embedding model", True)
