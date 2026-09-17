@@ -25,6 +25,7 @@ from PIL import Image
 import emery.globals as globals
 from emery.config import (
     MAIN_MODEL_IMAGE_FORMAT,
+    MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP,
     MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN,
     MAX_RESEARCH_IMAGES_PER_TURN,
     RESEARCH_IMAGE_CACHE_TTL_SECONDS,
@@ -53,6 +54,7 @@ class MediaTurnState:
     outbound_media: list[dict[str, Any]] = field(default_factory=list)
     research_images_used: int = 0
     model_images_used: int = 0
+    model_images_used_this_loop: int = 0
 
 
 def begin_media_turn() -> MediaTurnState:
@@ -67,6 +69,12 @@ def get_media_turn() -> MediaTurnState | None:
 
 def clear_media_turn() -> None:
     globals.CURRENT_MEDIA_TURN.set(None)
+
+
+def begin_media_reasoning_loop() -> None:
+    state = get_media_turn()
+    if state is not None:
+        state.model_images_used_this_loop = 0
 
 
 def _prune_artifacts(now: float | None = None) -> None:
@@ -172,7 +180,11 @@ def can_use_research_image() -> bool:
 
 def can_attach_model_image() -> bool:
     state = get_media_turn()
-    return state is not None and state.model_images_used < MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN
+    return (
+        state is not None
+        and state.model_images_used < MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN
+        and state.model_images_used_this_loop < MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP
+    )
 
 
 def queue_outbound_media(item: dict[str, Any]) -> None:
@@ -187,6 +199,7 @@ def queue_model_attachment() -> None:
     state = get_media_turn()
     if state is not None:
         state.model_images_used += 1
+        state.model_images_used_this_loop += 1
 
 
 def take_outbound_media() -> list[dict[str, Any]]:

@@ -1406,10 +1406,10 @@ async def use_research_image(
     if action in {"send", "inspect_and_send"} and not can_use_research_image():
         return {
             "success": False,
-            "error": "The research-image budget is exhausted. Use no more than one image normally and two images maximum per turn.",
+            "error": "The research-image delivery budget is exhausted for this turn.",
         }
     if action == "attach" and not can_attach_model_image():
-        return {"success": False, "error": "The model-image attachment budget is exhausted for this turn."}
+        return {"success": False, "error": "The model-image attachment budget is exhausted for this loop or turn."}
 
     try:
         artifact = await download_research_image(candidate)

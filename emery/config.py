@@ -386,11 +386,12 @@ FAST_MODEL_URL = os.getenv("FAST_MODEL_URL", "http://127.0.0.1:8082/v1/chat/comp
 FAST_MODEL_CONTEXT_TOKENS = _to_int(os.getenv("FAST_MODEL_CONTEXT_TOKENS"), 16384)
 CONTEXT_COMPACTION_THRESHOLD = _to_float(os.getenv("CONTEXT_COMPACTION_THRESHOLD"), 0.70)
 MODEL_CHARS_PER_TOKEN = _to_float(os.getenv("MODEL_CHARS_PER_TOKEN"), 4.0)
-MAX_RESEARCH_IMAGES_PER_TURN = max(1, _to_int(os.getenv("MAX_RESEARCH_IMAGES_PER_TURN"), 2))
+MAX_RESEARCH_IMAGES_PER_TURN = max(1, _to_int(os.getenv("MAX_RESEARCH_IMAGES_PER_TURN"), 1))
 PREFERRED_RESEARCH_IMAGES_PER_TURN = max(0, min(
     _to_int(os.getenv("PREFERRED_RESEARCH_IMAGES_PER_TURN"), 1),
     MAX_RESEARCH_IMAGES_PER_TURN,
 ))
+MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP = max(1, _to_int(os.getenv("MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP"), 1))
 MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN = max(1, _to_int(os.getenv("MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN"), 2))
 RESEARCH_IMAGE_CACHE_TTL_SECONDS = max(60, _to_int(os.getenv("RESEARCH_IMAGE_CACHE_TTL_SECONDS"), 3600))
 RESEARCH_IMAGE_MAX_BYTES = max(256_000, _to_int(os.getenv("RESEARCH_IMAGE_MAX_BYTES"), 8_000_000))
@@ -435,9 +436,16 @@ NOAA_LAT = os.getenv("NOAA_LAT", "").strip()
 NOAA_LONG = os.getenv("NOAA_LONG", "").strip()
 NOAA_EMAIL = os.getenv("NOAA_EMAIL", "example@example.com").strip()
 TOOL_LOOP = _to_int(os.getenv("TOOL_LOOP"), 15)
-MAX_TOOL_CALLS_PER_TURN = _to_int(os.getenv("MAX_TOOL_CALLS_PER_TURN"), 8)
-MAX_WEB_SEARCHES_PER_TURN = _to_int(os.getenv("MAX_WEB_SEARCHES_PER_TURN"), 2)
-MAX_WEB_FETCHES_PER_TURN = _to_int(os.getenv("MAX_WEB_FETCHES_PER_TURN"), 4)
+MAX_TOOL_CALLS_PER_TURN = _to_int(os.getenv("MAX_TOOL_CALLS_PER_TURN"), 30)
+MAX_TOOL_CALLS_PER_LOOP = _to_int(os.getenv("MAX_TOOL_CALLS_PER_LOOP"), 8)
+MAX_WEB_SEARCHES_PER_LOOP = _to_int(
+    os.getenv("MAX_WEB_SEARCHES_PER_LOOP", os.getenv("MAX_WEB_SEARCHES_PER_TURN", "4")),
+    4,
+)
+MAX_WEB_FETCHES_PER_LOOP = _to_int(
+    os.getenv("MAX_WEB_FETCHES_PER_LOOP", os.getenv("MAX_WEB_FETCHES_PER_TURN", "4")),
+    4,
+)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "blank")
 OVERSEER_URL = os.getenv("OVERSEER_URL", "http://localhost:5055/api/v1")
 OVERSEER_KEY = os.getenv("OVERSEER_KEY", "blank")

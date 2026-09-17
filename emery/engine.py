@@ -28,8 +28,13 @@ from emery.config import (
     ENABLE_LIVE_STEERING,
     LIVE_PROGRESS_MAX_CHARS,
     MAX_TOOL_CALLS_PER_TURN,
-    MAX_WEB_SEARCHES_PER_TURN,
-    MAX_WEB_FETCHES_PER_TURN,
+    MAX_TOOL_CALLS_PER_LOOP,
+    MAX_WEB_SEARCHES_PER_LOOP,
+    MAX_WEB_FETCHES_PER_LOOP,
+    MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP,
+    MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN,
+    MAX_RESEARCH_IMAGES_PER_TURN,
+    PREFERRED_RESEARCH_IMAGES_PER_TURN,
     MAIN_MODEL_VISION,
 )
 from emery import tool_registry
@@ -1427,6 +1432,7 @@ def _tool_budget_error(
     args: dict,
     *,
     total_calls: int,
+    loop_calls: int = 0,
     search_calls: int,
     fetch_calls: int,
     seen_searches: set[str],
@@ -1439,29 +1445,100 @@ def _tool_budget_error(
             "Do not call another tool; answer using the information already gathered."
         )
 
+    loop_limit = max(0, int(MAX_TOOL_CALLS_PER_LOOP))
+    if loop_calls >= loop_limit:
+        return (
+            f"The reasoning-loop tool budget is exhausted ({loop_limit} tool calls). "
+            "Do not call another tool in this reasoning loop; continue with the next loop "
+            "or answer using the information already gathered."
+        )
+
     if fn == "web_search":
-        search_limit = max(0, int(MAX_WEB_SEARCHES_PER_TURN))
+        search_limit = max(0, int(MAX_WEB_SEARCHES_PER_LOOP))
         if search_calls >= search_limit:
             return (
-                f"The per-turn web-search budget is exhausted ({search_limit} searches). "
-                "Do not search again; answer using the results already gathered."
+                f"The reasoning-loop web-search budget is exhausted ({search_limit} searches). "
+                "Do not search again in this reasoning loop; continue with the next loop "
+                "or use the results already gathered."
             )
         key = _web_search_budget_key(args)
         if key and key in seen_searches:
             return "This web search duplicates a search already made in this turn. Do not repeat it."
 
     if fn == "fetch_web_content":
-        fetch_limit = max(0, int(MAX_WEB_FETCHES_PER_TURN))
+        fetch_limit = max(0, int(MAX_WEB_FETCHES_PER_LOOP))
         if fetch_calls >= fetch_limit:
             return (
-                f"The per-turn web-fetch budget is exhausted ({fetch_limit} fetches). "
-                "Do not fetch another page; answer using the content already gathered."
+                f"The reasoning-loop web-fetch budget is exhausted ({fetch_limit} fetches). "
+                "Do not fetch another page in this reasoning loop; continue with the next loop "
+                "or use the content already gathered."
             )
         key = _web_fetch_budget_key(args)
         if key and key in seen_fetches:
             return "This URL was already fetched in this turn. Do not fetch it again."
 
     return None
+
+
+def _media_budget_usage() -> tuple[int, int, int]:
+    """Return (model images this loop, model images this turn, sent images this turn)."""
+    try:
+        from emery.media import get_media_turn
+
+        state = get_media_turn()
+    except Exception:
+        state = None
+    if state is None:
+        return 0, 0, 0
+    return (
+        int(getattr(state, "model_images_used_this_loop", 0)),
+        int(getattr(state, "model_images_used", 0)),
+        int(getattr(state, "research_images_used", 0)),
+    )
+
+
+def _begin_media_reasoning_loop() -> None:
+    try:
+        from emery.media import begin_media_reasoning_loop
+
+        begin_media_reasoning_loop()
+    except Exception:
+        logging.debug("ENGINE: Media reasoning-loop budget reset unavailable.", exc_info=True)
+
+
+def _format_budget_context(
+    *,
+    loop_number: int,
+    loop_tool_calls: int,
+    loop_searches: int,
+    loop_fetches: int,
+    total_tool_calls: int,
+) -> str:
+    model_images_loop, model_images_turn, sent_images_turn = _media_budget_usage()
+
+    def remaining(limit: int, used: int) -> int:
+        return max(0, int(limit) - int(used))
+
+    return "\n".join((
+        "EMERYCHAT USAGE BUDGET (current user turn; request-local context)",
+        f"Reasoning loop: {loop_number}/{max(0, int(TOOL_LOOP))}",
+        f"Tools this loop: {loop_tool_calls}/{max(0, int(MAX_TOOL_CALLS_PER_LOOP))} used; "
+        f"{remaining(MAX_TOOL_CALLS_PER_LOOP, loop_tool_calls)} remaining",
+        f"Web searches this loop: {loop_searches}/{max(0, int(MAX_WEB_SEARCHES_PER_LOOP))} used; "
+        f"{remaining(MAX_WEB_SEARCHES_PER_LOOP, loop_searches)} remaining",
+        f"Webpage fetches this loop: {loop_fetches}/{max(0, int(MAX_WEB_FETCHES_PER_LOOP))} used; "
+        f"{remaining(MAX_WEB_FETCHES_PER_LOOP, loop_fetches)} remaining",
+        f"Tools this full turn: {total_tool_calls}/{max(0, int(MAX_TOOL_CALLS_PER_TURN))} used; "
+        f"{remaining(MAX_TOOL_CALLS_PER_TURN, total_tool_calls)} remaining",
+        f"Model images attached this loop: {model_images_loop}/{max(0, int(MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP))} used; "
+        f"{remaining(MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP, model_images_loop)} remaining",
+        f"Model images attached this full turn: {model_images_turn}/{max(0, int(MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN))} used; "
+        f"{remaining(MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN, model_images_turn)} remaining",
+        f"Research images sent to Telegram this full turn: {sent_images_turn}/{max(0, int(MAX_RESEARCH_IMAGES_PER_TURN))} used; "
+        f"{remaining(MAX_RESEARCH_IMAGES_PER_TURN, sent_images_turn)} remaining",
+        f"Preferred research images this turn: {max(0, int(PREFERRED_RESEARCH_IMAGES_PER_TURN))} (soft target, not a requirement)",
+        "Do not call a tool whose remaining budget is zero. Always provide a final user-facing text response, even when a budget is exhausted.",
+    ))
 
 
 async def warm_main_model_cache(
@@ -1655,13 +1732,27 @@ async def emery_engine(
     web_fetches_used = 0
     seen_web_searches: set[str] = set()
     seen_web_fetches: set[str] = set()
-    forced_text_only = False
+    forced_text_only = TOOL_LOOP <= 0
     forced_text_attempts = 0
     while loop_count < TOOL_LOOP + steering_extensions or forced_text_only:
+        loop_tool_calls_used = 0
+        web_searches_used = 0
+        web_fetches_used = 0
+        _begin_media_reasoning_loop()
         consumed_steers = _consume_steering_messages(steering_state, ollama_history)
         if consumed_steers:
             logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
         payload["messages"] = stable_messages + copy.deepcopy(ollama_history)
+        payload["messages"].append({
+            "role": "system",
+            "content": _format_budget_context(
+                loop_number=loop_count + 1,
+                loop_tool_calls=loop_tool_calls_used,
+                loop_searches=web_searches_used,
+                loop_fetches=web_fetches_used,
+                total_tool_calls=tool_calls_used,
+            ),
+        })
         if forced_text_only:
             payload.pop("tools", None)
             payload.pop("reasoning_control", None)
@@ -1795,6 +1886,7 @@ async def emery_engine(
                         fn,
                         args,
                         total_calls=tool_calls_used,
+                        loop_calls=loop_tool_calls_used,
                         search_calls=web_searches_used,
                         fetch_calls=web_fetches_used,
                         seen_searches=seen_web_searches,
@@ -1805,7 +1897,12 @@ async def emery_engine(
                         result = {"success": False, "error": budget_error}
                         tool_started_at = time.perf_counter()
                         friendly_name = fn
-                        forced_text_only = True
+                        if tool_calls_used >= max(0, int(MAX_TOOL_CALLS_PER_TURN)):
+                            # Only exhaustion of the full-turn budget requires a
+                            # final text-only completion. Loop, search, fetch, and
+                            # duplicate-request refusals leave unrelated tools
+                            # available in later reasoning loops.
+                            forced_text_only = True
                     else:
                         tool_calls_used += 1
                         if fn == "web_search":
@@ -1823,6 +1920,8 @@ async def emery_engine(
                         _append_tool_timeline_entry(thinking_timeline, fn, friendly_name)
                         if fn == "speak_message":
                             voice_sent_via_tool = True
+
+                        loop_tool_calls_used += 1
 
                         tool_started_at = time.perf_counter()
                         result = await _execute_tool_call(fn, args, available_tools=active_tools)
@@ -1856,6 +1955,8 @@ async def emery_engine(
                 if steering_state is not None and steering_state.pending_messages and loop_count + 1 >= TOOL_LOOP:
                     steering_extensions = min(steering_extensions + 1, steering_state.max_pending)
                 loop_count += 1
+                if loop_count >= TOOL_LOOP + steering_extensions and not forced_text_only:
+                    forced_text_only = True
                 continue
 
             if steering_state is not None and steering_state.pending_messages:
@@ -1864,6 +1965,8 @@ async def emery_engine(
                 if loop_count + 1 >= TOOL_LOOP:
                     steering_extensions = min(steering_extensions + 1, steering_state.max_pending)
                 loop_count += 1
+                if loop_count >= TOOL_LOOP + steering_extensions and not forced_text_only:
+                    forced_text_only = True
                 continue
             
             content = cleaned_msg_content
@@ -1871,12 +1974,20 @@ async def emery_engine(
             content = re.sub(r'(</think>\s*)\[ID:\s*\d+[^\]]*\]\s*', r'\1', content, flags=re.IGNORECASE)
             content = re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', content, flags=re.IGNORECASE)
 
+            if not content and not forced_text_only:
+                # A model can stop at the loop boundary without emitting text.
+                # Give it a guaranteed text-only finalization request.
+                forced_text_only = True
+                loop_count += 1
+                continue
+
             if forced_text_only and not content:
                 forced_text_attempts += 1
                 if forced_text_attempts < 2:
                     loop_count += 1
                     continue
                 logging.error("❌ ENGINE: Forced text-only completion returned no content.")
+                content = "I reached the configured tool-use limit before completing the request."
 
             thinking_char_count = sum(len(entry) for entry in thinking_timeline if entry)
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))

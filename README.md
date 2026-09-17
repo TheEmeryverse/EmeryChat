@@ -480,13 +480,15 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `ENABLE_TELEGRAM_RICH_MESSAGES` | `false` | Opts into Telegram Bot API rich Markdown; disabled by default for client compatibility, with HTML formatting used otherwise |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
-| `TOOL_LOOP` | `15` | Max tool iterations in one turn |
-| `MAX_TOOL_CALLS_PER_TURN` | `8` | Maximum total tool calls in one normal chat turn |
-| `MAX_WEB_SEARCHES_PER_TURN` | `2` | Maximum public web searches in one normal chat turn |
-| `MAX_WEB_FETCHES_PER_TURN` | `4` | Maximum webpage fetches in one normal chat turn |
-| `MAX_RESEARCH_IMAGES_PER_TURN` | `2` | Hard maximum of research images sent to Telegram in one turn; Emery normally prefers one |
-| `PREFERRED_RESEARCH_IMAGES_PER_TURN` | `1` | Guidance target for useful visual answers; zero is still allowed |
-| `MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN` | `2` | Maximum selected research images attached to the main model in one turn |
+| `TOOL_LOOP` | `15` | Max tool/reasoning iterations in one turn |
+| `MAX_TOOL_CALLS_PER_TURN` | `30` | Maximum total tool calls in one normal chat turn |
+| `MAX_TOOL_CALLS_PER_LOOP` | `8` | Maximum total tool calls in one reasoning loop |
+| `MAX_WEB_SEARCHES_PER_LOOP` | `4` | Maximum public web searches in one reasoning loop |
+| `MAX_WEB_FETCHES_PER_LOOP` | `4` | Maximum webpage fetches in one reasoning loop |
+| `MAX_RESEARCH_IMAGES_PER_TURN` | `1` | Hard maximum of research images sent to Telegram in one turn |
+| `PREFERRED_RESEARCH_IMAGES_PER_TURN` | `1` | Soft target for useful visual answers; zero is still allowed |
+| `MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP` | `1` | Maximum research images attached to the main model from one reasoning loop |
+| `MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN` | `2` | Maximum research images attached to the main model in one turn |
 | `RESEARCH_IMAGE_CACHE_TTL_SECONDS` | `3600` | Lifetime of temporary image artifacts and references |
 | `RESEARCH_IMAGE_MAX_BYTES` | `8000000` | Maximum downloaded research-image size |
 | `RESEARCH_IMAGE_MAX_DIMENSION` | `1600` | Maximum dimension after research-image resizing |

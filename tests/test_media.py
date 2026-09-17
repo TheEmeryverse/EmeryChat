@@ -38,6 +38,26 @@ def test_research_image_budget_is_hard(monkeypatch):
     media.clear_media_turn()
 
 
+def test_model_image_attachment_budget_is_bounded_per_loop_and_turn(monkeypatch):
+    monkeypatch.setattr(media, "MAX_MODEL_IMAGE_ATTACHMENTS_PER_LOOP", 1)
+    monkeypatch.setattr(media, "MAX_MODEL_IMAGE_ATTACHMENTS_PER_TURN", 2)
+    state = media.begin_media_turn()
+
+    assert media.can_attach_model_image()
+    media.queue_model_attachment()
+    assert not media.can_attach_model_image()
+
+    media.begin_media_reasoning_loop()
+    assert media.can_attach_model_image()
+    media.queue_model_attachment()
+    assert not media.can_attach_model_image()
+
+    media.begin_media_reasoning_loop()
+    assert not media.can_attach_model_image()
+    assert state.model_images_used == 2
+    media.clear_media_turn()
+
+
 def test_tool_selected_image_is_ephemeral_model_history():
     artifact_id = media.store_artifact(_jpeg_bytes(), label="selected")
     assembled = []
