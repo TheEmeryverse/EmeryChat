@@ -1101,6 +1101,13 @@ def _message_token_estimate(msg: dict) -> int:
 
 
 def _compact_history_for_model(history_buffer) -> list[dict]:
+    """Keep recent history within budget without adding a dynamic system turn.
+
+    The request builder prepends the stable system prompt separately.  A
+    second system message in the compacted history breaks strict chat
+    templates and changes the cacheable prefix, so the compaction notice is
+    attached to the first retained user message instead.
+    """
     budget_tokens = max(256, int(MAIN_MODEL_CONTEXT_TOKENS * CONTEXT_COMPACTION_THRESHOLD))
     selected = []
     used_tokens = 0
@@ -1134,11 +1141,24 @@ def _compact_history_for_model(history_buffer) -> list[dict]:
             selected.pop(0)
 
     omitted = len(selected) < len(history_buffer or [])
-    if omitted:
-        selected.insert(0, {
-            "role": "system",
-            "content": "[Earlier conversation compacted to stay within the model context budget.]",
-        })
+    if omitted and selected:
+        notice = "[Earlier conversation compacted to stay within the model context budget.]"
+        notice_index = next(
+            (index for index, msg in enumerate(selected) if msg.get("role") == "user"),
+            0,
+        )
+        notice_message = dict(selected[notice_index])
+        content = notice_message.get("content")
+        if isinstance(content, list):
+            notice_message["content"] = [
+                {"type": "text", "text": notice},
+                *copy.deepcopy(content),
+            ]
+        elif content:
+            notice_message["content"] = f"{notice}\n\n{content}"
+        else:
+            notice_message["content"] = notice
+        selected[notice_index] = notice_message
         logging.warning(
             "⚠️ ENGINE: Compacted chat history from %s messages to %s messages at %s%% context budget.",
             len(history_buffer or []),

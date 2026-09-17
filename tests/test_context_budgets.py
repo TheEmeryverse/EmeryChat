@@ -23,10 +23,33 @@ def test_main_history_compacts_old_messages_and_keeps_recent_context():
          patch.object(engine, "CONTEXT_COMPACTION_THRESHOLD", 0.70):
         compacted = engine._compact_history_for_model(history)
 
-    assert compacted[0]["role"] == "system"
+    assert all(message["role"] != "system" for message in compacted)
     assert "compacted" in compacted[0]["content"]
-    assert compacted[-1]["content"] == "latest question"
+    assert compacted[-1]["content"].endswith("latest question")
     assert not (compacted[1]["role"] == "tool")
+
+
+def test_compaction_preserves_single_stable_system_prefix():
+    history = [
+        {"role": "user", "content": f"old message {index} " + ("x" * 80)}
+        for index in range(20)
+    ]
+    history.append({"role": "user", "content": "latest question"})
+
+    with patch.object(engine, "MAIN_MODEL_CONTEXT_TOKENS", 100), \
+         patch.object(engine, "CONTEXT_COMPACTION_THRESHOLD", 0.70):
+        compacted_payload, _ = engine._build_main_model_payload(
+            history_buffer=history,
+            model_to_use="local",
+            allow_tools=False,
+            stream=False,
+        )
+
+    messages = compacted_payload["messages"]
+    assert [message["role"] for message in messages].count("system") == 1
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == engine.get_stable_system_prompt()
+    assert any("Earlier conversation compacted" in str(message["content"]) for message in messages)
 
 
 def test_fast_web_summary_is_capped_before_request():
