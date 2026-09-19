@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytz
 from dotenv import load_dotenv
@@ -482,6 +483,33 @@ ENABLE_HEARTBEAT = _to_bool(os.getenv("ENABLE_HEARTBEAT"), False)
 ENABLE_NEST = _to_bool(os.getenv("ENABLE_NEST"))
 ENABLE_REOLINK = _to_bool(os.getenv("ENABLE_REOLINK"))
 ENABLE_SYSTEM_STATS = _to_bool(os.getenv("ENABLE_SYSTEM_STATS"))
+ENABLE_COMMAND_EXECUTION = _to_bool(os.getenv("ENABLE_COMMAND_EXECUTION"), False)
+COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS = max(
+    10.0, _to_float(os.getenv("COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS"), 300.0)
+)
+COMMAND_EXECUTION_BACKEND = os.getenv("COMMAND_EXECUTION_BACKEND", "local").strip().lower() or "local"
+COMMAND_EXECUTION_DOCKER_BINARY = os.getenv("COMMAND_EXECUTION_DOCKER_BINARY", "docker").strip() or "docker"
+COMMAND_EXECUTION_DOCKER_IMAGE = os.getenv("COMMAND_EXECUTION_DOCKER_IMAGE", "python:3.11-slim").strip() or "python:3.11-slim"
+COMMAND_EXECUTION_SSH_BINARY = os.getenv("COMMAND_EXECUTION_SSH_BINARY", "ssh").strip() or "ssh"
+COMMAND_EXECUTION_SSH_HOST = os.getenv("COMMAND_EXECUTION_SSH_HOST", "").strip() or None
+COMMAND_EXECUTION_SSH_USER = os.getenv("COMMAND_EXECUTION_SSH_USER", "").strip() or None
+COMMAND_EXECUTION_SSH_PORT = _to_int(os.getenv("COMMAND_EXECUTION_SSH_PORT"), 0) or None
+COMMAND_EXECUTION_SSH_KEY = os.getenv("COMMAND_EXECUTION_SSH_KEY", "").strip() or None
+ENABLE_BROWSER = _to_bool(os.getenv("ENABLE_BROWSER"), False)
+BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222").rstrip("/")
+try:
+    BROWSER_CDP_PORT = int(urlparse(BROWSER_CDP_URL).port or 9222)
+except (TypeError, ValueError):
+    BROWSER_CDP_PORT = 9222
+BROWSER_AUTO_LAUNCH = _to_bool(os.getenv("BROWSER_AUTO_LAUNCH"), True)
+BROWSER_HEADLESS = _to_bool(os.getenv("BROWSER_HEADLESS"), True)
+BROWSER_CHROMIUM_PATH = os.getenv("BROWSER_CHROMIUM_PATH", "").strip()
+BROWSER_USER_DATA_DIR = os.getenv("BROWSER_USER_DATA_DIR", "data/browser-profile").strip()
+BROWSER_TIMEOUT_SECONDS = max(1.0, _to_float(os.getenv("BROWSER_TIMEOUT_SECONDS"), 10.0))
+BROWSER_REQUIRE_ACTION_APPROVAL = _to_bool(os.getenv("BROWSER_REQUIRE_ACTION_APPROVAL"), True)
+BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS = max(
+    10.0, _to_float(os.getenv("BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS"), 300.0)
+)
 # Rich Messages are newer than Telegram's long-established sendMessage
 # formatting and are not rendered consistently by every client. Keep the
 # interoperable HTML path as the default; operators can opt in explicitly.

@@ -1100,15 +1100,27 @@ def _message_token_estimate(msg: dict) -> int:
     return max(1, int(len(str(content or "")) / max(MODEL_CHARS_PER_TOKEN, 1.0)) + 16 + image_count * 768)
 
 
-def _attach_history_context(messages: list[dict], context_text: str) -> None:
-    """Attach dynamic history context without adding another system turn."""
+def _attach_history_context(
+    messages: list[dict],
+    context_text: str,
+    *,
+    prefer_last_user: bool = False,
+) -> None:
+    """Attach dynamic history context without adding another system turn.
+
+    Compaction and retained system context intentionally attach to the first
+    retained user message. Per-loop budget/status text is request-local and
+    should attach to the newest user message so earlier conversation tokens
+    remain reusable by the backend prompt cache.
+    """
     if not messages or not context_text:
         return
 
-    target_index = next(
-        (index for index, msg in enumerate(messages) if msg.get("role") == "user"),
-        0,
-    )
+    user_indices = [index for index, msg in enumerate(messages) if msg.get("role") == "user"]
+    if prefer_last_user and user_indices:
+        target_index = user_indices[-1]
+    else:
+        target_index = user_indices[0] if user_indices else 0
     target = dict(messages[target_index])
     content = target.get("content")
     if isinstance(content, list):
@@ -1800,7 +1812,7 @@ async def emery_engine(
             payload.pop("tools", None)
             payload.pop("reasoning_control", None)
             runtime_context = f"{runtime_context}\n\n{_FORCED_TEXT_COMPLETION_PROMPT}"
-        _attach_history_context(request_history, runtime_context)
+        _attach_history_context(request_history, runtime_context, prefer_last_user=True)
         payload["messages"] = stable_messages + request_history
         if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
             payload["reasoning_control"] = True

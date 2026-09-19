@@ -475,6 +475,28 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | --- | --- | --- |
 | `ALLOW_UNRESTRICTED_TELEGRAM_ACCESS` | `false` | Allows Telegram users not listed in `config/users.json` |
 | `ENABLE_MEMORY` | `true` | Persistent memory on/off |
+| `ENABLE_COMMAND_EXECUTION` | `false` | Opt-in bounded shell-command tool; disabled by default |
+| `COMMAND_EXECUTION_CWD` | Emery project directory | Default working directory for shell commands |
+| `COMMAND_EXECUTION_TIMEOUT_SECONDS` | `30` | Default command timeout |
+| `COMMAND_EXECUTION_MAX_TIMEOUT_SECONDS` | `120` | Maximum requested command timeout |
+| `COMMAND_EXECUTION_MAX_OUTPUT_CHARS` | `12000` | Maximum output returned to the model |
+| `COMMAND_EXECUTION_ALLOW_DANGEROUS` | `false` | Bypasses the command approval guard; keep disabled unless an external sandbox/approval boundary is present |
+| `COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for an approve-once Telegram decision |
+| `COMMAND_EXECUTION_BACKEND` | `local` | Explicit command backend: `local`, `docker`, or `ssh` |
+| `COMMAND_EXECUTION_DOCKER_IMAGE` | `python:3.11-slim` | Image used by the Docker backend; no host paths or environment are forwarded |
+| `COMMAND_EXECUTION_SSH_HOST` | empty | SSH backend host; requires key-based non-interactive authentication |
+| `COMMAND_EXECUTION_SSH_USER` | empty | Optional SSH backend user |
+| `COMMAND_EXECUTION_SSH_PORT` | empty | Optional SSH backend port |
+| `COMMAND_EXECUTION_SSH_KEY` | empty | Optional SSH private-key path |
+| `ENABLE_BROWSER` | `false` | Opt-in Chromium CDP tab discovery, navigation, snapshots, screenshots, and basic interaction |
+| `BROWSER_CDP_URL` | `http://127.0.0.1:9222` | Chromium DevTools HTTP endpoint |
+| `BROWSER_AUTO_LAUNCH` | `true` | Launch a separate Chromium profile when the CDP endpoint is unavailable |
+| `BROWSER_HEADLESS` | `true` | Launch Chromium headlessly when auto-launch is enabled |
+| `BROWSER_CHROMIUM_PATH` | empty | Optional explicit Chromium executable path |
+| `BROWSER_USER_DATA_DIR` | `data/browser-profile` | Profile directory for auto-launched Chromium |
+| `BROWSER_TIMEOUT_SECONDS` | `10` | Per-operation Chromium CDP timeout |
+| `BROWSER_REQUIRE_ACTION_APPROVAL` | `true` | Require Telegram approve-once confirmation for browser mutations |
+| `BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for browser action approval |
 | `ENABLE_LIVE_STEERING` | `true` | Queues user updates during an active llama.cpp reasoning turn |
 | `LIVE_STEERING_MAX_PENDING` | `4` | Maximum queued updates per active turn |
 | `ENABLE_TELEGRAM_RICH_MESSAGES` | `false` | Opts into Telegram Bot API rich Markdown; disabled by default for client compatibility, with HTML formatting used otherwise |

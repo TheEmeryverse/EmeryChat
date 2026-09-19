@@ -17,6 +17,8 @@ from emery.config import (
     OLLAMA_VISION_NUM_CTX, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
     ENABLE_YOUTUBE_TRANSCRIPT,
     ENABLE_WEB_SCRAPING,
+    ENABLE_COMMAND_EXECUTION,
+    ENABLE_BROWSER,
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
@@ -525,6 +527,17 @@ def _get_compact_stable_system_prompt() -> str:
             "Prefer zero images for ordinary factual research, prefer one when useful, and never exceed the tool's enforced two-image per-turn maximum. "
             "Do not perform extra searches merely to decorate an answer."
         )
+    if ENABLE_COMMAND_EXECUTION:
+        policies.append(
+            "- Command execution: use `run_command` for concrete non-interactive shell work when a normal tool does not apply. "
+            "Give it the exact command, use a specific working directory when needed, respect its timeout, and treat blocked/destructive commands as not executed. "
+            "Never put passwords, API keys, tokens, or other secrets in a command."
+        )
+    if ENABLE_BROWSER:
+        policies.append(
+            "- Browser control: use `list_browser_tabs` and `open_browser_tab` for explicit tab work. For interaction, call `browser_snapshot` first, then use only its current refs with `browser_click` or `browser_type`; refresh the snapshot after navigation, scrolling, or clicks. "
+            "Use `browser_screenshot` when visual state matters, `browser_press` for basic keys, `browser_back` for history, and `browser_console` for page debugging. If a tool returns `awaiting_dialog`, inspect the dialog and use `browser_handle_dialog` only for the user's intended response. Never claim a login, click, submission, or other page action succeeded without a confirmed tool result."
+        )
 
     return f"""# Identity
 Your name is {MODEL_NAME}. You are a professional assistant.
@@ -538,7 +551,7 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 {chr(10).join(policies)}
 
 # Tone
-Be serious, logical, concise, and helpful. Use tools for current or uncertain information."""
+Be serious, logical, concise, and helpful. Do not end every response with a question. Ask a question only when you genuinely need clarification or when a concrete next step would benefit from the user's choice; otherwise end naturally after answering or completing the task. Use tools for current or uncertain information."""
 
 
 def get_stable_system_prompt() -> str:

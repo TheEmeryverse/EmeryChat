@@ -23,6 +23,7 @@ from emery.bot import (
 from emery.debate import handle_debate_callback, handle_debate_command
 from emery.expert import handle_expert_callback, handle_expert_command
 from emery.inter_agent_bridge import handle_bridge_command, handle_bridge_direct_message
+from emery.command_approval import handle_command_approval_callback, handle_command_approval_command
 
 
 class HumanSenderFilter(filters.MessageFilter):
@@ -86,8 +87,11 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("notes", handle_notes_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("clear_notes", handle_clear_notes_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("wipe", handle_wipe_command, filters=HUMAN_SENDER))
+    application.add_handler(CommandHandler("approve", handle_command_approval_command, filters=HUMAN_SENDER))
+    application.add_handler(CommandHandler("deny", handle_command_approval_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("expert", handle_expert_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("debate", handle_debate_command, filters=HUMAN_SENDER))
+    application.add_handler(CallbackQueryHandler(handle_command_approval_callback, pattern=r"^command_approval:"))
     application.add_handler(CallbackQueryHandler(handle_expert_callback, pattern=r"^expert:"))
     application.add_handler(CallbackQueryHandler(handle_debate_callback, pattern=r"^debate:"))
     general_message_filter = (

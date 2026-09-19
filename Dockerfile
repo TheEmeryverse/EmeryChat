@@ -2,8 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install ffmpeg for audio conversion
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg for audio conversion and headless Chromium for browser tools.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the script and requirements
 COPY main.py .

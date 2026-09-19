@@ -1,6 +1,21 @@
 from emery.config import ENABLE_MEMORY, REOLINK_CAMERAS
 from emery.memory import save_user_memory, get_camera_security_log
 from emery.scratchpad import clear_scratchpad, jot_down_note, read_scratchpad
+from emery.command_execution import run_command
+from emery.browser_control import (
+    browser_click,
+    browser_back,
+    browser_console,
+    browser_handle_dialog,
+    browser_navigate,
+    browser_press,
+    browser_scroll,
+    browser_screenshot,
+    browser_snapshot,
+    browser_type,
+    list_browser_tabs,
+    open_browser_tab,
+)
 
 from emery.tools import (
     get_calendar_events,
@@ -93,6 +108,224 @@ tools_schema.extend([
         },
     },
 ])
+
+if is_enabled("ENABLE_COMMAND_EXECUTION"):
+    AVAILABLE_TOOLS["run_command"] = run_command
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run one bounded, non-interactive shell command on the Emery host and return its exit code and output. "
+                "Use for concrete system or project work that requires a command-line tool. Commands run with a configured working directory, "
+                "stdin closed, a timeout, and truncated output. Do not use for interactive programs, passwords, or commands that require a human prompt. "
+                "Clearly destructive or externally publishing commands pause for an approve-once Telegram confirmation; if confirmation is denied or expires, the command is not executed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The exact non-interactive shell command to run.",
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Optional absolute or configured-root-relative directory; defaults to COMMAND_EXECUTION_CWD.",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Optional timeout in seconds; bounded by COMMAND_EXECUTION_MAX_TIMEOUT_SECONDS.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    })
+
+if is_enabled("ENABLE_BROWSER"):
+    AVAILABLE_TOOLS.update({
+        "list_browser_tabs": list_browser_tabs,
+        "open_browser_tab": open_browser_tab,
+        "browser_snapshot": browser_snapshot,
+        "browser_screenshot": browser_screenshot,
+        "browser_navigate": browser_navigate,
+        "browser_click": browser_click,
+        "browser_type": browser_type,
+        "browser_press": browser_press,
+        "browser_back": browser_back,
+        "browser_scroll": browser_scroll,
+        "browser_console": browser_console,
+        "browser_handle_dialog": browser_handle_dialog,
+    })
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "list_browser_tabs",
+                "description": "List tabs currently exposed by Emery's configured Chromium DevTools endpoint. Use before browser work when you need to inspect the current browser state.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "open_browser_tab",
+                "description": "Open one absolute http(s) URL as a new tab in the configured Chromium browser through CDP. This only opens the tab; it does not claim that a page was logged into, clicked, or otherwise acted on.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Absolute http(s) URL to open; embedded credentials are not allowed."},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_snapshot",
+                "description": "Read the selected Chromium tab as text and expose visible interactive elements with short refs such as @e1. Call this before clicking or typing; refs become stale after page changes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id from list_browser_tabs or open_browser_tab."},
+                        "full": {"type": "boolean", "description": "Include full page text in addition to interactive elements; defaults to false."},
+                        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 30000, "description": "Maximum snapshot characters; defaults to 12000."},
+                    },
+                    "required": ["target_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_screenshot",
+                "description": "Capture a screenshot of the selected Chromium tab and attach it to the current model turn for visual inspection.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target_id": {"type": "string", "description": "Chromium target_id from list_browser_tabs or open_browser_tab."}},
+                    "required": ["target_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_navigate",
+                "description": "Navigate an existing Chromium tab to one absolute http(s) URL. Use browser_snapshot afterward because prior element refs are invalidated.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id to navigate."},
+                        "url": {"type": "string", "description": "Absolute http(s) URL; embedded credentials are not allowed."},
+                    },
+                    "required": ["target_id", "url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_click",
+                "description": "Click one visible element by its ref from the latest browser_snapshot. Use only the exact ref returned by that snapshot.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id containing the element."},
+                        "ref": {"type": "string", "description": "Element ref such as @e1 from browser_snapshot."},
+                    },
+                    "required": ["target_id", "ref"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_type",
+                "description": "Clear and type text into one visible input/contenteditable element by its ref from the latest browser_snapshot.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id containing the element."},
+                        "ref": {"type": "string", "description": "Input ref such as @e1 from browser_snapshot."},
+                        "text": {"type": "string", "description": "Text to enter; maximum 4000 characters. Do not include passwords or secrets unless the user explicitly requested that exact action."},
+                    },
+                    "required": ["target_id", "ref", "text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_press",
+                "description": "Press a basic key in the selected Chromium tab after browser_type or browser_click, such as Enter, Tab, Escape, Backspace, Delete, an arrow key, or one character.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id."},
+                        "key": {"type": "string", "description": "Key to press."},
+                    },
+                    "required": ["target_id", "key"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_back",
+                "description": "Go back one entry in a Chromium tab's navigation history. Refresh the browser snapshot afterward.",
+                "parameters": {"type": "object", "properties": {"target_id": {"type": "string", "description": "Chromium target_id."}}, "required": ["target_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_scroll",
+                "description": "Scroll a Chromium page by a bounded amount in one direction, then use browser_snapshot to inspect the new viewport.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id."},
+                        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                        "amount": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    },
+                    "required": ["target_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_console",
+                "description": "Read recent console messages and JavaScript exceptions observed for a Chromium tab; use this for debugging page behavior, not as proof that a user-facing action succeeded.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id."},
+                        "max_entries": {"type": "integer", "minimum": 1, "maximum": 200},
+                        "clear": {"type": "boolean"},
+                    },
+                    "required": ["target_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_handle_dialog",
+                "description": "Accept or dismiss a currently open native JavaScript alert, confirm, or prompt in a Chromium tab. Use only after a browser action returns awaiting_dialog and inspect the dialog text first.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_id": {"type": "string", "description": "Chromium target_id."},
+                        "action": {"type": "string", "enum": ["accept", "dismiss"]},
+                        "prompt_text": {"type": "string", "description": "Optional response for a prompt when accepting it."},
+                    },
+                    "required": ["target_id", "action"],
+                },
+            },
+        },
+    ])
 
 # --- Conditional Tool Registration ---
 if is_enabled("ENABLE_CALENDAR"):
