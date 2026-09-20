@@ -21,6 +21,7 @@ from emery.config import (
 )
 from emery.telegram_utils import normalize_message_thread_id
 import emery.globals as globals
+from emery.temporary_mode import is_temporary_mode
 
 
 @dataclass(frozen=True)
@@ -121,8 +122,21 @@ def _group_privacy_prompt() -> str:
     )
 
 
-def _build_session_prompt(chat_id: int | None, user_id: int | None, is_group: bool) -> str:
+def _build_session_prompt(
+    chat_id: int | None,
+    user_id: int | None,
+    is_group: bool,
+    *,
+    temporary: bool = False,
+) -> str:
     """Build only data that is stable for the session and safe for its scope."""
+    if temporary:
+        return (
+            "# Session Context\n"
+            "Temporary mode is active. Do not use, reveal, or create long-term memory, "
+            "persistent scratchpad notes, or topic summaries. Use only this turn's conversation context."
+        )
+
     # A group session is intentionally generic.  Private profile data and
     # timezone belong in the cache-friendly private session context.
     if is_group:
@@ -171,7 +185,8 @@ async def get_session_context(
     chat_id = _coerce_chat_id(chat_id)
     thread_id = normalize_message_thread_id(chat_id, thread_id) if chat_id is not None else None
     user_id = _coerce_user_id(user_id)
-    variant = _variant(session_variant)
+    temporary = is_temporary_mode(chat_id, thread_id)
+    variant = _variant(session_variant or ("temporary" if temporary else "default"))
     key = make_session_context_key(chat_id, thread_id, user_id, variant)
     if not force_refresh:
         cached = globals.session_context_cache.get(key)
@@ -190,8 +205,8 @@ async def get_session_context(
         user_id=None if is_group else user_id,
         session_variant=variant,
         is_group=is_group,
-        stable_prompt=get_stable_system_prompt(),
-        prompt=_build_session_prompt(chat_id, user_id, is_group),
+        stable_prompt=get_stable_system_prompt(temporary=temporary),
+        prompt=_build_session_prompt(chat_id, user_id, is_group, temporary=temporary),
     )
     globals.session_context_cache[key] = context
     return context
@@ -241,10 +256,11 @@ async def get_turn_context(
 
     # Scratchpad contents are intentionally tool-only.  A recent-use reminder
     # preserves discoverability without copying working notes into every prompt.
-    from emery.scratchpad import get_recent_scratchpad_reminder
-    scratchpad_reminder = get_recent_scratchpad_reminder()
-    if scratchpad_reminder:
-        sections.append(f"\n# Working Context Reminder\n- {scratchpad_reminder}")
+    if not is_temporary_mode(session.chat_id, session.thread_id):
+        from emery.scratchpad import get_recent_scratchpad_reminder
+        scratchpad_reminder = get_recent_scratchpad_reminder()
+        if scratchpad_reminder:
+            sections.append(f"\n# Working Context Reminder\n- {scratchpad_reminder}")
 
     return TurnContext(
         session=session,

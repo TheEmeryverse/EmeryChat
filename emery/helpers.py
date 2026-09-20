@@ -482,15 +482,19 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
     logging.debug(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
     return ""
 
-def _get_compact_stable_system_prompt() -> str:
+def _get_compact_stable_system_prompt(*, temporary: bool = False) -> str:
     policies = [
         "- Coprocessor: delegate long or mechanical text processing (roughly over 1,500 characters); do not delegate ordinary chat or direct tool work.",
         "- Reactions/media: use reactions, stickers, and GIFs sparingly and contextually, never instead of a substantive answer. If only sending one, finish with DONE.",
         "- Replies: quote an older message only when specifically relevant; use ordinary replies for normal conversation.",
     ]
-    if ENABLE_MEMORY:
+    if ENABLE_MEMORY and not temporary:
         policies.append(
             "- Memory: save only durable, future-relevant facts; never save temporary chatter or inappropriate private details. Write one concise factual statement when saving."
+        )
+    if temporary:
+        policies.append(
+            "- Temporary mode: do not use or create long-term memory, persistent scratchpad notes, or topic summaries. Treat this as an ephemeral conversation."
         )
     if str(ENABLE_SCHEDULER).lower() == "true":
         policies.append(
@@ -556,13 +560,16 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 Be serious, logical, concise, and helpful. Do not end every response with a question. Ask a question only when you genuinely need clarification or when a concrete next step would benefit from the user's choice; otherwise end naturally after answering or completing the task. Use tools for current or uncertain information."""
 
 
-def get_stable_system_prompt() -> str:
-    return _get_compact_stable_system_prompt()
+def get_stable_system_prompt(*, temporary: bool = False) -> str:
+    return _get_compact_stable_system_prompt(temporary=temporary)
 
 
 async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
     if user_id is None:
         user_id = globals.current_user_id.get()
+
+    from emery.temporary_mode import is_temporary_mode
+    temporary = is_temporary_mode()
         
     now = datetime.now(USER_TIMEZONE)
     now_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
@@ -575,7 +582,7 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
         
     memory_section = ""
     memory_instruction = ""
-    if ENABLE_MEMORY:
+    if ENABLE_MEMORY and not temporary:
         # Resolve circular import locally
         from emery.memory import retrieve_relevant_memories
         recalled = await retrieve_relevant_memories(user_query, user_id)
@@ -598,10 +605,12 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
         "\n- Use `read_scratchpad` when earlier working context may be outside the active conversation, and use `clear_scratchpad` only when the user explicitly asks."
         "\n- Do not save every search result, private secrets, or durable personal facts to the scratchpad; use long-term memory only for durable user facts."
     )
+    if temporary:
+        scratchpad_instruction = ""
     scratchpad_reminder = ""
     from emery.scratchpad import get_recent_scratchpad_reminder, get_scratchpad_snapshot
-    scratchpad_snapshot = get_scratchpad_snapshot()
-    recent_scratchpad_reminder = get_recent_scratchpad_reminder()
+    scratchpad_snapshot = "" if temporary else get_scratchpad_snapshot()
+    recent_scratchpad_reminder = "" if temporary else get_recent_scratchpad_reminder()
     if recent_scratchpad_reminder:
         scratchpad_reminder = f"\n\n# Working Context Reminder\n- {recent_scratchpad_reminder}"
 
@@ -685,11 +694,15 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
             "in your public group responses unless the user explicitly requests it in this group chat."
         )
 
+    temporary_notice = (
+        "\n\n# Temporary Mode\nLong-term memory, persistent scratchpad notes, and topic summarization are disabled for this conversation."
+        if temporary else ""
+    )
     prompt = f"""# Dynamic Runtime Context
 This context is current for this request. It is not the user's newest message.
 
 - Current date and time: {now_str}
-{group_privacy_instruction}{notifications}{memory_section}{scratchpad_instruction}{scratchpad_snapshot}{scratchpad_reminder}"""
+{group_privacy_instruction}{notifications}{temporary_notice}{memory_section}{scratchpad_instruction}{scratchpad_snapshot}{scratchpad_reminder}"""
 
     return prompt
 

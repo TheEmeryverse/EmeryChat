@@ -98,6 +98,9 @@ def _parse_created_at(value: str | None) -> datetime | None:
 
 def get_recent_scratchpad_reminder(max_turns: int = 10) -> str:
     """Return a reminder when a note was written within recent chat turns."""
+    from emery.temporary_mode import is_temporary_mode
+    if is_temporary_mode():
+        return ""
     if max_turns < 1:
         return ""
 
@@ -154,6 +157,9 @@ def get_recent_scratchpad_reminder(max_turns: int = 10) -> str:
 
 def get_scratchpad_snapshot() -> str:
     """Return a bounded prompt section for the current chat/thread."""
+    from emery.temporary_mode import is_temporary_mode
+    if is_temporary_mode():
+        return ""
     with _STORE_LOCK:
         store = _load_store()
         key, notes = _current_notes(store)
@@ -180,6 +186,9 @@ def get_scratchpad_snapshot() -> str:
 
 async def jot_down_note(note: str, title: str = "") -> str:
     """Save one short scratchpad note for the current chat/thread."""
+    from emery.temporary_mode import is_temporary_mode
+    if is_temporary_mode():
+        return "The scratchpad is disabled in temporary mode."
     clean = _clean_note(note)
     if not clean:
         return "No note was saved because the note was empty."
@@ -221,6 +230,9 @@ async def jot_down_note(note: str, title: str = "") -> str:
 
 async def read_scratchpad() -> str:
     """Return the current chat/thread scratchpad in model-readable form."""
+    from emery.temporary_mode import is_temporary_mode
+    if is_temporary_mode():
+        return "The scratchpad is disabled in temporary mode."
     with _STORE_LOCK:
         store = _load_store()
         key, notes = _current_notes(store)

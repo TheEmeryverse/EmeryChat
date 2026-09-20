@@ -443,6 +443,7 @@ async def _stream_main_model_response(
     on_event=None,
     steering_state=None,
     loop_count: int = 0,
+    raw_mode: bool = False,
 ) -> tuple[dict, float]:
     """Assemble an OpenAI-compatible SSE response without executing partial tool calls."""
     content_parts = []
@@ -478,6 +479,8 @@ async def _stream_main_model_response(
 
     async def start_reasoning_phase() -> None:
         nonlocal reasoning_started, reasoning_summary_task
+        if raw_mode:
+            return
         if reasoning_started:
             return
         reasoning_started = True
@@ -1326,23 +1329,32 @@ def _build_main_model_payload(
     turn_context=None,
     prompt_epoch: int | None = None,
     tools_schema_override=None,
+    raw_mode: bool = False,
 ) -> tuple[dict, list[dict]]:
     if max_tokens is None:
         max_tokens = MAIN_MODEL_MAX_TOKENS
     reasoning_effort = MAIN_MODEL_REASONING_EFFORT if THINK else "none"
     resolved_schema = tools_schema if tools_schema_override is None else tools_schema_override
-    prompt_state = get_stable_prompt_state(
-        stable_system_prompt=get_stable_system_prompt(),
-        model=model_to_use,
-        tool_schema=resolved_schema if allow_tools else [],
-        session_context=session_context,
-        prompt_epoch=prompt_epoch,
-    )
+    if raw_mode:
+        history_buffer = [
+            message for message in history_buffer
+            if message.get("role") != "system"
+        ]
     ollama_history = _build_ollama_history(history_buffer)
+
+    prompt_state = None
+    if not raw_mode:
+        prompt_state = get_stable_prompt_state(
+            stable_system_prompt=get_stable_system_prompt(),
+            model=model_to_use,
+            tool_schema=resolved_schema if allow_tools else [],
+            session_context=session_context,
+            prompt_epoch=prompt_epoch,
+        )
 
     # Turn context is request-local. Attach it to the latest user message in
     # the copied model history, never to the caller's stored history.
-    if turn_context is not None:
+    if turn_context is not None and not raw_mode:
         turn_text = turn_context if isinstance(turn_context, str) else json.dumps(
             turn_context, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         )
@@ -1369,7 +1381,11 @@ def _build_main_model_payload(
 
     payload = {
         "model": model_to_use,
-        "messages": prompt_state.prefix_messages() + copy.deepcopy(ollama_history),
+        "messages": (
+            copy.deepcopy(ollama_history)
+            if raw_mode
+            else prompt_state.prefix_messages() + copy.deepcopy(ollama_history)
+        ),
         "stream": ENABLE_LIVE_PROGRESS if stream is None else bool(stream),
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -1382,13 +1398,16 @@ def _build_main_model_payload(
     if payload["stream"]:
         payload["return_progress"] = True
 
-    if allow_tools and resolved_schema:
+    if allow_tools and resolved_schema and not raw_mode:
         payload["tools"] = prompt_state.tools()
 
     # These fields are intentionally absent for the custom local endpoint
     # unless an operator explicitly opts in through environment configuration.
     payload.update(endpoint_cache_options())
-    logging.debug("ENGINE: Request assembly %s", format_cache_diagnostics(cache_diagnostics(payload, prompt_state)))
+    if prompt_state is not None:
+        logging.debug("ENGINE: Request assembly %s", format_cache_diagnostics(cache_diagnostics(payload, prompt_state)))
+    else:
+        logging.debug("ENGINE: Request assembly temporary raw mode messages=%s", len(payload["messages"]))
 
     return payload, ollama_history
 
@@ -1793,8 +1812,12 @@ async def emery_engine(
     steering_state=None,
     session_context=None,
     turn_context=None,
+    raw_mode: bool | None = None,
 ):
     url = MAIN_MODEL_URL
+    if raw_mode is None:
+        from emery.temporary_mode import is_temporary_mode
+        raw_mode = is_temporary_mode()
     # Find the latest sender info from the history buffer.
     sender_user_id = None
     for msg in reversed(history_buffer):
@@ -1813,7 +1836,11 @@ async def emery_engine(
     # Preserve explicit runtime/test registry overrides. The optional
     # Tool Search hook resolves the canonical registry, so a caller that
     # intentionally supplies a replacement mapping/schema must bypass it.
-    if AVAILABLE_TOOLS is not tool_registry.AVAILABLE_TOOLS or tools_schema is not tool_registry.tools_schema:
+    if raw_mode:
+        active_tools = {}
+        active_tools_schema = []
+        tooling_source = "temporary-raw-mode"
+    elif AVAILABLE_TOOLS is not tool_registry.AVAILABLE_TOOLS or tools_schema is not tool_registry.tools_schema:
         active_tools = dict(AVAILABLE_TOOLS)
         active_tools_schema = copy.deepcopy(list(tools_schema))
         tooling_source = "explicit-registry-override"
@@ -1831,6 +1858,7 @@ async def emery_engine(
         session_context=session_context,
         turn_context=turn_context,
         tools_schema_override=active_tools_schema,
+        raw_mode=raw_mode,
     )
     request_diagnostics = {
         "epoch": current_prompt_epoch(),
@@ -1840,7 +1868,7 @@ async def emery_engine(
         "tool_schema_hash": stable_hash(payload.get("tools") or []),
         "request_shape_hash": prompt_request_shape_hash(payload),
     }
-    stable_messages = copy.deepcopy(payload.get("messages", [])[:1])
+    stable_messages = [] if raw_mode else copy.deepcopy(payload.get("messages", [])[:1])
     loop_count = 0
     steering_extensions = 0
     tool_calls_used = 0
@@ -1859,7 +1887,7 @@ async def emery_engine(
         if consumed_steers:
             logging.info("🧭 ENGINE: Applied %s queued steering message(s) before loop %s.", consumed_steers, loop_count + 1)
         request_history = copy.deepcopy(ollama_history)
-        runtime_context = _format_budget_context(
+        runtime_context = "" if raw_mode else _format_budget_context(
             loop_number=loop_count + 1,
             loop_tool_calls=loop_tool_calls_used,
             loop_searches=web_searches_used,
@@ -1869,8 +1897,10 @@ async def emery_engine(
         if forced_text_only:
             payload.pop("tools", None)
             payload.pop("reasoning_control", None)
-            runtime_context = f"{runtime_context}\n\n{_FORCED_TEXT_COMPLETION_PROMPT}"
-        _attach_history_context(request_history, runtime_context, prefer_last_user=True)
+            if not raw_mode:
+                runtime_context = f"{runtime_context}\n\n{_FORCED_TEXT_COMPLETION_PROMPT}"
+        if not raw_mode:
+            _attach_history_context(request_history, runtime_context, prefer_last_user=True)
         payload["messages"] = stable_messages + request_history
         if steering_state is not None and payload.get("stream") and ENABLE_LIVE_STEERING:
             payload["reasoning_control"] = True
@@ -1888,6 +1918,7 @@ async def emery_engine(
                             on_event=on_event,
                             steering_state=steering_state if ENABLE_LIVE_STEERING else None,
                             loop_count=loop_count,
+                            raw_mode=raw_mode,
                         )
                     except _StreamingModelError as stream_error:
                         if stream_error.events_seen:
@@ -1940,7 +1971,7 @@ async def emery_engine(
             for thought in content_thoughts:
                 turn_reasoning_parts.append(_strip_id_prefix(thought))
 
-            if turn_reasoning_parts:
+            if turn_reasoning_parts and not raw_mode:
                 reasoning_summary = await _summarize_reasoning_block(
                     "\n\n".join(part for part in turn_reasoning_parts if part),
                     loop_count=loop_count,

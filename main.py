@@ -15,6 +15,7 @@ from emery.bot import (
     handle_notes_command,
     handle_clear_notes_command,
     handle_wipe_command,
+    handle_temporary_command,
     handle_message,
     handle_reaction,
     bot_post_init,
@@ -89,6 +90,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("notes", handle_notes_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("clear_notes", handle_clear_notes_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("wipe", handle_wipe_command, filters=HUMAN_SENDER))
+    application.add_handler(CommandHandler("temporary", handle_temporary_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("approve", handle_command_approval_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("deny", handle_command_approval_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("expert", handle_expert_command, filters=HUMAN_SENDER))

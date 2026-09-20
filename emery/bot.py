@@ -27,6 +27,12 @@ from emery.helpers import (
     get_image_description, clean_thinking_tags, telegram_escape
 )
 from emery.session_context import get_session_context, get_turn_context, set_current_context, clear_session_context_cache
+from emery.temporary_mode import (
+    is_temporary_mode,
+    is_chat_temporary_mode,
+    set_temporary_mode,
+    temporary_history,
+)
 from emery.logging_utils import safe_preview
 from emery.memory import retrieve_relevant_memories, wipe_memory
 from emery.scratchpad import clear_scratchpad, read_scratchpad
@@ -428,6 +434,7 @@ def _help_text() -> str:
         "<b>General</b>",
         "/help - Show this command list.",
         "/clear - Clear this chat's active context history.",
+        "/temporary on|off - Use an ephemeral raw-model conversation with no prompt, tools, or memory.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
@@ -487,6 +494,40 @@ async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     suffix = f" Cleared {cleared_approvals} session approval(s)." if cleared_approvals else ""
     await update.message.reply_text(f"Context cleared.{suffix}")
+
+
+async def handle_temporary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle a raw, ephemeral conversation for the current chat/thread."""
+    if not is_user_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    thread_id = normalize_message_thread_id(
+        chat_id,
+        update.message.message_thread_id if update.message else None,
+    )
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(thread_id)
+    globals.current_user_id.set(getattr(update.effective_user, "id", None))
+
+    argument = " ".join(context.args or []).strip().casefold()
+    if argument not in {"on", "off"}:
+        state = "on" if is_temporary_mode(chat_id, thread_id) else "off"
+        await update.message.reply_text(
+            f"Temporary mode is {state}. Use /temporary on or /temporary off."
+        )
+        return
+
+    enabled = argument == "on"
+    set_temporary_mode(chat_id, thread_id, enabled)
+    clear_session_context_cache(chat_id=chat_id, thread_id=thread_id)
+    if enabled:
+        await update.message.reply_text(
+            "🕶️ Temporary mode on — raw model only; no prompt, tools, or memory."
+        )
+    else:
+        await update.message.reply_text(
+            "🕶️ Temporary mode off — normal prompt, tools, memory, and prior context restored."
+        )
 
 
 async def handle_notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -654,17 +695,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preview = safe_preview(replied_text, max_len=80)
         reply_info = f" (Replying to message ID {reply_to_id}: '{preview}')"
 
-    session_context = await get_session_context(
-        chat_id=chat_id,
-        thread_id=globals.CURRENT_THREAD_ID.get(),
-        user_id=update.effective_user.id,
-    )
-    turn_context = await get_turn_context(
-        content_text,
-        update.effective_user.id,
-        session=session_context,
-    )
-    set_current_context(session_context, turn_context)
+    temporary_response_mode = is_temporary_mode(chat_id, globals.CURRENT_THREAD_ID.get())
+    if temporary_response_mode:
+        session_context = None
+        turn_context = None
+        globals.CURRENT_SESSION_CONTEXT.set(None)
+        globals.CURRENT_TURN_CONTEXT.set(None)
+    else:
+        session_context = await get_session_context(
+            chat_id=chat_id,
+            thread_id=globals.CURRENT_THREAD_ID.get(),
+            user_id=update.effective_user.id,
+        )
+        turn_context = await get_turn_context(
+            content_text,
+            update.effective_user.id,
+            session=session_context,
+        )
+        set_current_context(session_context, turn_context)
     # Runtime context is supplied separately to the engine.  Keep history as
     # the actual conversation so old histories remain readable and compact.
     history_content = f"{content}{reply_info}"
@@ -813,6 +861,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # Determine final reply target from globals
     reply_target_id = globals.chat_reply_targets.pop(chat_id, None)
+    current_thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
+    temporary_response_mode = is_temporary_mode(chat_id, current_thread_id)
 
     # --- TYPING INDICATOR LOOP ---
     typing_stop = asyncio.Event()
@@ -1048,15 +1098,20 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         from emery.engine import emery_engine
+        history_buffer = globals.chat_histories[chat_id]
+        if temporary_response_mode:
+            history_buffer = temporary_history(history_buffer, chat_id, current_thread_id)
         response_text, voice_sent_via_tool = await emery_engine(
-            globals.chat_histories[chat_id],
+            history_buffer,
             model_to_use=model_to_use,
+            allow_tools=not temporary_response_mode,
             on_event=handle_engine_event if status_stack else None,
             steering_state=steering_state,
             session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
                              if globals.CURRENT_SESSION_CONTEXT.get() else None),
             turn_context=(globals.CURRENT_TURN_CONTEXT.get().prompt
                           if globals.CURRENT_TURN_CONTEXT.get() else None),
+            raw_mode=temporary_response_mode,
         )
     except Exception as e:
         logging.error(f"Error running engine in debounce worker: {e}", exc_info=True)
@@ -1079,6 +1134,12 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # --- THINKING SPLITTER LOGIC ---
     clean_response = clean_thinking_tags(response_text).strip()
+    temporary_banner = "🕶️ Temporary mode — no long-term memory."
+    delivered_response = (
+        f"{temporary_banner}\n\n{clean_response}"
+        if temporary_response_mode and clean_response
+        else clean_response
+    )
 
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
@@ -1123,21 +1184,23 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 sent_msg = await globals.application_bot.send_voice(
                     chat_id=chat_id,
                     voice=v_out,
-                    caption="Voice message",
+                    caption=temporary_banner if temporary_response_mode else "Voice message",
                     reply_parameters=reply_params,
                     message_thread_id=globals.CURRENT_THREAD_ID.get()
                 )
                 sent_msgs = [sent_msg] if sent_msg else []
             else:
-                sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+                sent_msgs = await send_model_text_message_as_reply(chat_id, delivered_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
         else:
-            if clean_response:
-                sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            if delivered_response:
+                sent_msgs = await send_model_text_message_as_reply(chat_id, delivered_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
             elif not voice_sent_via_tool:
                 logging.error("❌ TELEGRAM: Model returned no final response after reasoning budget enforcement.")
                 sent_msgs = await send_model_text_message_as_reply(
                     chat_id,
-                    "I reached the reasoning limit before producing a final answer. Please resend your request.",
+                    f"{temporary_banner}\n\nI reached the reasoning limit before producing a final answer. Please resend your request."
+                    if temporary_response_mode
+                    else "I reached the reasoning limit before producing a final answer. Please resend your request.",
                     reply_to_message_id=reply_target_id,
                     message_thread_id=globals.CURRENT_THREAD_ID.get(),
                 )
@@ -1169,7 +1232,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         if msg.get("role") == "user" and msg.get("user_id"):
             last_user_id = msg.get("user_id")
             break
-    asyncio.create_task(summarize_topics_background(chat_id, last_user_id))
+    if not temporary_response_mode:
+        asyncio.create_task(summarize_topics_background(chat_id, last_user_id))
 
 async def send_safe_large_message(update: Update, text: str, reply_to_message_id: int = None):
     """
@@ -1290,13 +1354,20 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
             message_thread_id = history_message.get("message_thread_id")
             break
     globals.CURRENT_THREAD_ID.set(message_thread_id)
-    session_context = await get_session_context(chat_id, message_thread_id, user_id)
-    turn_context = await get_turn_context(
-        f"reaction update: {', '.join(emojis)}",
-        user_id,
-        session=session_context,
-    )
-    set_current_context(session_context, turn_context)
+    temporary_response_mode = is_temporary_mode(chat_id, message_thread_id)
+    if temporary_response_mode:
+        session_context = None
+        turn_context = None
+        globals.CURRENT_SESSION_CONTEXT.set(None)
+        globals.CURRENT_TURN_CONTEXT.set(None)
+    else:
+        session_context = await get_session_context(chat_id, message_thread_id, user_id)
+        turn_context = await get_turn_context(
+            f"reaction update: {', '.join(emojis)}",
+            user_id,
+            session=session_context,
+        )
+        set_current_context(session_context, turn_context)
     
     msg_text = ""
     for msg in globals.chat_histories.get(chat_id, []):
@@ -1318,6 +1389,8 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
         f"If a reaction back is appropriate, use the `react_to_message` tool. "
         f"If no text response is necessary, you MUST reply with exactly 'DONE' to remain silent.]"
     )
+    if temporary_response_mode:
+        trigger_content = f"[User reaction: '{emoji_str}' on message ID {message_id}: '{msg_text}']"
     
     globals.current_user_id.set(user_id)
     trigger_msg = {
@@ -1343,8 +1416,13 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     typing_task = asyncio.create_task(keep_typing())
     
     try:
+        reaction_history = globals.chat_histories[chat_id]
+        if temporary_response_mode:
+            reaction_history = temporary_history(reaction_history, chat_id, message_thread_id)
         response_text, voice_sent_via_tool = await emery_engine(
-            globals.chat_histories[chat_id],
+            reaction_history,
+            allow_tools=not temporary_response_mode,
+            raw_mode=temporary_response_mode,
             session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
                              if globals.CURRENT_SESSION_CONTEXT.get() else None),
             turn_context=(globals.CURRENT_TURN_CONTEXT.get().prompt
@@ -1373,7 +1451,11 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
     })
     
     try:
-        sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=message_id)
+        delivered_response = (
+            f"🕶️ Temporary mode — no long-term memory.\n\n{clean_response}"
+            if temporary_response_mode else clean_response
+        )
+        sent_msgs = await send_model_text_message_as_reply(chat_id, delivered_response, reply_to_message_id=message_id)
         if sent_msgs:
             last_entry = globals.chat_histories[chat_id][-1]
             last_entry["message_ids"] = [m.message_id for m in sent_msgs]
@@ -1564,6 +1646,9 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
         logging.debug("💓 HEARTBEAT: TELEGRAM_GROUP_CHAT_ID not set, skipping check.")
         return
     group_chat_id = TELEGRAM_GROUP_CHAT_ID
+    if is_chat_temporary_mode(group_chat_id):
+        logging.debug("💓 HEARTBEAT: Suppressed because temporary mode is active.")
+        return
         
     history = globals.chat_histories.get(group_chat_id)
     if not history:
@@ -1596,6 +1681,8 @@ async def heartbeat_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_heartbeat_trigger(chat_id: int, silence_seconds: float = None):
     """Triggers the model to potentially circle back or check in on a silent chat."""
+    if is_chat_temporary_mode(chat_id):
+        return
     globals.TARGET_CHAT_ID.set(chat_id)
     
     # Determine the topic/thread ID for the heartbeats

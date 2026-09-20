@@ -526,7 +526,8 @@ def _candidate_items_for_query(store: dict, user_id: int, query: str, chat_id: i
 
 
 async def retrieve_relevant_memories(user_query: str, user_id: int = None) -> str:
-    if not ENABLE_MEMORY:
+    from emery.temporary_mode import is_temporary_mode
+    if not ENABLE_MEMORY or is_temporary_mode():
         return ""
     if user_id is None:
         user_id = globals.current_user_id.get()
@@ -645,6 +646,9 @@ def _store_item_locked(
 async def save_user_memory(fact: str, user_id: int = None) -> str:
     if user_id is None:
         user_id = globals.current_user_id.get()
+    from emery.temporary_mode import is_temporary_mode
+    if is_temporary_mode():
+        return "Memory is disabled in temporary mode."
     if not ENABLE_MEMORY or user_id is None:
         return "Memory is disabled."
 
@@ -678,7 +682,8 @@ async def save_user_memory(fact: str, user_id: int = None) -> str:
 
 async def consolidate_memory_background(user_id: int = None) -> None:
     global _is_consolidating
-    if _is_consolidating or not ENABLE_MEMORY:
+    from emery.temporary_mode import is_temporary_mode
+    if _is_consolidating or not ENABLE_MEMORY or is_temporary_mode():
         return
 
     _is_consolidating = True
@@ -858,7 +863,8 @@ def get_camera_log_summary() -> str:
 
 
 async def _store_topic_memory(topic_text: str, chat_id: int, user_id: int | None) -> None:
-    if not topic_text:
+    from emery.temporary_mode import is_chat_temporary_mode
+    if not topic_text or is_chat_temporary_mode(chat_id):
         return
     metadata = {}
     if isinstance(topic_text, dict):
@@ -920,6 +926,9 @@ async def _store_topic_memory(topic_text: str, chat_id: int, user_id: int | None
 
 async def summarize_topics_background(chat_id: int, user_id: int = None) -> None:
     global _last_summary_hist_len
+    from emery.temporary_mode import is_chat_temporary_mode
+    if is_chat_temporary_mode(chat_id):
+        return
     if user_id is None:
         user_id = globals.current_user_id.get()
     if chat_id in _topic_summary_chats:
@@ -933,6 +942,8 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
 
     _topic_summary_chats.add(chat_id)
     try:
+        if is_chat_temporary_mode(chat_id):
+            return
         recent_history = history[max(last_len, hist_len - 12):]
         snippet = []
         participants = []
@@ -1015,6 +1026,8 @@ async def summarize_topics_background(chat_id: int, user_id: int = None) -> None
 
         participant_name_map = {p["name"].lower(): p["user_id"] for p in participants if p.get("name")}
         for topic in normalized_topics:
+            if is_chat_temporary_mode(chat_id):
+                return
             cleaned_summary = topic["summary"]
             topic_class = topic["topic_class"]
             raw_participants = topic["participants"]
