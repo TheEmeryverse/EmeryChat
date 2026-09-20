@@ -94,6 +94,15 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     return thought
 
 
+def _combine_reasoning_summaries(summaries: list[str]) -> str:
+    """Return the completed, user-safe reasoning summaries for this turn."""
+    return "\n\n".join(
+        str(summary).strip()
+        for summary in summaries
+        if str(summary or "").strip()
+    )
+
+
 _REASONING_SUMMARY_TIMEOUT_SECONDS = 60.0
 _REASONING_SUMMARY_MAX_TOKENS = 4096
 _REASONING_SUMMARY_MAX_WORDS = 300
@@ -1800,6 +1809,7 @@ async def emery_engine(
         
     voice_sent_via_tool = False
     thinking_timeline = []
+    completed_reasoning_summaries = []
     # Preserve explicit runtime/test registry overrides. The optional
     # Tool Search hook resolves the canonical registry, so a caller that
     # intentionally supplies a replacement mapping/schema must bypass it.
@@ -1936,6 +1946,7 @@ async def emery_engine(
                     loop_count=loop_count,
                 )
                 if reasoning_summary:
+                    completed_reasoning_summaries.append(reasoning_summary)
                     thinking_timeline.append(
                         _format_thinking_turn(loop_count, "Summary", reasoning_summary)
                     )
@@ -2098,6 +2109,24 @@ async def emery_engine(
 
             thinking_char_count = sum(len(entry) for entry in thinking_timeline if entry)
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))
+
+            full_turn_reasoning_summary = _combine_reasoning_summaries(
+                completed_reasoning_summaries
+            )
+            if full_turn_reasoning_summary:
+                # This is the final coprocessor result for the entire turn.
+                # Await the callback so Telegram edits the existing reasoning
+                # message before the caller sends the final response.
+                await _emit_engine_event(
+                    on_event,
+                    {
+                        "type": "reasoning_summary",
+                        "text": full_turn_reasoning_summary,
+                        "source": "coprocessor",
+                        "final": True,
+                        "full_turn": True,
+                    },
+                )
 
             thinking_payload = "\n\n".join(entry for entry in thinking_timeline if entry)
             if thinking_payload:
