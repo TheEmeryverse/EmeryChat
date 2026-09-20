@@ -20,6 +20,10 @@ camera_log.md
 data/legacy/
 data/logs/
 data/memory/
+data/browser-profile*/
+data/performance/
+data/runtime/
+data/scratchpad/
 test_camera_log.md
 custom_jobs.json
 memory.md

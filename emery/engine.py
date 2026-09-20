@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import copy
 import importlib
@@ -1383,6 +1384,17 @@ def _build_main_model_payload(
     return payload, ollama_history
 
 
+def _tool_result_event_metadata(fn: str, result) -> dict:
+    """Expose only small UI-safe fields needed by live tool status messages."""
+    if not isinstance(result, dict):
+        return {}
+    allowed = {"status", "target_id", "url", "title", "key", "direction", "amount", "action"}
+    metadata = {key: result[key] for key in allowed if key in result}
+    if fn == "list_browser_tabs" and isinstance(result.get("tabs"), list):
+        metadata["tab_count"] = len(result["tabs"])
+    return metadata
+
+
 async def _send_tool_status(fn: str, args: dict, on_event=None) -> str:
     if fn in ("react_to_message", "reply_to_message", "send_sticker", "send_gif") or fn in _INTERNAL_TOOL_NAMES:
         return ""
@@ -1397,6 +1409,7 @@ async def _send_tool_status(fn: str, args: dict, on_event=None) -> str:
                 "tool_name": fn,
                 "friendly_name": status_msg,
                 "text": status_msg,
+                "args": dict(args or {}),
                 "source": "application",
             },
         )
@@ -1469,6 +1482,41 @@ def _append_model_media_from_tool_result(result: dict, ollama_history: list[dict
             ],
         })
     return True
+
+
+async def _append_tool_media_for_model(result: dict, ollama_history: list[dict]) -> str | None:
+    """Make a tool-selected image available without sending it to a text-only main model."""
+    if not isinstance(result, dict):
+        return None
+    attachment = result.get("_model_attachment")
+    if not isinstance(attachment, dict):
+        return None
+
+    if MAIN_MODEL_VISION:
+        return "main_model_vision" if _append_model_media_from_tool_result(result, ollama_history) else None
+
+    from emery.media import get_artifact
+    from emery.helpers import get_image_description
+
+    artifact = get_artifact(attachment.get("artifact_id"))
+    if not artifact or not artifact.get("bytes"):
+        return None
+
+    image_b64 = base64.b64encode(artifact["bytes"]).decode("ascii")
+    label = str(attachment.get("label") or "selected image").strip()
+    description = await get_image_description(
+        image_b64,
+        f"Describe this {label} for the main text model. Focus on visible facts relevant to the user's request.",
+    )
+    description = str(description or "").strip()
+    if not description:
+        return None
+
+    ollama_history.append({
+        "role": "user",
+        "content": f"[Dedicated vision model analysis of {label}]\n{description}",
+    })
+    return "dedicated_vision"
 
 
 def _web_search_budget_key(args: dict) -> str:
@@ -1990,8 +2038,11 @@ async def emery_engine(
                         
                     history_buffer.append(tool_response)
                     ollama_history.append(tool_response)
-                    if _append_model_media_from_tool_result(result, ollama_history):
+                    media_route = await _append_tool_media_for_model(result, ollama_history)
+                    if media_route == "main_model_vision":
                         logging.info("🖼️ ENGINE: Attached selected research image to the next main-model request.")
+                    elif media_route == "dedicated_vision":
+                        logging.info("👁️ ENGINE: Routed selected image through the dedicated vision model.")
                     await _emit_engine_event(
                         on_event,
                         {
@@ -1999,6 +2050,8 @@ async def emery_engine(
                             "tool": friendly_name,
                             "tool_name": fn,
                             "friendly_name": friendly_name,
+                            "args": dict(args or {}),
+                            "result_metadata": _tool_result_event_metadata(fn, result),
                             "elapsed_seconds": time.perf_counter() - tool_started_at,
                         },
                     )

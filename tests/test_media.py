@@ -1,3 +1,5 @@
+import asyncio
+
 from PIL import Image
 
 from emery import engine, media
@@ -73,6 +75,30 @@ def test_tool_selected_image_is_ephemeral_model_history():
     assert isinstance(assembled[0]["content"], list)
     assert assembled[0]["content"][0]["type"] == "text"
     assert assembled[0]["content"][1]["image_url"]["url"].startswith("data:image/")
+
+
+def test_text_main_routes_tool_image_through_dedicated_vision_model(monkeypatch):
+    monkeypatch.setattr(engine, "MAIN_MODEL_VISION", False)
+    artifact_id = media.store_artifact(_jpeg_bytes(), label="Browser screenshot")
+    calls = []
+
+    async def describe(image_b64, prompt):
+        calls.append((image_b64, prompt))
+        return "The screenshot shows a model page."
+
+    monkeypatch.setattr("emery.helpers.get_image_description", describe)
+    assembled = []
+    route = asyncio.run(engine._append_tool_media_for_model(
+        {"_model_attachment": {"artifact_id": artifact_id, "label": "Browser screenshot"}},
+        assembled,
+    ))
+
+    assert route == "dedicated_vision"
+    assert len(calls) == 1
+    assert assembled == [{
+        "role": "user",
+        "content": "[Dedicated vision model analysis of Browser screenshot]\nThe screenshot shows a model page.",
+    }]
 
 
 def test_image_candidates_are_metadata_only():

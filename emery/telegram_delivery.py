@@ -23,6 +23,12 @@ MAX_TELEGRAM_RICH_MESSAGE_BYTES = 32768
 MIN_TELEGRAM_SPLIT_LEN = 1000
 HTML_TAG_RE = re.compile(r"</?([a-zA-Z][\w:-]*)(?:\s[^<>]*)?>")
 VOID_HTML_TAGS = {"br", "hr", "img"}
+_UNSET = object()
+
+
+def _is_message_not_modified(exc: BaseException) -> bool:
+    """Return whether Telegram rejected an edit because nothing changed."""
+    return isinstance(exc, BadRequest) and "message is not modified" in str(exc).casefold()
 
 
 class TelegramLiveProgress:
@@ -47,6 +53,10 @@ class TelegramLiveProgress:
         self.message_id = None
         self.visible_since = None
         self.pending_text = None
+        self.displayed_text = None
+        self.displayed_html = None
+        self.reply_markup = None
+        self._operation_lock = asyncio.Lock()
         self.disabled = False
 
     async def run_heartbeat(
@@ -81,80 +91,420 @@ class TelegramLiveProgress:
     def _html_text(text: str) -> str:
         return f"<i>{html.escape(str(text or ''), quote=False)}</i>"
 
-    async def update(self, text: str, *, force: bool = False) -> None:
+    async def update(
+        self,
+        text: str,
+        *,
+        force: bool = False,
+        reply_markup=_UNSET,
+        rendered_html: str | None = None,
+    ) -> None:
         clean_text = str(text or "").strip()
         if not clean_text or self.disabled:
             return
 
-        self.pending_text = clean_text
-        now = time.monotonic()
-        if not force and self.message_id is None and now - self.started_at < self.min_delay:
-            return
+        async with self._operation_lock:
+            if self.disabled:
+                return
 
-        if self.message_id is not None and self.last_sent_at is not None:
-            remaining = self.edit_interval - (now - self.last_sent_at)
-            if remaining > 0:
-                if not force:
+            if reply_markup is not _UNSET:
+                self.reply_markup = reply_markup
+            self.pending_text = clean_text
+            now = time.monotonic()
+            if not force and self.message_id is None and now - self.started_at < self.min_delay:
+                return
+
+            if self.message_id is not None and self.last_sent_at is not None:
+                remaining = self.edit_interval - (now - self.last_sent_at)
+                if remaining > 0:
+                    if not force:
+                        return
+                    await asyncio.sleep(remaining)
+
+            text_to_send = self.pending_text
+            html_to_send = rendered_html if rendered_html is not None else self._html_text(text_to_send)
+            try:
+                if self.message_id is None:
+                    send_kwargs = dict(
+                        chat_id=self.chat_id,
+                        text=html_to_send,
+                        parse_mode="HTML",
+                        message_thread_id=self.message_thread_id,
+                    )
+                    if self.reply_markup is not None:
+                        send_kwargs["reply_markup"] = self.reply_markup
+                    sent = await self.bot.send_message(**send_kwargs)
+                    self.message_id = getattr(sent, "message_id", None)
+                    self.visible_since = time.monotonic()
+                else:
+                    await self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=self.message_id,
+                        text=html_to_send,
+                        parse_mode="HTML",
+                        reply_markup=self.reply_markup,
+                    )
+                self.displayed_text = text_to_send
+                self.displayed_html = html_to_send
+                self.pending_text = None
+                self.last_sent_at = time.monotonic()
+            except BadRequest as exc:
+                # Telegram reports an unchanged edit as a BadRequest, but the
+                # status message is still healthy and must remain usable for
+                # later approval/browser updates.
+                if _is_message_not_modified(exc):
+                    self.displayed_text = text_to_send
+                    self.displayed_html = html_to_send
+                    self.pending_text = None
+                    self.last_sent_at = time.monotonic()
+                    logging.debug(
+                        "TELEGRAM PROGRESS: unchanged update ignored chat_id=%s message_id=%s",
+                        self.chat_id,
+                        self.message_id,
+                    )
                     return
-                await asyncio.sleep(remaining)
+                self.disabled = True
+                logging.warning(
+                    "⚠️ TELEGRAM PROGRESS: unable to update chat_id=%s thread_id=%s: %s",
+                    self.chat_id,
+                    self.message_thread_id,
+                    exc,
+                )
+            except Exception as exc:
+                self.disabled = True
+                logging.warning(
+                    "⚠️ TELEGRAM PROGRESS: unable to update chat_id=%s thread_id=%s: %s",
+                    self.chat_id,
+                    self.message_thread_id,
+                    exc,
+                )
 
-        text_to_send = self.pending_text
-        try:
-            if self.message_id is None:
+    async def bring_to_bottom(self) -> None:
+        """Re-post this one message below newer chat messages."""
+        await self.repost_at_bottom()
+
+    async def repost_at_bottom(self) -> None:
+        """Replace this message when its current position is stale."""
+        async with self._operation_lock:
+            if self.disabled or self.message_id is None or not self.displayed_text:
+                return
+
+            old_message_id = self.message_id
+            try:
                 sent = await self.bot.send_message(
                     chat_id=self.chat_id,
-                    text=self._html_text(text_to_send),
+                    text=self.displayed_html or self._html_text(self.displayed_text),
                     parse_mode="HTML",
                     message_thread_id=self.message_thread_id,
+                    **({"reply_markup": self.reply_markup} if self.reply_markup is not None else {}),
                 )
-                self.message_id = getattr(sent, "message_id", None)
+                new_message_id = getattr(sent, "message_id", None)
+                if new_message_id is None:
+                    raise RuntimeError("Telegram returned no message ID for the replacement progress message")
+
+                self.message_id = new_message_id
                 self.visible_since = time.monotonic()
-            else:
-                await self.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=self._html_text(text_to_send),
-                    parse_mode="HTML",
+                self.last_sent_at = time.monotonic()
+                try:
+                    await self.bot.delete_message(chat_id=self.chat_id, message_id=old_message_id)
+                except Exception as exc:
+                    logging.debug(
+                        "TELEGRAM PROGRESS: unable to delete replaced message chat_id=%s message_id=%s: %s",
+                        self.chat_id,
+                        old_message_id,
+                        exc,
+                    )
+            except Exception as exc:
+                self.disabled = True
+                logging.warning(
+                    "⚠️ TELEGRAM PROGRESS: unable to move message to bottom chat_id=%s thread_id=%s: %s",
+                    self.chat_id,
+                    self.message_thread_id,
+                    exc,
                 )
-            self.pending_text = None
-            self.last_sent_at = time.monotonic()
-        except Exception as exc:
-            self.disabled = True
-            logging.warning(
-                "⚠️ TELEGRAM PROGRESS: unable to update chat_id=%s thread_id=%s: %s",
-                self.chat_id,
-                self.message_thread_id,
-                exc,
-            )
+
+    async def refresh_in_place(self) -> None:
+        """Edit the existing status message without changing its position."""
+        async with self._operation_lock:
+            if self.disabled or self.message_id is None or not self.displayed_text:
+                return
+            displayed_text = self.displayed_text
+            displayed_html = self.displayed_html
+            reply_markup = self.reply_markup
+
+        await self.update(
+            displayed_text,
+            force=True,
+            reply_markup=reply_markup,
+            rendered_html=displayed_html,
+        )
 
     async def close_after_minimum(self, minimum_visible_seconds: float = 10.0) -> None:
         """Delete the message after it has been visible for the requested minimum."""
-        if self.message_id is None:
+        async with self._operation_lock:
+            message_id = self.message_id
+            visible_since = self.visible_since
+        if message_id is None:
             return
 
         minimum_visible_seconds = max(0.0, float(minimum_visible_seconds))
-        if self.visible_since is not None:
-            remaining = minimum_visible_seconds - (time.monotonic() - self.visible_since)
+        if visible_since is not None:
+            remaining = minimum_visible_seconds - (time.monotonic() - visible_since)
             if remaining > 0:
                 await asyncio.sleep(remaining)
         await self.close()
 
     async def close(self) -> None:
-        if self.message_id is None:
-            return
-        try:
-            await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
-        except Exception as exc:
-            logging.debug(
-                "TELEGRAM PROGRESS: unable to delete temporary message chat_id=%s message_id=%s: %s",
-                self.chat_id,
-                self.message_id,
-                exc,
+        async with self._operation_lock:
+            if self.message_id is None:
+                return
+            message_id = self.message_id
+            try:
+                await self.bot.delete_message(chat_id=self.chat_id, message_id=message_id)
+            except Exception as exc:
+                logging.debug(
+                    "TELEGRAM PROGRESS: unable to delete temporary message chat_id=%s message_id=%s: %s",
+                    self.chat_id,
+                    message_id,
+                    exc,
+                )
+            finally:
+                self.message_id = None
+                self.visible_since = None
+                self.pending_text = None
+                self.displayed_text = None
+                self.displayed_html = None
+                self.reply_markup = None
+
+
+class PersistentStatusStack:
+    """Own the ordered live-status messages at the chat bottom.
+
+    Telegram cannot move a message by editing it. Status updates therefore
+    keep the original message IDs and edit the three messages in place:
+
+    1. live reasoning
+    2. most recently called tool, created only when needed
+    3. browser or terminal state, created only when needed
+
+    The reasoning message is created for every live turn. The tool and
+    browser/terminal messages are created lazily only when that state exists.
+    All active messages are deleted together after the final response.
+    """
+
+    SLOT_ORDER = ("reasoning", "tool", "environment")
+    LEGACY_SLOT_MAP = {
+        "command": "environment",
+        "browser": "environment",
+        "approval": "environment",
+    }
+    DEFAULT_REASONING = "💭 I’m thinking through your request…"
+    DEFAULT_TOOL = "🔧 No tool call yet."
+    DEFAULT_ENVIRONMENT = "🖥️ No browser or terminal activity yet."
+
+    def __init__(self, bot, chat_id: int, *, message_thread_id: int = None):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.message_thread_id = normalize_message_thread_id(chat_id, message_thread_id)
+        self.messages = {
+            slot: TelegramLiveProgress(
+                bot,
+                chat_id,
+                message_thread_id=self.message_thread_id,
+                min_delay=0.0,
+                edit_interval=0.0,
             )
-        finally:
-            self.message_id = None
-            self.visible_since = None
-            self.pending_text = None
+            for slot in self.SLOT_ORDER
+        }
+        self.slots = {
+            "reasoning": self.DEFAULT_REASONING,
+            "tool": None,
+            "environment": None,
+        }
+        self._base_environment = None
+        self._approval_text = None
+        self.browser_urls = {}
+        self.mode = None
+        self._approval_markup = None
+        self._lock = asyncio.Lock()
+        self._at_bottom = True
+
+    @property
+    def message_id(self):
+        return self.messages["reasoning"].message_id
+
+    @property
+    def message(self):
+        """Compatibility alias for callers that used the old single message."""
+        return self.messages["reasoning"]
+
+    @property
+    def disabled(self):
+        return any(message.disabled for message in self.messages.values())
+
+    def _render_slot(self, slot: str) -> str:
+        if slot == "environment" and self._approval_text:
+            return self._approval_text
+        value = str(self.slots.get(slot) or "").strip()
+        if slot == "reasoning" and value and not value.startswith("💭"):
+            return f"💭 {value}"
+        return value
+
+    def _environment_visible(self) -> bool:
+        return bool(self._approval_text or self._base_environment)
+
+    def _tool_visible(self) -> bool:
+        return bool(self.slots.get("tool"))
+
+    def _reply_markup_for(self, slot: str):
+        return self._approval_markup if slot == "environment" and self._approval_text else None
+
+    async def note_newer_message(self) -> None:
+        """Record that a normal chat message is newer than this status block."""
+        async with self._lock:
+            if any(message.message_id is not None for message in self.messages.values()):
+                self._at_bottom = False
+
+    async def _ensure_messages_locked(self) -> None:
+        """Create the currently required messages in their fixed order."""
+        for slot in self.SLOT_ORDER:
+            message = self.messages[slot]
+            if slot == "tool" and not self._tool_visible():
+                if message.message_id is not None:
+                    await message.close()
+                continue
+            if slot == "environment" and not self._environment_visible():
+                if message.message_id is not None:
+                    await message.close()
+                continue
+            if message.message_id is not None:
+                continue
+            await message.update(
+                self._render_slot(slot),
+                force=True,
+                reply_markup=self._reply_markup_for(slot),
+            )
+
+    def _canonical_slot(self, slot: str) -> str:
+        if slot in self.SLOT_ORDER:
+            return slot
+        if slot in self.LEGACY_SLOT_MAP:
+            return self.LEGACY_SLOT_MAP[slot]
+        raise ValueError(f"unknown persistent status slot: {slot}")
+
+    async def set_slot(
+        self,
+        slot: str,
+        value: str | None,
+        *,
+        reply_markup=_UNSET,
+        force: bool = True,
+        mode: str | None = None,
+    ) -> None:
+        original_slot = slot
+        slot = self._canonical_slot(slot)
+        async with self._lock:
+            if mode is not None:
+                if mode not in {"terminal", "browser"}:
+                    raise ValueError(f"unknown persistent status mode: {mode}")
+                self.mode = mode
+            if original_slot == "approval":
+                self._approval_text = str(value).strip() if value else None
+                if reply_markup is not _UNSET:
+                    self._approval_markup = reply_markup
+            elif slot == "environment":
+                self._base_environment = str(value).strip() if value else None
+                self.slots[slot] = self._base_environment
+            elif slot == "tool":
+                self.slots[slot] = str(value).strip() if value else None
+            else:
+                self.slots[slot] = str(value).strip() if value else self.DEFAULT_REASONING
+
+            await self._ensure_messages_locked()
+            if not self._at_bottom:
+                await self._repost_locked()
+            if (slot != "tool" or self._tool_visible()) and (
+                slot != "environment" or self._environment_visible()
+            ):
+                await self.messages[slot].update(
+                    self._render_slot(slot),
+                    force=force,
+                    reply_markup=self._reply_markup_for(slot),
+                )
+
+    async def clear_slot(self, slot: str) -> None:
+        if slot == "approval":
+            await self.clear_approval()
+            return
+        slot = self._canonical_slot(slot)
+        if slot == "environment":
+            await self.set_slot("environment", None, reply_markup=None)
+        else:
+            await self.set_slot(slot, None, reply_markup=None)
+
+    async def clear_approval(self) -> None:
+        async with self._lock:
+            self._approval_text = None
+            self._approval_markup = None
+            await self._ensure_messages_locked()
+            if self._environment_visible():
+                await self.messages["environment"].update(
+                    self._base_environment,
+                    force=True,
+                    reply_markup=None,
+                )
+
+    async def clear_slots(
+        self,
+        *slots: str,
+        final_reasoning: bool = False,
+        reasoning_value: str | None = None,
+    ) -> None:
+        """Clear only legacy transient overlays; never remove a status message."""
+        async with self._lock:
+            if reasoning_value:
+                self.slots["reasoning"] = str(reasoning_value).strip()
+            if "approval" in slots:
+                self._approval_text = None
+                self._approval_markup = None
+            await self._ensure_messages_locked()
+            if reasoning_value:
+                await self.messages["reasoning"].update(
+                    self._render_slot("reasoning"),
+                    force=True,
+                )
+            if "approval" in slots and self._environment_visible():
+                await self.messages["environment"].update(
+                    self._base_environment,
+                    force=True,
+                    reply_markup=None,
+                )
+
+    async def ensure_visible(self) -> None:
+        """Create the currently required status messages if missing."""
+        async with self._lock:
+            await self._ensure_messages_locked()
+
+    async def _repost_locked(self) -> None:
+        for slot in self.SLOT_ORDER:
+            await self.messages[slot].repost_at_bottom()
+        self._at_bottom = True
+
+    async def bring_to_bottom(self) -> None:
+        """Edit in place when current; repost only when marked stale."""
+        async with self._lock:
+            await self._ensure_messages_locked()
+            if not self._at_bottom:
+                await self._repost_locked()
+            else:
+                for slot in self.SLOT_ORDER:
+                    await self.messages[slot].refresh_in_place()
+
+    async def close(self) -> None:
+        """Delete all three messages when retiring a broken stack."""
+        async with self._lock:
+            for message in self.messages.values():
+                await message.close()
 
 
 def _is_inside_html_syntax(text: str, index: int) -> bool:

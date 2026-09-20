@@ -481,13 +481,14 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `COMMAND_EXECUTION_MAX_TIMEOUT_SECONDS` | `120` | Maximum requested command timeout |
 | `COMMAND_EXECUTION_MAX_OUTPUT_CHARS` | `12000` | Maximum output returned to the model |
 | `COMMAND_EXECUTION_ALLOW_DANGEROUS` | `false` | Bypasses the command approval guard; keep disabled unless an external sandbox/approval boundary is present |
-| `COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for an approve-once Telegram decision |
-| `COMMAND_EXECUTION_BACKEND` | `local` | Explicit command backend: `local`, `docker`, or `ssh` |
+| `COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for a Telegram approval decision |
+| `COMMAND_EXECUTION_BACKEND` | `local` | Explicit command backend: `local`, `docker`, `ssh`, or `host` |
 | `COMMAND_EXECUTION_DOCKER_IMAGE` | `python:3.11-slim` | Image used by the Docker backend; no host paths or environment are forwarded |
 | `COMMAND_EXECUTION_SSH_HOST` | empty | SSH backend host; requires key-based non-interactive authentication |
 | `COMMAND_EXECUTION_SSH_USER` | empty | Optional SSH backend user |
 | `COMMAND_EXECUTION_SSH_PORT` | empty | Optional SSH backend port |
 | `COMMAND_EXECUTION_SSH_KEY` | empty | Optional SSH private-key path |
+| `COMMAND_EXECUTION_HOST_SOCKET` | `/run/emery-command/command.sock` | Unix socket for the host-side runner used by the `host` backend |
 | `ENABLE_BROWSER` | `false` | Opt-in Chromium CDP tab discovery, navigation, snapshots, screenshots, and basic interaction |
 | `BROWSER_CDP_URL` | `http://127.0.0.1:9222` | Chromium DevTools HTTP endpoint |
 | `BROWSER_AUTO_LAUNCH` | `true` | Launch a separate Chromium profile when the CDP endpoint is unavailable |
@@ -495,13 +496,53 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `BROWSER_CHROMIUM_PATH` | empty | Optional explicit Chromium executable path |
 | `BROWSER_USER_DATA_DIR` | `data/browser-profile` | Profile directory for auto-launched Chromium |
 | `BROWSER_TIMEOUT_SECONDS` | `10` | Per-operation Chromium CDP timeout |
-| `BROWSER_REQUIRE_ACTION_APPROVAL` | `true` | Require Telegram approve-once confirmation for browser mutations |
-| `BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for browser action approval |
+| `BROWSER_REQUIRE_ACTION_APPROVAL` | `true` | Require approval for sensitive browser mutations; ordinary navigation and clicking stay unprompted |
+| `BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for sensitive browser action approval |
 | `ENABLE_LIVE_STEERING` | `true` | Queues user updates during an active llama.cpp reasoning turn |
 | `LIVE_STEERING_MAX_PENDING` | `4` | Maximum queued updates per active turn |
 | `ENABLE_TELEGRAM_RICH_MESSAGES` | `false` | Opts into Telegram Bot API rich Markdown; disabled by default for client compatibility, with HTML formatting used otherwise |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
+
+The production `host` backend keeps Emery's Telegram process containerized but
+delegates command processes to the host-side `hudson` user service in
+`deploy/emery-host-command.service`. The container receives only the private
+Unix socket; commands use the host filesystem and `/home/hudson` by default.
+
+When command execution is enabled, Emery also exposes the terminal runtime:
+
+- `terminal_exec` for bounded one-shot commands;
+- `terminal_session_*` for persistent PTY shells that retain `cwd` and environment;
+- `terminal_job_*` for bounded background processes with output polling, waiting, cancellation, and expiry;
+- `terminal_list_sessions` and `terminal_list_jobs` for lifecycle inspection.
+
+Read-only terminal commands run without prompting. Commands that write, change
+state, or remove files require Telegram approval; every `rm`/`rmdir`/`unlink`
+command is treated as a removal. Approval buttons provide Deny, Approve once,
+Approve for this session (cleared by `/clear`), and Approve forever. Forever
+grants are stored in `config/approval_grants.json`.
+
+Persistent terminal resources are supervised by the host runner and use request,
+session, and job IDs. Runtime metadata is persisted under `data/runtime/` so
+resources from a previous broker process are reported as orphaned rather than
+silently treated as live.
+
+Browser session tools provide a logical owner-scoped layer over the existing CDP
+adapter: `browser_session_start`, `browser_session_open_tab`,
+`browser_session_status`, `browser_session_list`, and `browser_session_close`.
+Sessions have idle/lease expiry and profile-isolation hooks. The current
+Chromium adapter still uses the configured singleton profile; true per-session
+Chromium processes can be added behind the adapter later.
+
+Execution metadata and sanitized audit events are stored in the SQLite runtime
+store at `data/runtime/execution.db` by default. Raw command output is not
+persisted by the audit layer.
+The host runner independently validates protocol version/request IDs, limits
+working directories to `/home/hudson` descendants, forwards only an explicit
+safe environment allowlist, caps concurrent commands, and denies catastrophic
+host operations. The production container runs as UID/GID `1000:1000` so the
+socket peer and existing `config/`, `data/`, and `secrets/` bind mounts are
+owned by the non-root `hudson` identity.
 | `TOOL_LOOP` | `15` | Max tool/reasoning iterations in one turn |
 | `MAX_TOOL_CALLS_PER_TURN` | `30` | Maximum total tool calls in one normal chat turn |
 | `MAX_TOOL_CALLS_PER_LOOP` | `8` | Maximum total tool calls in one reasoning loop |

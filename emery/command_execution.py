@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import signal
 import subprocess
 from pathlib import Path
@@ -28,6 +29,7 @@ from emery.config import (
     COMMAND_EXECUTION_SSH_HOST,
     COMMAND_EXECUTION_SSH_USER,
     COMMAND_EXECUTION_SSH_KEY,
+    COMMAND_EXECUTION_HOST_SOCKET,
     COMMAND_EXECUTION_SSH_PORT,
 )
 
@@ -56,7 +58,6 @@ _DANGEROUS_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bdd\b[^\n]*\bof=", re.IGNORECASE), "raw disk/device write"),
     (re.compile(r"\b(?:shutdown|reboot|poweroff|halt)\b", re.IGNORECASE), "system power control"),
     (re.compile(r"\bsystemctl\s+(?:stop|restart|disable|mask)\b", re.IGNORECASE), "service control"),
-    (re.compile(r"\b(?:sudo|su)\b", re.IGNORECASE), "privilege escalation"),
     (re.compile(r"\b(?:kill|pkill|killall)\b", re.IGNORECASE), "process termination"),
     (re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sh|bash|zsh)\b", re.IGNORECASE), "downloaded script execution"),
     (re.compile(r"\b(?:DROP\s+(?:TABLE|DATABASE)|TRUNCATE\s+TABLE)\b", re.IGNORECASE), "destructive SQL"),
@@ -65,6 +66,89 @@ _DANGEROUS_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r":\(\)\s*\{.*:\|:.*\};\s*:", re.IGNORECASE), "fork bomb"),
     (re.compile(r"\bgit\s+push\b", re.IGNORECASE), "remote repository write"),
 )
+
+_WRITE_ROOT_REASONS = {
+    "rm": "file or directory removal",
+    "rmdir": "directory removal",
+    "unlink": "file removal",
+    "shred": "secure file removal",
+    "mv": "file move or rename",
+    "cp": "file copy",
+    "install": "file installation",
+    "touch": "file creation or timestamp change",
+    "mkdir": "directory creation",
+    "truncate": "file truncation",
+    "chmod": "permission change",
+    "chown": "ownership change",
+    "ln": "link creation",
+    "tee": "file write",
+    "patch": "file patching",
+    "ed": "file editing",
+}
+
+
+def _shell_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return str(command or "").strip().split()
+
+
+def _command_root(command: str) -> str:
+    """Return the executable root used for scoped terminal approvals."""
+    wrappers = {"command", "exec", "env", "nohup", "time", "sudo", "su", "doas"}
+    for token in _shell_tokens(command):
+        if not token or ("=" in token and token.split("=", 1)[0].replace("_", "a").isalnum()):
+            continue
+        root = Path(token).name.casefold()
+        if root in wrappers:
+            continue
+        return root or "shell"
+    return "shell"
+
+
+def _write_reason(command: str) -> str | None:
+    tokens = _shell_tokens(command)
+    root = _command_root(command)
+    if re.search(r"(?:^|[\s;&|])(?:rm|rmdir|unlink)(?:\s|$)", command, re.IGNORECASE):
+        return "file or directory removal"
+    if root in _WRITE_ROOT_REASONS:
+        return _WRITE_ROOT_REASONS[root]
+
+    lowered = str(command or "").casefold()
+    if re.search(r"(?:^|[\s;&|])>{1,2}\s*[^>&\s]", command):
+        return "shell redirection writes a file"
+    if re.search(r"\b(?:sed|perl)\s+[^\n]*\s-i(?:\s|$)", command, re.IGNORECASE):
+        return "in-place file editing"
+    if re.search(r"\bfind\b[^\n]*\s-delete(?:\s|$)", command, re.IGNORECASE):
+        return "file removal"
+    if re.search(r"\bfind\b[^\n]*-exec\s+(?:rm|rmdir|unlink)\b", command, re.IGNORECASE):
+        return "file removal"
+    if root == "curl":
+        if re.search(r"(?:^|\s)(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b", command, re.IGNORECASE):
+            return "HTTP write request"
+        if re.search(r"(?:^|\s)(?:-d|--data(?:-[^\s]+)?|-F|--form|-T|--upload-file)\b", command, re.IGNORECASE):
+            return "HTTP write request"
+        if re.search(r"(?:^|\s)(?:-o|--output)\s*\S+", command, re.IGNORECASE):
+            return "download writes a file"
+    if root == "wget" and re.search(r"(?:^|\s)(?:-O|--output-document|--post-data|--method)\b", command, re.IGNORECASE):
+        return "download or HTTP write request"
+    if root == "git" and len(tokens) > 1:
+        if tokens[1].casefold() in {"add", "commit", "push", "pull", "fetch", "checkout", "switch", "restore", "reset", "clean", "merge", "rebase", "tag", "config", "stash"}:
+            return f"git {tokens[1]} changes repository state"
+    if root in {"npm", "pnpm", "yarn", "pip", "uv", "apt", "apt-get", "cargo"} and any(
+        token.casefold() in {"install", "i", "add", "remove", "uninstall", "update", "upgrade", "sync"}
+        for token in tokens[1:]
+    ):
+        return f"{root} changes the environment"
+    if root in {"systemctl", "service", "docker", "podman"} and any(
+        token.casefold() in {"start", "stop", "restart", "enable", "disable", "remove", "rm", "run", "create", "exec"}
+        for token in tokens[1:]
+    ):
+        return f"{root} changes a service or container"
+    if "|" in lowered and re.search(r"\|\s*(?:sh|bash|zsh)\b", lowered):
+        return "piped script execution"
+    return None
 
 _SECRET_OUTPUT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+"), r"\1[REDACTED]"),
@@ -77,7 +161,7 @@ def _dangerous_reason(command: str) -> str | None:
     for pattern, reason in _DANGEROUS_COMMAND_PATTERNS:
         if pattern.search(command):
             return reason
-    return None
+    return _write_reason(command)
 
 
 def _redact_output(output: str) -> str:
@@ -85,6 +169,27 @@ def _redact_output(output: str) -> str:
     for pattern, replacement in _SECRET_OUTPUT_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+def _audit_command(command: str, result: dict[str, Any], *, working_directory: str | None = None) -> None:
+    """Persist sanitized command metadata without making auditing fatal."""
+    try:
+        from emery import globals
+        from emery.execution_store import get_execution_store
+        get_execution_store().audit(
+            kind="command",
+            action="exec",
+            status=str(result.get("status") or "error"),
+            request_id=str(result.get("request_id") or ""),
+            actor_user_id=globals.current_user_id.get(),
+            chat_id=globals.TARGET_CHAT_ID.get(),
+            thread_id=globals.CURRENT_THREAD_ID.get(),
+            command=command,
+            arguments=str(working_directory or ""),
+            result=str(result.get("output") or result.get("error") or ""),
+        )
+    except Exception:
+        pass
 
 
 def _resolve_working_directory(working_directory: str | None) -> Path:
@@ -162,6 +267,7 @@ async def run_command(
     command: str,
     working_directory: str | None = None,
     timeout_seconds: int | float | None = None,
+    justification: str | None = None,
 ) -> dict[str, Any]:
     """Run one bounded, non-interactive shell command on the Emery host."""
     if not COMMAND_EXECUTION_ENABLED:
@@ -177,6 +283,12 @@ async def run_command(
     command = command.strip()
     if len(command) > 4_000:
         return {"status": "error", "exit_code": None, "output": "", "error": "command is limited to 4000 characters"}
+
+    if justification is not None and not isinstance(justification, str):
+        return {"status": "error", "exit_code": None, "output": "", "error": "justification must be a short sentence"}
+    justification = str(justification or "").strip()
+    if len(justification) > 500:
+        return {"status": "error", "exit_code": None, "output": "", "error": "justification is limited to 500 characters"}
 
     if timeout_seconds is None:
         timeout = COMMAND_EXECUTION_TIMEOUT_SECONDS
@@ -204,9 +316,11 @@ async def run_command(
             user_id=globals.current_user_id.get(),
             thread_id=globals.CURRENT_THREAD_ID.get(),
             timeout_seconds=COMMAND_EXECUTION_APPROVAL_TIMEOUT_SECONDS,
+            justification=justification or f"The command matched the safety policy: {reason}.",
+            approval_key=f"terminal:{_command_root(command)}",
         )
         if not approval.get("approved"):
-            return {
+            blocked = {
                 "status": "blocked",
                 "exit_code": None,
                 "output": "",
@@ -215,6 +329,8 @@ async def run_command(
                     f"(safety policy: {reason})"
                 ),
             }
+            _audit_command(command, blocked, working_directory=working_directory)
+            return blocked
 
     if COMMAND_EXECUTION_BACKEND != "local":
         try:
@@ -226,7 +342,7 @@ async def run_command(
                     backend=COMMAND_EXECUTION_BACKEND,
                     # Remote/container paths are not assumed to match the
                     # Emery host's local project directory.
-                    cwd=working_directory,
+                    cwd=working_directory or COMMAND_EXECUTION_CWD,
                     timeout_seconds=timeout,
                     max_timeout_seconds=COMMAND_EXECUTION_MAX_TIMEOUT_SECONDS,
                     max_output_chars=COMMAND_EXECUTION_MAX_OUTPUT_CHARS,
@@ -237,6 +353,7 @@ async def run_command(
                     ssh_user=COMMAND_EXECUTION_SSH_USER,
                     ssh_port=COMMAND_EXECUTION_SSH_PORT,
                     ssh_key=COMMAND_EXECUTION_SSH_KEY,
+                    host_socket=COMMAND_EXECUTION_HOST_SOCKET,
                 ),
             )
             result = await backend.execute(command, cwd=working_directory, timeout_seconds=timeout)
@@ -245,6 +362,7 @@ async def run_command(
         result.setdefault("command", command)
         if working_directory is not None:
             result.setdefault("working_directory", str(working_directory))
+        _audit_command(command, result, working_directory=working_directory)
         return result
 
     try:
@@ -265,4 +383,5 @@ async def run_command(
         result["output"] = output[:COMMAND_EXECUTION_MAX_OUTPUT_CHARS] + "\n[output truncated]"
     result["command"] = command
     result["working_directory"] = str(cwd)
+    _audit_command(command, result, working_directory=str(cwd))
     return result

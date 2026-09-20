@@ -13,13 +13,15 @@ import base64
 import json
 import os
 import re
+import signal
+import socket
 import shutil
 import subprocess
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Mapping
+from urllib.parse import quote, urlparse
 
 from emery import globals
 from emery.config import (
@@ -38,14 +40,88 @@ from emery.config import (
 
 
 _chromium_process: subprocess.Popen | None = None
-_target_sessions: dict[str, "_TargetSession"] = {}
+_target_sessions: dict[tuple[str, str], "_TargetSession"] = {}
+_isolated_target_endpoints: dict[str, str] = {}
+_isolated_target_owners: dict[str, tuple[str | None, str | None, str | None]] = {}
+_isolated_endpoints: set[str] = set()
 _MAX_TARGET_SESSIONS = 8
 _MAX_CONSOLE_ENTRIES = 200
 
+_BROWSER_CREDENTIAL_TERMS = re.compile(
+    r"password|passcode|token|api[ _-]?key|secret|private[ _-]?key|credit[ _-]?card|cvv|ssn|one[ -]?time[ -]?code",
+    re.IGNORECASE,
+)
+_BROWSER_LOGIN_TERMS = re.compile(
+    r"login|log[ -]?in|sign[ -]?in|authenticate|account|security|billing|payment|profile|admin|settings",
+    re.IGNORECASE,
+)
+_BROWSER_EDIT_TERMS = re.compile(
+    r"sign[ -]?in|log[ -]?in|save|update|change|delete|remove|submit|confirm|connect|authorize",
+    re.IGNORECASE,
+)
 
-async def _approve_browser_action(action: str, target_id: str | None, detail: str = "") -> dict[str, Any] | None:
-    """Require an approve-once decision for browser mutations when enabled."""
-    if not BROWSER_REQUIRE_ACTION_APPROVAL:
+
+async def _browser_sensitive_context(target: dict[str, Any], ref: str | None = None) -> dict[str, Any]:
+    """Classify whether a browser mutation touches credentials or sensitive data."""
+    ref_json = json.dumps(str(ref or ""))
+    expression = f"""(() => {{
+        const ref = {ref_json};
+        const byRef = ref ? Array.from(document.querySelectorAll('[data-emery-ref]'))
+            .find(candidate => candidate.getAttribute('data-emery-ref') === ref) : null;
+        const active = document.activeElement;
+        const el = byRef || active;
+        const attrs = el ? [
+            el.tagName || '', el.type || '', el.name || '', el.id || '',
+            el.getAttribute('aria-label') || '', el.getAttribute('autocomplete') || '',
+            el.getAttribute('placeholder') || '', el.innerText || '', el.value || ''
+        ].join(' ') : '';
+        const page = [location.href || '', document.title || ''].join(' ');
+        const loginPage = /login|log-in|signin|sign-in|auth|account|security|billing|payment|profile|admin|settings/i.test(page);
+        const credentialField = /password|passcode|token|api[ _-]?key|secret|private[ _-]?key|credit[ _-]?card|cvv|ssn|one[ -]?time[ -]?code/i.test(attrs)
+            || (loginPage && /username|user name|email|account|login|password/i.test(attrs));
+        const editControl = loginPage && /sign[ -]?in|log[ -]?in|authenticate|save|update|change|delete|remove|submit|confirm|connect|authorize/i.test(attrs);
+        return {{
+            page,
+            element: attrs.slice(0, 500),
+            credential_field: credentialField,
+            edit_control: editControl,
+            tag: el ? el.tagName.toLowerCase() : '',
+            type: el ? (el.type || '') : ''
+        }};
+    }})()"""
+    try:
+        result = await _cdp_call(target, "Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        value = ((result.get("result") or {}).get("value") or {})
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    return {"credential_field": True, "edit_control": False, "element": "unable to classify browser mutation"}
+
+
+def _browser_sensitive_reason(context: Mapping[str, Any], action: str) -> tuple[bool, str, str]:
+    element = str(context.get("element") or "")
+    page = str(context.get("page") or "")
+    if bool(context.get("credential_field")) or _BROWSER_CREDENTIAL_TERMS.search(element):
+        return True, "credentials", "This browser action may enter or submit credentials or other secrets."
+    if bool(context.get("edit_control")) and _BROWSER_LOGIN_TERMS.search(page):
+        return True, "sensitive_edit", "This browser action changes or submits sensitive account information."
+    if action == "dialog" and _BROWSER_CREDENTIAL_TERMS.search(element):
+        return True, "credentials", "This browser dialog may handle credentials or other secrets."
+    return False, "", ""
+
+
+async def _approve_browser_action(
+    action: str,
+    target_id: str | None,
+    detail: str = "",
+    *,
+    sensitive: bool = False,
+    approval_key: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    """Require approval only for browser mutations classified as sensitive."""
+    if not BROWSER_REQUIRE_ACTION_APPROVAL or not sensitive:
         return None
     from emery import globals
     from emery.command_execution import _redact_output
@@ -53,11 +129,12 @@ async def _approve_browser_action(action: str, target_id: str | None, detail: st
     safe_detail = _redact_output(str(detail or ""))[:500]
     approval = await request_command_approval(
         f"browser_{action} target_id={target_id or '(default)'} {safe_detail}".strip(),
-        f"browser action: {action}",
+        reason or f"browser action: {action}",
         chat_id=globals.TARGET_CHAT_ID.get(),
         user_id=globals.current_user_id.get(),
         thread_id=globals.CURRENT_THREAD_ID.get(),
         timeout_seconds=BROWSER_ACTION_APPROVAL_TIMEOUT_SECONDS,
+        approval_key=approval_key or f"browser:{action}",
     )
     if approval.get("approved"):
         return None
@@ -209,15 +286,61 @@ class _TargetSession:
         self.pending.clear()
 
 
-async def close_browser_sessions() -> None:
-    """Close all retained target sessions, useful during application shutdown."""
-    sessions = list(_target_sessions.values())
-    _target_sessions.clear()
+async def close_browser_sessions(endpoint: str | None = None) -> None:
+    """Close retained target sessions, optionally limited to one CDP endpoint."""
+    normalized_endpoint = _normalize_endpoint(endpoint) if endpoint else None
+    selected = {
+        key: session
+        for key, session in _target_sessions.items()
+        if normalized_endpoint is None or key[0] == normalized_endpoint
+    }
+    sessions = list(selected.values())
+    for key in selected:
+        _target_sessions.pop(key, None)
     await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
+    if normalized_endpoint is None:
+        _isolated_target_endpoints.clear()
+        _isolated_target_owners.clear()
+    else:
+        for target_id, target_endpoint in list(_isolated_target_endpoints.items()):
+            if target_endpoint == normalized_endpoint:
+                _isolated_target_endpoints.pop(target_id, None)
+                _isolated_target_owners.pop(target_id, None)
 
 
 def _endpoint_url() -> str:
     return BROWSER_CDP_URL.rstrip("/")
+
+
+def _normalize_endpoint(endpoint: str | None) -> str:
+    return str(endpoint or _endpoint_url()).rstrip("/")
+
+
+def register_isolated_target_owner(target_id: str, owner: Mapping[str, Any]) -> None:
+    """Attach the logical session owner to an isolated target."""
+    _isolated_target_owners[str(target_id)] = (
+        None if owner.get("chat_id") is None else str(owner.get("chat_id")),
+        None if owner.get("thread_id") is None else str(owner.get("thread_id")),
+        None if owner.get("user_id") is None else str(owner.get("user_id")),
+    )
+
+
+def _isolated_target_owner_error(target_id: str) -> str | None:
+    owner = _isolated_target_owners.get(str(target_id))
+    if owner is None:
+        return "The isolated browser target has no active ownership record."
+    current = tuple(
+        None if value is None else str(value)
+        for value in (
+            globals.TARGET_CHAT_ID.get(),
+            globals.CURRENT_THREAD_ID.get(),
+            globals.current_user_id.get(),
+        )
+    )
+    for expected, actual in zip(owner, current):
+        if expected is not None and expected != actual:
+            return "The isolated browser target belongs to another Emery chat session."
+    return None
 
 
 def _valid_url(url: str) -> tuple[bool, str]:
@@ -232,10 +355,10 @@ def _valid_url(url: str) -> tuple[bool, str]:
     return True, clean
 
 
-async def _browser_version() -> dict[str, Any] | None:
+async def _browser_version(endpoint: str | None = None) -> dict[str, Any] | None:
     try:
         response = await globals.http_client.get(
-            f"{_endpoint_url()}/json/version",
+            f"{_normalize_endpoint(endpoint)}/json/version",
             timeout=BROWSER_TIMEOUT_SECONDS,
         )
         if response.status_code != 200:
@@ -268,6 +391,196 @@ def _chromium_binary() -> str | None:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+class IsolatedChromium:
+    """Own one Chromium process, profile directory, and CDP endpoint.
+
+    This is deliberately separate from the legacy raw-browser singleton below.
+    A browser-session adapter gets one instance of this class, so its tabs can
+    never be discovered through another session's CDP endpoint.
+    """
+
+    def __init__(self, profile_directory: str, *, cleanup_profile: bool = False) -> None:
+        self.profile_directory = Path(profile_directory).expanduser()
+        self.cleanup_profile = bool(cleanup_profile)
+        self.process: subprocess.Popen | None = None
+        self.endpoint: str | None = None
+        self.port: int | None = None
+        self._lock = asyncio.Lock()
+
+    async def ensure(self) -> tuple[bool, str | None, bool]:
+        async with self._lock:
+            if self.process is not None and self.process.poll() is None and self.endpoint:
+                if await _browser_version(self.endpoint):
+                    return True, None, False
+
+            if self.process is not None:
+                await self.close(remove_profile=False)
+
+            if not BROWSER_AUTO_LAUNCH:
+                return False, "Browser auto-launch is disabled; no isolated Chromium process is available", False
+
+            binary = _chromium_binary()
+            if not binary:
+                return False, "Chromium was not found; set BROWSER_CHROMIUM_PATH or install Chromium", False
+
+            self.profile_directory.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(self.profile_directory, 0o700)
+            except OSError:
+                pass
+            self.port = _allocate_cdp_port()
+            self.endpoint = f"http://127.0.0.1:{self.port}"
+            _isolated_endpoints.add(self.endpoint)
+            args = [
+                binary,
+                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={self.port}",
+                f"--user-data-dir={self.profile_directory}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ]
+            if BROWSER_HEADLESS:
+                args.append("--headless=new")
+            try:
+                self.process = subprocess.Popen(
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                self.process = None
+                if self.cleanup_profile:
+                    shutil.rmtree(self.profile_directory, ignore_errors=True)
+                return False, f"Unable to launch Chromium: {exc}", False
+
+        endpoint = self.endpoint or ""
+        if await _wait_for_endpoint(endpoint):
+            return True, None, True
+        await self.close()
+        return False, f"Chromium launched but CDP did not become ready at {endpoint}", True
+
+    async def close(self, *, remove_profile: bool | None = None) -> dict[str, Any]:
+        endpoint = self.endpoint
+        await close_browser_sessions(endpoint=endpoint)
+        process = self.process
+        terminated = False
+        if process is not None:
+            if process.poll() is None:
+                terminated = True
+                pid = getattr(process, "pid", None)
+                try:
+                    # Chromium starts renderer children, so terminate the
+                    # supervised process group rather than only the browser
+                    # parent.  Fake processes in tests need only terminate().
+                    if pid and hasattr(os, "killpg"):
+                        os.killpg(pid, signal.SIGTERM)
+                    else:
+                        process.terminate()
+                    await asyncio.to_thread(process.wait, timeout=BROWSER_TIMEOUT_SECONDS)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    try:
+                        if pid and hasattr(os, "killpg"):
+                            os.killpg(pid, signal.SIGKILL)
+                        else:
+                            process.kill()
+                        await asyncio.to_thread(process.wait, timeout=2)
+                    except (ProcessLookupError, subprocess.TimeoutExpired):
+                        pass
+                except OSError:
+                    try:
+                        process.terminate()
+                        await asyncio.to_thread(process.wait, timeout=BROWSER_TIMEOUT_SECONDS)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+        self.process = None
+        if endpoint:
+            _isolated_endpoints.discard(_normalize_endpoint(endpoint))
+            for target_id, target_endpoint in list(_isolated_target_endpoints.items()):
+                if target_endpoint == _normalize_endpoint(endpoint):
+                    _isolated_target_endpoints.pop(target_id, None)
+                    _isolated_target_owners.pop(target_id, None)
+        self.endpoint = None
+        self.port = None
+
+        should_remove = self.cleanup_profile if remove_profile is None else bool(remove_profile)
+        if should_remove:
+            try:
+                shutil.rmtree(self.profile_directory)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # Cleanup is best effort after the process has stopped. Never
+                # turn a successful browser close into an unsafe retry loop.
+                pass
+        return {
+            "status": "completed",
+            "browser_process_terminated": terminated,
+            "profile_removed": should_remove,
+        }
+
+
+class IsolatedCdpBrowserAdapter:
+    """Session-scoped browser adapter backed by one :class:`IsolatedChromium`."""
+
+    def __init__(self, profile: Any) -> None:
+        profile_directory = str(getattr(profile, "directory", "") or "").strip()
+        if not profile_directory:
+            raise ValueError("isolated browser sessions require a unique profile directory")
+        metadata = getattr(profile, "metadata", {}) or {}
+        self.profile = profile
+        self.browser = IsolatedChromium(
+            profile_directory,
+            cleanup_profile=bool(metadata.get("managed", False)),
+        )
+
+    async def _ready(self) -> tuple[bool, str | None, bool]:
+        return await self.browser.ensure()
+
+    async def open_tab(self, url: str, *, profile: Any | None = None) -> Mapping[str, Any]:
+        ready, error, launched = await self._ready()
+        if not ready:
+            return {"status": "error", "launched": launched, "error": error}
+        return await _open_browser_tab_at_endpoint(self.browser.endpoint or "", url, launched=launched)
+
+    async def list_tabs(self) -> Mapping[str, Any]:
+        ready, error, launched = await self._ready()
+        if not ready:
+            return {"status": "error", "tabs": [], "launched": launched, "error": error}
+        return await _list_browser_tabs_at_endpoint(self.browser.endpoint or "", launched=launched)
+
+    async def close_tab(self, target_id: str) -> Mapping[str, Any]:
+        if not self.browser.endpoint:
+            return {"status": "completed", "target_id": str(target_id), "message": "Browser tab already closed."}
+        return await _close_browser_tab_at_endpoint(self.browser.endpoint, target_id)
+
+    async def close(self) -> Mapping[str, Any]:
+        return await self.browser.close()
+
+
+async def _wait_for_endpoint(endpoint: str, *, timeout_seconds: float | None = None) -> bool:
+    deadline = asyncio.get_running_loop().time() + min(
+        timeout_seconds or 15.0,
+        BROWSER_TIMEOUT_SECONDS * 3,
+    )
+    while asyncio.get_running_loop().time() < deadline:
+        if await _browser_version(endpoint):
+            return True
+        await asyncio.sleep(0.2)
+    return False
+
+
+def _allocate_cdp_port() -> int:
+    """Reserve a currently-free loopback port for a supervised Chromium."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 async def _ensure_browser() -> tuple[bool, str | None, bool]:
@@ -319,16 +632,14 @@ async def _ensure_browser() -> tuple[bool, str | None, bool]:
     return False, f"Chromium launched but CDP did not become ready at {_endpoint_url()}", True
 
 
-async def list_browser_tabs() -> dict[str, Any]:
-    """List tabs exposed by the configured Chromium CDP endpoint."""
-    if not ENABLE_BROWSER:
-        return {"status": "disabled", "tabs": [], "error": "Browser control is disabled."}
-    ready, error, launched = await _ensure_browser()
-    if not ready:
-        return {"status": "error", "tabs": [], "launched": launched, "error": error}
+async def _list_browser_tabs_at_endpoint(
+    endpoint: str,
+    *,
+    launched: bool = False,
+) -> dict[str, Any]:
     try:
         response = await globals.http_client.get(
-            f"{_endpoint_url()}/json/list",
+            f"{_normalize_endpoint(endpoint)}/json/list",
             timeout=BROWSER_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -346,14 +657,105 @@ async def list_browser_tabs() -> dict[str, Any]:
             for item in tabs
             if isinstance(item, dict)
         ]
-        return {"status": "completed", "tabs": normalized, "cdp_url": _endpoint_url(), "launched": launched}
+        normalized_endpoint = _normalize_endpoint(endpoint)
+        if normalized_endpoint in _isolated_endpoints:
+            for item in normalized:
+                target_id = item.get("target_id")
+                if target_id:
+                    _isolated_target_endpoints[str(target_id)] = normalized_endpoint
+        return {
+            "status": "completed",
+            "tabs": normalized,
+            "cdp_url": _normalize_endpoint(endpoint),
+            "launched": launched,
+        }
     except Exception as exc:
         return {"status": "error", "tabs": [], "launched": launched, "error": f"Unable to list browser tabs: {exc}"}
 
 
-async def _raw_browser_tabs() -> list[dict[str, Any]]:
+async def list_browser_tabs() -> dict[str, Any]:
+    """List tabs exposed by the configured raw-browser Chromium endpoint."""
+    if not ENABLE_BROWSER:
+        return {"status": "disabled", "tabs": [], "error": "Browser control is disabled."}
+    ready, error, launched = await _ensure_browser()
+    if not ready:
+        return {"status": "error", "tabs": [], "launched": launched, "error": error}
+    return await _list_browser_tabs_at_endpoint(_endpoint_url(), launched=launched)
+
+
+async def _close_browser_tab_at_endpoint(endpoint: str, target_id: str) -> dict[str, Any]:
+    target_key = str(target_id)
+    approval_error = await _approve_browser_action("close_tab", target_id)
+    if approval_error:
+        return approval_error
+
+    session = _target_sessions.pop((_normalize_endpoint(endpoint), target_key), None)
+    _isolated_target_endpoints.pop(target_key, None)
+    _isolated_target_owners.pop(target_key, None)
+    if session is not None:
+        await session.close()
+    try:
+        response = await globals.http_client.get(
+            f"{_normalize_endpoint(endpoint)}/json/close/{quote(target_key, safe='')}",
+            timeout=BROWSER_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return {"status": "completed", "target_id": target_key, "message": "Browser tab closed."}
+    except Exception as exc:
+        return {"status": "error", "target_id": target_key, "error": f"Unable to close browser tab: {exc}"}
+
+
+async def close_browser_tab(target_id: str) -> dict[str, Any]:
+    """Close one raw Chromium page target through the CDP HTTP endpoint."""
+    target, _, error = await _prepare_target(target_id)
+    if error:
+        return {"status": "error", "error": error}
+    return await _close_browser_tab_at_endpoint(str(target.get("cdp_url") or _endpoint_url()), str(target.get("id") or target_id))
+
+
+async def close_browser() -> dict[str, Any]:
+    """Close Emery's supervised browser sessions and any Chromium it launched."""
+    global _chromium_process
+    if not ENABLE_BROWSER:
+        return {"status": "disabled", "error": "Browser control is disabled."}
+
+    await close_browser_sessions()
+    logical_session_results = []
+    try:
+        # Avoid creating the logical-session manager merely because the raw
+        # close tool was called. If it is already active, close its isolated
+        # Chromium processes as part of the same shutdown operation.
+        from emery import browser_sessions
+
+        if browser_sessions._default_manager is not None:
+            logical_session_results = await browser_sessions._default_manager.close_all(
+                reason="raw_browser_shutdown"
+            )
+    except Exception as exc:
+        logical_session_results = [{"status": "error", "error": str(exc)}]
+    process = _chromium_process
+    terminated = False
+    if process is not None:
+        if process.poll() is None:
+            try:
+                process.terminate()
+                await asyncio.to_thread(process.wait, timeout=BROWSER_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                await asyncio.to_thread(process.wait, timeout=2)
+            terminated = True
+        _chromium_process = None
+    return {
+        "status": "completed",
+        "browser_process_terminated": terminated,
+        "browser_session_results": logical_session_results,
+        "message": "Emery browser sessions closed." if terminated else "Emery browser sessions closed; no Emery-launched Chromium process was running.",
+    }
+
+
+async def _raw_browser_tabs(endpoint: str | None = None) -> list[dict[str, Any]]:
     response = await globals.http_client.get(
-        f"{_endpoint_url()}/json/list",
+        f"{_normalize_endpoint(endpoint)}/json/list",
         timeout=BROWSER_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -361,9 +763,13 @@ async def _raw_browser_tabs() -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
 
 
-async def _resolve_target(target_id: str | None) -> tuple[dict[str, Any] | None, str | None]:
+async def _resolve_target(
+    target_id: str | None,
+    *,
+    endpoint: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        tabs = await _raw_browser_tabs()
+        tabs = await _raw_browser_tabs(endpoint)
     except Exception as exc:
         return None, f"Unable to inspect Chromium tabs: {exc}"
 
@@ -383,18 +789,20 @@ async def _resolve_target(target_id: str | None) -> tuple[dict[str, Any] | None,
     return target, None
 
 
-async def _get_target_session(target: dict[str, Any]) -> _TargetSession:
+async def _get_target_session(target: dict[str, Any], endpoint: str | None = None) -> _TargetSession:
     target_id = str(target.get("id"))
+    endpoint = _normalize_endpoint(endpoint or target.get("cdp_url"))
     websocket_url = str(target.get("webSocketDebuggerUrl") or "")
     if not target_id or not websocket_url.startswith(("ws://", "wss://")):
         raise RuntimeError("The selected tab does not expose a valid CDP websocket URL")
 
-    existing = _target_sessions.get(target_id)
+    session_key = (endpoint, target_id)
+    existing = _target_sessions.get(session_key)
     if existing and existing.websocket_url == websocket_url and not existing.closed:
         return existing
     if existing:
         await existing.close()
-        _target_sessions.pop(target_id, None)
+        _target_sessions.pop(session_key, None)
 
     try:
         import websockets
@@ -412,18 +820,19 @@ async def _get_target_session(target: dict[str, Any]) -> _TargetSession:
         max_size=16 * 1024 * 1024,
     )
     session = _TargetSession(target, websocket)
-    _target_sessions[target_id] = session
+    _target_sessions[session_key] = session
     try:
         await session.start()
         return session
     except Exception:
-        _target_sessions.pop(target_id, None)
+        _target_sessions.pop(session_key, None)
         await session.close()
         raise
 
 
 async def _cdp_call(target: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    session = await _get_target_session(target)
+    endpoint = _normalize_endpoint(target.get("cdp_url"))
+    session = await _get_target_session(target, endpoint)
     try:
         result = await session.call(method, params)
         if method != "Page.handleJavaScriptDialog" and session.pending_dialog:
@@ -431,14 +840,16 @@ async def _cdp_call(target: dict[str, Any], method: str, params: dict[str, Any] 
         return result
     except Exception:
         # A broken transport must not be reused for a later tool call.
-        if _target_sessions.get(session.target_id) is session:
-            _target_sessions.pop(session.target_id, None)
+        session_key = (endpoint, session.target_id)
+        if _target_sessions.get(session_key) is session:
+            _target_sessions.pop(session_key, None)
         await session.close()
         raise
 
 
 def _session_for_target(target: dict[str, Any]) -> _TargetSession | None:
-    session = _target_sessions.get(str(target.get("id")))
+    endpoint = _normalize_endpoint(target.get("cdp_url"))
+    session = _target_sessions.get((endpoint, str(target.get("id"))))
     return session if session and not session.closed else None
 
 
@@ -468,13 +879,29 @@ def _ref_expression(ref: str) -> str:
     }})()"""
 
 
-async def _prepare_target(target_id: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+async def _prepare_target(
+    target_id: str | None,
+    *,
+    endpoint: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     if not ENABLE_BROWSER:
         return None, None, "Browser control is disabled."
-    ready, error, _launched = await _ensure_browser()
+    selected_endpoint = _normalize_endpoint(endpoint) if endpoint else _isolated_target_endpoints.get(str(target_id or ""))
+    if selected_endpoint and selected_endpoint in _isolated_endpoints:
+        owner_error = _isolated_target_owner_error(str(target_id or ""))
+        if owner_error:
+            return None, None, owner_error
+        ready = await _browser_version(selected_endpoint) is not None
+        error = None if ready else f"No isolated Chromium CDP endpoint is reachable at {selected_endpoint}"
+        launched = False
+    else:
+        selected_endpoint = selected_endpoint or _endpoint_url()
+        ready, error, launched = await _ensure_browser()
     if not ready:
         return None, None, error
-    target, error = await _resolve_target(target_id)
+    target, error = await _resolve_target(target_id, endpoint=selected_endpoint)
+    if target is not None:
+        target["cdp_url"] = selected_endpoint
     return target, None, error
 
 
@@ -562,7 +989,16 @@ async def browser_click(target_id: str, ref: str) -> dict[str, Any]:
     target, _, error = await _prepare_target(target_id)
     if error:
         return {"status": "error", "error": error}
-    approval_error = await _approve_browser_action("click", target_id, ref)
+    sensitive_context = await _browser_sensitive_context(target, ref)
+    sensitive, sensitive_kind, sensitive_reason = _browser_sensitive_reason(sensitive_context, "click")
+    approval_error = await _approve_browser_action(
+        "click",
+        target_id,
+        ref,
+        sensitive=sensitive,
+        approval_key=f"browser:{sensitive_kind}" if sensitive_kind else None,
+        reason=sensitive_reason or "browser action: click",
+    )
     if approval_error:
         return approval_error
     try:
@@ -594,7 +1030,16 @@ async def browser_type(target_id: str, ref: str, text: str) -> dict[str, Any]:
     target, _, error = await _prepare_target(target_id)
     if error:
         return {"status": "error", "error": error}
-    approval_error = await _approve_browser_action("type", target_id, f"ref={ref} text_length={len(text)}")
+    sensitive_context = await _browser_sensitive_context(target, ref)
+    sensitive, sensitive_kind, sensitive_reason = _browser_sensitive_reason(sensitive_context, "type")
+    approval_error = await _approve_browser_action(
+        "type",
+        target_id,
+        f"ref={ref} text_length={len(text)}",
+        sensitive=sensitive,
+        approval_key=f"browser:{sensitive_kind}" if sensitive_kind else None,
+        reason=sensitive_reason or "browser action: type",
+    )
     if approval_error:
         return approval_error
     try:
@@ -647,7 +1092,16 @@ async def browser_press(target_id: str, key: str) -> dict[str, Any]:
     target, _, error = await _prepare_target(target_id)
     if error:
         return {"status": "error", "error": error}
-    approval_error = await _approve_browser_action("press", target_id, clean_key)
+    sensitive_context = await _browser_sensitive_context(target)
+    sensitive, sensitive_kind, sensitive_reason = _browser_sensitive_reason(sensitive_context, "press")
+    approval_error = await _approve_browser_action(
+        "press",
+        target_id,
+        clean_key,
+        sensitive=sensitive,
+        approval_key=f"browser:{sensitive_kind}" if sensitive_kind else None,
+        reason=sensitive_reason or "browser action: press",
+    )
     if approval_error:
         return approval_error
     try:
@@ -766,7 +1220,21 @@ async def browser_handle_dialog(target_id: str, action: str, prompt_text: str | 
     target, _, error = await _prepare_target(target_id)
     if error:
         return {"status": "error", "error": error}
-    approval_error = await _approve_browser_action("dialog", target_id, f"action={clean_action}")
+    session = _session_for_target(target)
+    dialog_context = {
+        "element": str((session.pending_dialog or {}).get("message") if session else ""),
+        "page": str(target.get("url") or ""),
+        "credential_field": bool(session and (session.pending_dialog or {}).get("type") == "prompt"),
+    }
+    sensitive, sensitive_kind, sensitive_reason = _browser_sensitive_reason(dialog_context, "dialog")
+    approval_error = await _approve_browser_action(
+        "dialog",
+        target_id,
+        f"action={clean_action}",
+        sensitive=sensitive,
+        approval_key=f"browser:{sensitive_kind}" if sensitive_kind else None,
+        reason=sensitive_reason or "browser action: dialog",
+    )
     if approval_error:
         return approval_error
     try:
@@ -818,40 +1286,44 @@ async def browser_screenshot(target_id: str) -> dict[str, Any]:
         return {"status": "error", "target_id": target.get("id"), "error": f"Unable to capture browser screenshot: {exc}"}
 
 
-async def open_browser_tab(url: str) -> dict[str, Any]:
-    """Open one http(s) URL as a new tab through Chromium's CDP HTTP API."""
-    if not ENABLE_BROWSER:
-        return {"status": "disabled", "error": "Browser control is disabled. Set ENABLE_BROWSER=true to enable it."}
+async def _open_browser_tab_at_endpoint(
+    endpoint: str,
+    url: str,
+    *,
+    launched: bool = False,
+) -> dict[str, Any]:
     valid, normalized_url = _valid_url(url)
     if not valid:
         return {"status": "error", "error": normalized_url}
 
-    ready, error, launched = await _ensure_browser()
-    if not ready:
-        return {"status": "error", "launched": launched, "error": error}
-
     try:
+        # Chromium's /json/new endpoint takes the destination URL directly
+        # after the question mark; passing it as `?url=...` creates about:blank
+        # on current Chromium builds.
+        encoded_url = quote(normalized_url, safe=":/?=&%")
         response = await globals.http_client.put(
-            f"{_endpoint_url()}/json/new",
-            params={"url": normalized_url},
+            f"{_normalize_endpoint(endpoint)}/json/new?{encoded_url}",
             timeout=BROWSER_TIMEOUT_SECONDS,
         )
         # Older Chromium builds accept GET for this endpoint instead of PUT.
         if response.status_code == 405:
             response = await globals.http_client.get(
-                f"{_endpoint_url()}/json/new",
-                params={"url": normalized_url},
+                f"{_normalize_endpoint(endpoint)}/json/new?{encoded_url}",
                 timeout=BROWSER_TIMEOUT_SECONDS,
             )
         response.raise_for_status()
         target = response.json()
         if not isinstance(target, dict):
             return {"status": "error", "error": "Chromium returned an invalid tab response."}
+        target_id = target.get("id")
+        normalized_endpoint = _normalize_endpoint(endpoint)
+        if target_id and normalized_endpoint in _isolated_endpoints:
+            _isolated_target_endpoints[str(target_id)] = normalized_endpoint
         return {
             "status": "completed",
             "launched": launched,
-            "cdp_url": _endpoint_url(),
-            "target_id": target.get("id"),
+            "cdp_url": normalized_endpoint,
+            "target_id": target_id,
             "type": target.get("type"),
             "title": target.get("title"),
             "url": target.get("url") or normalized_url,
@@ -859,3 +1331,16 @@ async def open_browser_tab(url: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"status": "error", "launched": launched, "error": f"Unable to open browser tab: {exc}"}
+
+
+async def open_browser_tab(url: str) -> dict[str, Any]:
+    """Open one http(s) URL through the legacy raw-browser endpoint."""
+    if not ENABLE_BROWSER:
+        return {"status": "disabled", "error": "Browser control is disabled. Set ENABLE_BROWSER=true to enable it."}
+    valid, normalized_url = _valid_url(url)
+    if not valid:
+        return {"status": "error", "error": normalized_url}
+    ready, error, launched = await _ensure_browser()
+    if not ready:
+        return {"status": "error", "launched": launched, "error": error}
+    return await _open_browser_tab_at_endpoint(_endpoint_url(), normalized_url, launched=launched)

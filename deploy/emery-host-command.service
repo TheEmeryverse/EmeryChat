@@ -1,0 +1,28 @@
+[Unit]
+Description=Emery host command runner
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hudson
+RuntimeDirectory=emery-command
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 /home/hudson/EmeryChat/scripts/emery_host_command.py --socket /run/user/1000/emery-command/command.sock --allowed-cwd /home/hudson --max-concurrent-commands 2 --allowed-peer-uid 1000
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=128
+LimitNOFILE=512
+MemoryMax=1G
+CPUQuota=200%
+
+[Install]
+WantedBy=default.target

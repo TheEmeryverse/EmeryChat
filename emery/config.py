@@ -495,6 +495,10 @@ COMMAND_EXECUTION_SSH_HOST = os.getenv("COMMAND_EXECUTION_SSH_HOST", "").strip()
 COMMAND_EXECUTION_SSH_USER = os.getenv("COMMAND_EXECUTION_SSH_USER", "").strip() or None
 COMMAND_EXECUTION_SSH_PORT = _to_int(os.getenv("COMMAND_EXECUTION_SSH_PORT"), 0) or None
 COMMAND_EXECUTION_SSH_KEY = os.getenv("COMMAND_EXECUTION_SSH_KEY", "").strip() or None
+COMMAND_EXECUTION_HOST_SOCKET = (
+    os.getenv("COMMAND_EXECUTION_HOST_SOCKET", "/run/emery-command/command.sock").strip()
+    or "/run/emery-command/command.sock"
+)
 ENABLE_BROWSER = _to_bool(os.getenv("ENABLE_BROWSER"), False)
 BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222").rstrip("/")
 try:

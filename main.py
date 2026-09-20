@@ -18,6 +18,7 @@ from emery.bot import (
     handle_message,
     handle_reaction,
     bot_post_init,
+    bot_post_shutdown,
     validate_telegram_access_policy
 )
 from emery.debate import handle_debate_callback, handle_debate_command
@@ -58,6 +59,7 @@ if __name__ == '__main__':
         .token(TELEGRAM_TOKEN)
         .request(t_request)
         .post_init(bot_post_init)  # Registers reolink polling and bot heartbeat
+        .post_shutdown(bot_post_shutdown)
         .build()
     )
     

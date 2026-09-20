@@ -2,7 +2,7 @@ import re
 import logging
 import asyncio
 import base64
-import time as clock
+import html
 from datetime import datetime, time
 from collections import deque
 
@@ -33,6 +33,7 @@ from emery.scratchpad import clear_scratchpad, read_scratchpad
 from emery.engine import emery_engine
 from emery.telegram_delivery import (
     TelegramLiveProgress,
+    PersistentStatusStack,
     send_rich_html_or_split_html_message,
     send_rich_or_split_html_message,
     send_split_html_message,
@@ -71,6 +72,120 @@ TOOL_DISPLAY_NAMES = {
     "search_query": "web search",
     "get_voice_audio": "voice generation",
 }
+
+COMMAND_STATUS_TOOLS = {
+    "run_command", "terminal_exec", "terminal_session_start", "terminal_session_write",
+    "terminal_session_read", "terminal_session_close", "terminal_job_start",
+    "terminal_job_status", "terminal_job_read", "terminal_job_wait", "terminal_job_cancel",
+    "terminal_list_sessions", "terminal_list_jobs",
+}
+BROWSER_STATUS_TOOLS = {
+    "list_browser_tabs", "open_browser_tab", "browser_snapshot", "browser_screenshot",
+    "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_back",
+    "browser_scroll", "browser_console", "browser_handle_dialog", "close_browser_tab",
+    "close_browser", "browser_session_start", "browser_session_status", "browser_session_list",
+    "browser_session_open_tab", "browser_session_close", "browser_session_cleanup",
+}
+
+
+def _compact_status_value(value, limit: int = 220) -> str:
+    value = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _browser_action_label(tool_name: str, args: dict) -> str:
+    args = args or {}
+    if tool_name == "list_browser_tabs":
+        return "listed open tabs"
+    if tool_name == "open_browser_tab":
+        return "opened a new tab"
+    if tool_name == "browser_snapshot":
+        return "inspected the page"
+    if tool_name == "browser_screenshot":
+        return "captured a screenshot"
+    if tool_name == "browser_navigate":
+        return "navigated to the page"
+    if tool_name == "browser_click":
+        return f"clicked {_compact_status_value(args.get('ref'), 60) or 'an element'}"
+    if tool_name == "browser_type":
+        ref = _compact_status_value(args.get("ref"), 60) or "an input"
+        count = len(str(args.get("text") or ""))
+        return f"typed {count} character{'s' if count != 1 else ''} into {ref}"
+    if tool_name == "browser_press":
+        return f"pressed {_compact_status_value(args.get('key'), 60) or 'a key'}"
+    if tool_name == "browser_back":
+        return "went back"
+    if tool_name == "browser_scroll":
+        direction = _compact_status_value(args.get("direction"), 20) or "down"
+        amount = _compact_status_value(args.get("amount"), 20) or "800"
+        return f"scrolled {direction} {amount}px"
+    if tool_name == "browser_console":
+        return "read the browser console"
+    if tool_name == "browser_handle_dialog":
+        action = _compact_status_value(args.get("action"), 20) or "handled"
+        return f"{action}ed the browser dialog"
+    if tool_name == "close_browser_tab":
+        return "closed the tab"
+    if tool_name == "close_browser":
+        return "closed the browser session"
+    if tool_name == "browser_session_start":
+        return "started a browser session"
+    if tool_name == "browser_session_status":
+        return "checked browser session status"
+    if tool_name == "browser_session_list":
+        return "listed browser sessions"
+    if tool_name == "browser_session_open_tab":
+        return "opened a tab in the browser session"
+    if tool_name == "browser_session_close":
+        return "closed the browser session"
+    if tool_name == "browser_session_cleanup":
+        return "cleaned up expired browser sessions"
+    return "used the browser"
+
+
+def _browser_status_text(tool_name: str, args: dict, urls: dict, result_metadata: dict | None = None) -> str:
+    args = args or {}
+    result_metadata = result_metadata or {}
+    target_id = str(args.get("target_id") or result_metadata.get("target_id") or "").strip()
+    result_url = str(result_metadata.get("url") or "").strip()
+    arg_url = str(args.get("url") or "").strip()
+    if target_id and result_url:
+        urls[target_id] = result_url
+    url = arg_url or result_url or (urls.get(target_id) if target_id else "")
+    if not url and tool_name == "list_browser_tabs":
+        url = "open tabs"
+    if not url:
+        url = "current tab"
+    return "🖥️ Computer use\nURL: " + _compact_status_value(url, 220) + "\nAction: " + _browser_action_label(tool_name, args)
+
+
+def _command_status_text(args: dict, tool_name: str = "terminal") -> str:
+    args = args or {}
+    command = _compact_status_value(
+        args.get("command")
+        or args.get("input")
+        or args.get("working_directory")
+        or args.get("session_id")
+        or args.get("job_id")
+        or "",
+        500,
+    ) or "(terminal operation)"
+    return f"⌨️ Terminal\n{tool_name.replace('_', ' ')}\n$ {command}"
+
+
+async def _refresh_persistent_status(chat_id: int, thread_id: int | None) -> None:
+    """Edit current statuses or re-anchor them when a newer message exists."""
+    status_store = getattr(globals, "persistent_status_messages", {})
+    status_key = (chat_id, normalize_message_thread_id(chat_id, thread_id))
+    status_stack = status_store.get(status_key)
+    if isinstance(status_stack, PersistentStatusStack):
+        try:
+            await status_stack.note_newer_message()
+            await status_stack.bring_to_bottom()
+        except Exception as exc:
+            logging.debug("TELEGRAM STATUS: unable to refresh chat=%s: %s", chat_id, exc)
 
 
 _heartbeat_last_evaluation = {}
@@ -356,10 +471,22 @@ async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not is_user_allowed(update):
         return
     chat_id = update.effective_chat.id
+    globals.TARGET_CHAT_ID.set(chat_id)
+    globals.CURRENT_THREAD_ID.set(
+        normalize_message_thread_id(chat_id, update.message.message_thread_id if update.message else None)
+    )
+    globals.current_user_id.set(getattr(update.effective_user, "id", None))
     if chat_id in globals.chat_histories:
         globals.chat_histories[chat_id].clear()
     clear_session_context_cache(chat_id=chat_id)
-    await update.message.reply_text("Context cleared.")
+    from emery.command_approval import clear_session_approvals
+    cleared_approvals = clear_session_approvals(
+        chat_id,
+        globals.CURRENT_THREAD_ID.get(),
+        globals.current_user_id.get(),
+    )
+    suffix = f" Cleared {cleared_approvals} session approval(s)." if cleared_approvals else ""
+    await update.message.reply_text(f"Context cleared.{suffix}")
 
 
 async def handle_notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -419,6 +546,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message.message_thread_id if update.message else None,
         )
     )
+
+    # Refresh the existing status messages in place. Telegram cannot move
+    # them below this incoming message without the intrusive delete/send
+    # animation, so their message IDs remain stable for the turn.
+    await _refresh_persistent_status(chat_id, globals.CURRENT_THREAD_ID.get())
     
     # Dynamically associate user chat ID with any pending jobs (like default briefings)
     from emery.scheduler import update_jobs_with_chat_id
@@ -694,33 +826,63 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             await asyncio.sleep(4)
 
     typing_task = asyncio.create_task(keep_typing())
-    progress = None
-    tool_progress = None
     progress_stop = asyncio.Event()
     progress_task = None
-    tool_close_task = None
     progress_phase = "prefill"
-    tool_generation = 0
+    status_stack = None
+    status_key = None
+    status_store = None
     if ENABLE_LIVE_PROGRESS:
-        progress = TelegramLiveProgress(
-            globals.application_bot,
+        status_key = (
             chat_id,
-            message_thread_id=globals.CURRENT_THREAD_ID.get(),
+            normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get()),
         )
-        tool_progress = TelegramLiveProgress(
-            globals.application_bot,
-            chat_id,
-            message_thread_id=globals.CURRENT_THREAD_ID.get(),
-        )
+        status_store = getattr(globals, "persistent_status_messages", None)
+        if status_store is None:
+            status_store = {}
+            setattr(globals, "persistent_status_messages", status_store)
+        status_stack = status_store.get(status_key)
+        if isinstance(status_stack, PersistentStatusStack) and status_stack.disabled:
+            # A Telegram formatting or transport error must not permanently
+            # suppress progress for every later turn in this chat.
+            try:
+                await status_stack.close()
+            except Exception:
+                logging.debug("TELEGRAM STATUS: unable to retire disabled status stack", exc_info=True)
+            status_stack = None
+        if not isinstance(status_stack, PersistentStatusStack):
+            status_stack = PersistentStatusStack(
+                globals.application_bot,
+                chat_id,
+                message_thread_id=status_key[1],
+            )
+            status_store[status_key] = status_stack
+
+        controllers = getattr(globals, "persistent_status_controllers", None)
+        if controllers is None:
+            controllers = {}
+            setattr(globals, "persistent_status_controllers", controllers)
+        controllers[status_key] = status_stack
+        await status_stack.ensure_visible()
 
         async def keep_progress_updated():
-            await progress.run_heartbeat(
-                progress_stop,
-                LIVE_PREFILL_MESSAGES,
-                interval=LIVE_PROGRESS_INTERVAL_SECONDS,
-                should_update=lambda: progress_phase == "prefill",
-                initial_index=1,
-            )
+            message_index = 1
+            while not progress_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        progress_stop.wait(),
+                        timeout=LIVE_PROGRESS_INTERVAL_SECONDS,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                if progress_phase == "prefill" and status_stack is not None:
+                    await status_stack.set_slot(
+                        "reasoning",
+                        LIVE_PREFILL_MESSAGES[message_index % len(LIVE_PREFILL_MESSAGES)],
+                        force=False,
+                    )
+                    message_index += 1
 
         progress_task = asyncio.create_task(keep_progress_updated())
 
@@ -743,87 +905,128 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return "a tool"
 
-    async def cancel_tool_close_task() -> None:
-        nonlocal tool_close_task
-        if tool_close_task is None:
+    async def update_status_slot(
+        slot: str,
+        text: str | None,
+        *,
+        force: bool = True,
+        mode: str | None = None,
+    ) -> None:
+        if status_stack is None:
             return
-        task = tool_close_task
-        tool_close_task = None
-        if not task.done():
-            task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    async def wait_for_tool_close_task() -> None:
-        nonlocal tool_close_task
-        if tool_close_task is None:
-            return
-        task = tool_close_task
-        tool_close_task = None
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    async def finish_tool_message(generation: int) -> None:
-        if tool_progress is None:
-            return
-        if generation != tool_generation:
-            return
-        await tool_progress.close_after_minimum(10.0)
+        await status_stack.set_slot(slot, text, force=force, mode=mode)
 
     async def handle_engine_event(event: dict) -> None:
-        nonlocal progress_phase, tool_generation, tool_close_task
-        if progress is None:
+        nonlocal progress_phase
+        if status_stack is None:
             return
 
         event_type = event.get("type")
         if event_type == "prefill_started":
             progress_phase = "prefill"
-            await progress.update(LIVE_PREFILL_MESSAGES[0], force=True)
+            await update_status_slot("reasoning", LIVE_PREFILL_MESSAGES[0])
         elif event_type == "reasoning_started":
             progress_phase = "reasoning"
         elif event_type == "reasoning_summary":
             progress_phase = "reasoning"
             summary = str(event.get("text") or event.get("summary") or "").strip()
             if summary:
-                await progress.update(f"💭 {summary}", force=True)
+                await update_status_slot("reasoning", summary)
         elif event_type == "preamble":
             progress_phase = "reasoning"
             preamble = str(event.get("text") or "").strip()
             if preamble:
-                await progress.update(f"💭 {preamble}")
+                await update_status_slot("reasoning", preamble, force=False)
         elif event_type == "tool_started":
             progress_phase = "reasoning"
-            tool_generation += 1
-            await cancel_tool_close_task()
-            if tool_progress.message_id is not None:
-                tool_progress.visible_since = clock.monotonic()
-            status = str(event.get("text") or "").strip()
-            name = friendly_tool_name(event)
-            explicit_name = str(
+            # Engine status formatters historically returned HTML-escaped
+            # fragments because they were sent directly as HTML. The fixed
+            # status messages escape exactly once at delivery time, so decode
+            # those fragments before storing them.
+            status = html.unescape(str(event.get("text") or "")).strip()
+            name = html.unescape(friendly_tool_name(event))
+            explicit_name = html.unescape(str(
                 event.get("friendly_name")
                 or event.get("display_name")
                 or event.get("tool_label")
                 or event.get("label")
                 or ""
-            ).strip()
+            )).strip()
             if status and explicit_name and explicit_name == status:
                 tool_text = f"🔧 {status}"
             elif status:
                 tool_text = f"🔧 {name}\n{status}"
             else:
                 tool_text = f"🔧 Using {name}…"
-            await tool_progress.update(tool_text, force=True)
+            tool_name = str(event.get("tool_name") or event.get("name") or "").strip()
+            tool_args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            status_mode = "terminal" if tool_name in COMMAND_STATUS_TOOLS else "browser" if tool_name in BROWSER_STATUS_TOOLS else None
+            await update_status_slot("tool", tool_text, mode=status_mode)
+            if tool_name in COMMAND_STATUS_TOOLS:
+                await update_status_slot("command", _command_status_text(tool_args, tool_name), mode="terminal")
+            elif tool_name in BROWSER_STATUS_TOOLS:
+                await update_status_slot(
+                    "browser",
+                    _browser_status_text(
+                        tool_name,
+                        tool_args,
+                        status_stack.browser_urls,
+                    ),
+                )
         elif event_type == "tool_finished":
-            generation = tool_generation
-            await cancel_tool_close_task()
-            tool_close_task = asyncio.create_task(finish_tool_message(generation))
+            tool_name = str(event.get("tool_name") or event.get("name") or "").strip()
+            if tool_name in BROWSER_STATUS_TOOLS:
+                tool_args = event.get("args") if isinstance(event.get("args"), dict) else {}
+                await update_status_slot(
+                    "browser",
+                    _browser_status_text(
+                        tool_name,
+                        tool_args,
+                        status_stack.browser_urls,
+                        event.get("result_metadata") if isinstance(event.get("result_metadata"), dict) else {},
+                    ),
+                )
+            # Keep the last tool call visible in slot two. Tool output may
+            # have posted a normal Telegram message, so move the fixed block
+            # back below it after the tool completes.
+            await status_stack.bring_to_bottom()
         elif event_type in {"steering_queued", "steering_applied", "steering_deferred"}:
             progress_phase = "reasoning"
-            await progress.update(f"💭 {str(event.get('text') or '').strip()}", force=True)
+            await update_status_slot("reasoning", str(event.get("text") or "").strip())
+
+    async def refresh_live_progress() -> None:
+        """Keep visible live-status messages below newly received user text."""
+        if status_stack is not None:
+            await status_stack.bring_to_bottom()
+
+    async def clear_completed_status(
+        *,
+        reanchor: bool = True,
+    ) -> None:
+        """Update the persistent reasoning message without adding status messages."""
+        if status_stack is None:
+            return
+        try:
+            await status_stack.clear_slots(
+                "approval",
+            )
+            if reanchor:
+                await status_stack.bring_to_bottom()
+        except Exception as exc:
+            logging.warning("TELEGRAM STATUS: unable to finalize status stack: %s", exc)
+
+    async def close_completed_status() -> None:
+        """Delete the three live-status messages after delivery completes."""
+        if status_stack is None:
+            return
+        try:
+            await status_stack.close()
+        except Exception as exc:
+            logging.warning("TELEGRAM STATUS: unable to delete completed status stack: %s", exc)
+        finally:
+            if status_store is not None and status_key is not None:
+                if status_store.get(status_key) is status_stack:
+                    status_store.pop(status_key, None)
 
     turn_key = (
         chat_id,
@@ -839,7 +1042,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             thread_id=turn_key[1],
             max_pending=LIVE_STEERING_MAX_PENDING,
         )
-        steering_state.notify = handle_engine_event if progress else None
+        steering_state.notify = handle_engine_event if status_stack else None
+        steering_state.refresh_progress = refresh_live_progress if status_stack else None
         globals.active_turns[turn_key] = steering_state
 
     try:
@@ -847,7 +1051,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         response_text, voice_sent_via_tool = await emery_engine(
             globals.chat_histories[chat_id],
             model_to_use=model_to_use,
-            on_event=handle_engine_event if progress else None,
+            on_event=handle_engine_event if status_stack else None,
             steering_state=steering_state,
             session_context=(globals.CURRENT_SESSION_CONTEXT.get().prompt
                              if globals.CURRENT_SESSION_CONTEXT.get() else None),
@@ -868,29 +1072,25 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         progress_stop.set()
         if progress_task:
             await progress_task
-        await wait_for_tool_close_task()
-        if progress:
-            await progress.close()
-        if tool_progress:
-            await tool_progress.close()
+        controllers = getattr(globals, "persistent_status_controllers", None)
+        if controllers is not None and status_key is not None:
+            if controllers.get(status_key) is status_stack:
+                controllers.pop(status_key, None)
 
     # --- THINKING SPLITTER LOGIC ---
-    start_tag = "<" + "think" + ">"
-    end_tag = "</" + "think" + ">"
-    pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-    thinking_blocks = [
-        match.strip()
-        for match in re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
-        if match.strip()
-    ]
-
     clean_response = clean_thinking_tags(response_text).strip()
 
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
     if handshake_check == "DONE":
         logging.debug("🤫 HANDSHAKE: Suppressed text reply (silent check)")
-        await _deliver_pending_media(chat_id, reply_target_id)
+        try:
+            await _deliver_pending_media(chat_id, reply_target_id)
+        finally:
+            await clear_completed_status(
+                reanchor=False,
+            )
+            await close_completed_status()
         globals.chat_histories[chat_id].append({
             "role": "assistant",
             "content": response_text,
@@ -900,52 +1100,52 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         clear_media_turn()
         return
 
-    # Display the thinking block if one exists
-    if thinking_blocks:
-        CHUNK_SIZE = 3900
-        thinking_content = "\n\n".join(thinking_blocks)
-        chunks = [thinking_content[i:i+CHUNK_SIZE] for i in range(0, len(thinking_content), CHUNK_SIZE)]
-
-        for idx, chunk in enumerate(chunks):
-            await send_model_thought_message(
-                chat_id,
-                chunk,
-                part_index=idx + 1,
-                part_count=len(chunks),
-                message_thread_id=globals.CURRENT_THREAD_ID.get(),
-            )
+    # Raw model thinking is intentionally not emitted as separate Telegram
+    # messages. The live status stack already contains the concise reasoning
+    # summary, so the completed turn contains only that summary and the final
+    # response.
 
     sent_msgs = []
-    # --- SINGLE FINAL REPLY DISPATCHER ---
-    if is_input_voice and not voice_sent_via_tool:
-        await globals.application_bot.send_chat_action(chat_id=chat_id, action="record_voice")
-        from emery.tools import get_voice_audio
-        v_out = await get_voice_audio(clean_response)
-        if v_out:
-            reply_params = ReplyParameters(message_id=reply_target_id, allow_sending_without_reply=True) if reply_target_id else None
-            sent_msg = await globals.application_bot.send_voice(
-                chat_id=chat_id,
-                voice=v_out,
-                caption="Voice message",
-                reply_parameters=reply_params,
-                message_thread_id=globals.CURRENT_THREAD_ID.get()
-            )
-            sent_msgs = [sent_msg] if sent_msg else []
+    media_msgs = []
+    # Clear any approval overlay before the final answer. The live status
+    # messages remain visible through the final answer, then are deleted.
+    await clear_completed_status(
+        reanchor=True,
+    )
+    try:
+        # --- SINGLE FINAL REPLY DISPATCHER ---
+        if is_input_voice and not voice_sent_via_tool:
+            await globals.application_bot.send_chat_action(chat_id=chat_id, action="record_voice")
+            from emery.tools import get_voice_audio
+            v_out = await get_voice_audio(clean_response)
+            if v_out:
+                reply_params = ReplyParameters(message_id=reply_target_id, allow_sending_without_reply=True) if reply_target_id else None
+                sent_msg = await globals.application_bot.send_voice(
+                    chat_id=chat_id,
+                    voice=v_out,
+                    caption="Voice message",
+                    reply_parameters=reply_params,
+                    message_thread_id=globals.CURRENT_THREAD_ID.get()
+                )
+                sent_msgs = [sent_msg] if sent_msg else []
+            else:
+                sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
         else:
-            sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
-    else:
-        if clean_response:
-            sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
-        elif not voice_sent_via_tool:
-            logging.error("❌ TELEGRAM: Model returned no final response after reasoning budget enforcement.")
-            sent_msgs = await send_model_text_message_as_reply(
-                chat_id,
-                "I reached the reasoning limit before producing a final answer. Please resend your request.",
-                reply_to_message_id=reply_target_id,
-                message_thread_id=globals.CURRENT_THREAD_ID.get(),
-            )
+            if clean_response:
+                sent_msgs = await send_model_text_message_as_reply(chat_id, clean_response, reply_to_message_id=reply_target_id, message_thread_id=globals.CURRENT_THREAD_ID.get())
+            elif not voice_sent_via_tool:
+                logging.error("❌ TELEGRAM: Model returned no final response after reasoning budget enforcement.")
+                sent_msgs = await send_model_text_message_as_reply(
+                    chat_id,
+                    "I reached the reasoning limit before producing a final answer. Please resend your request.",
+                    reply_to_message_id=reply_target_id,
+                    message_thread_id=globals.CURRENT_THREAD_ID.get(),
+                )
 
-    media_msgs = await _deliver_pending_media(chat_id, reply_target_id)
+        media_msgs = await _deliver_pending_media(chat_id, reply_target_id)
+        await close_completed_status()
+    except Exception:
+        raise
 
     # Save the assistant text to history
     assistant_entry = {
@@ -1532,6 +1732,20 @@ async def bot_post_init(application) -> None:
     """Consolidated post_init wrapper to launch Reolink polling and start the bot heartbeat."""
     from emery.inter_agent_bridge import initialize_inter_agent_bridge
 
+    # Reconcile process-backed terminal/browser resources before accepting
+    # turns.  The durable layer retains sanitized metadata but never attempts
+    # to reattach a PTY or claim an unrelated browser target.
+    try:
+        from emery.session_persistence import recover_stale_resources
+        recovery = await recover_stale_resources()
+        if recovery:
+            logging.info("SESSION RECOVERY: reconciled %d stale execution resources", len(recovery))
+    except Exception as exc:
+        # Startup should remain available if a broker is temporarily down;
+        # failed resources remain recovery_pending and will be retried by the
+        # next terminal/browser tool call.
+        logging.warning("SESSION RECOVERY: startup reconciliation deferred: %s", exc)
+
     await initialize_inter_agent_bridge(application)
     await validate_telegram_routing(application)
     from emery.tools import start_reolink_polling
@@ -1549,3 +1763,27 @@ async def bot_post_init(application) -> None:
             logging.info(f"🎨 STICKERS: Preloaded {len(sticker_set.stickers)} stickers from '{sticker_set_name}'")
         except Exception as e:
             logging.error(f"⚠️ STICKERS: Failed to preload sticker set '{sticker_set_name}': {e}")
+
+
+async def bot_post_shutdown(application) -> None:
+    """Release Emery-owned browser processes on graceful application exit."""
+    del application
+    try:
+        from emery.browser_control import close_browser
+        result = await close_browser()
+        closed = result.get("browser_session_results") or []
+        if closed:
+            from emery.session_persistence import get_session_integration
+            integration = get_session_integration()
+            for item in closed:
+                session_id = item.get("browser_session_id")
+                if session_id:
+                    integration.update_resource(
+                        "browser_session",
+                        session_id,
+                        status="closed",
+                        metadata={"session": item.get("session", item)},
+                    )
+        logging.info("BROWSER SHUTDOWN: released Emery-owned browser resources")
+    except Exception as exc:
+        logging.warning("BROWSER SHUTDOWN: cleanup failed: %s", exc)

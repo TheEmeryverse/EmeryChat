@@ -14,25 +14,27 @@ variables from Emery.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import re
 import shlex
 import signal
 import subprocess
+import uuid
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Sequence
 
 from emery.command_execution import (
     COMMAND_EXECUTION_CWD,
     COMMAND_EXECUTION_MAX_OUTPUT_CHARS,
     _redact_output,
-    _resolve_working_directory,
     _run_command_sync,
 )
 
 
-SUPPORTED_BACKENDS = frozenset({"local", "docker", "ssh"})
+SUPPORTED_BACKENDS = frozenset({"local", "docker", "ssh", "host"})
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_TIMEOUT_SECONDS = 120.0
 DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
@@ -56,6 +58,7 @@ class CommandBackendConfig:
     ssh_user: str | None = None
     ssh_port: int | None = None
     ssh_key: str | None = None
+    host_socket: str = "/run/emery-command/command.sock"
 
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -312,7 +315,10 @@ class LocalCommandBackend(CommandBackend):
         assert command is not None and timeout is not None
         raw_cwd = cwd if cwd is not None else (self.config.cwd or COMMAND_EXECUTION_CWD)
         try:
-            resolved_cwd = _resolve_working_directory(raw_cwd)
+            path = os.path.expanduser(str(raw_cwd))
+            if not os.path.isabs(path):
+                path = os.path.join(os.getcwd(), path)
+            resolved_cwd = Path(path).resolve()
         except (OSError, RuntimeError) as exc:
             return _result(
                 backend=self.name,
@@ -478,6 +484,79 @@ class SSHCommandBackend(CommandBackend):
         )
 
 
+class HostCommandBackend(CommandBackend):
+    """Execute through Emery's host-side runner as the configured host user."""
+
+    name = "host"
+
+    async def execute(self, command: str, *, cwd: str | None = None, timeout_seconds: float | int | None = None) -> dict[str, Any]:
+        command, timeout, validation_error = self._validate(command, timeout_seconds)
+        if validation_error:
+            return validation_error
+        assert command is not None and timeout is not None
+        socket_path = str(self.config.host_socket or "").strip()
+        if not socket_path:
+            return _result(
+                backend=self.name,
+                command=command,
+                cwd=cwd if cwd is not None else self.config.cwd,
+                status="error",
+                exit_code=None,
+                error="Host command socket is required.",
+                max_output_chars=self._max_output(),
+            )
+
+        target_cwd = cwd if cwd is not None else self.config.cwd
+        request = json.dumps({
+            "protocol_version": 1,
+            "request_id": f"req_{uuid.uuid4().hex[:16]}",
+            "operation": "exec",
+            "command": command,
+            "cwd": target_cwd,
+            "timeout_seconds": timeout,
+            "max_output_chars": self._max_output(),
+        }, separators=(",", ":")) + "\n"
+        reader = writer = None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(socket_path),
+                timeout=min(5.0, timeout),
+            )
+            writer.write(request.encode("utf-8"))
+            await writer.drain()
+            raw_line = await asyncio.wait_for(reader.readline(), timeout=timeout + 5.0)
+            if not raw_line:
+                raise RuntimeError("Host command runner closed the connection without a result.")
+            raw = json.loads(raw_line.decode("utf-8"))
+            if not isinstance(raw, dict):
+                raise RuntimeError("Host command runner returned an invalid result.")
+        except (OSError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+            return _result(
+                backend=self.name,
+                command=command,
+                cwd=target_cwd,
+                status="error",
+                exit_code=None,
+                error=f"Host command runner unavailable: {exc}",
+                max_output_chars=self._max_output(),
+            )
+        finally:
+            if writer is not None:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+
+        return _process_result(
+            backend=self.name,
+            command=command,
+            cwd=target_cwd,
+            raw=raw,
+            max_output_chars=self._max_output(),
+        )
+
+
 def create_command_backend(
     backend: str | None = None,
     *,
@@ -507,7 +586,9 @@ def create_command_backend(
         return LocalCommandBackend(effective)
     if selected == "docker":
         return DockerCommandBackend(effective)
-    return SSHCommandBackend(effective)
+    if selected == "ssh":
+        return SSHCommandBackend(effective)
+    return HostCommandBackend(effective)
 
 
 async def run_command(
@@ -528,6 +609,7 @@ __all__ = [
     "CommandBackend",
     "CommandBackendConfig",
     "DockerCommandBackend",
+    "HostCommandBackend",
     "LocalCommandBackend",
     "SSHCommandBackend",
     "SUPPORTED_BACKENDS",

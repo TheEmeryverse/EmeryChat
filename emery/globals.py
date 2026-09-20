@@ -35,6 +35,12 @@ current_user_id = contextvars.ContextVar("current_user_id", default=None)
 chat_debounce_tasks = {}  # Tracks active debounce timers: chat_id -> asyncio.Task
 active_turns = {}  # Tracks active normal chat turns: (chat_id, thread_id) -> ActiveTurnState
 active_foreground_loops = {}  # Tracks foreground agent loops: loop_id -> metadata
+# One ordered three-message status stack per chat/thread while a turn runs.
+# Its messages are edited in place and deleted after the final response.
+persistent_status_messages = {}
+# Active controllers let command approvals render inside the same ordered
+# status message instead of posting a second, interleaved Telegram message.
+persistent_status_controllers = {}
 
 
 # Concurrency locks to protect Ollama endpoints from concurrent load
@@ -60,6 +66,7 @@ class ActiveTurnState:
         self.stream_active = False
         self.accepting = True
         self.notify = None
+        self.refresh_progress = None
 
 
 def register_foreground_loop(loop_id: str, **metadata) -> None:

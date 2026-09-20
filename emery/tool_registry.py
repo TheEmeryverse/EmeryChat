@@ -2,9 +2,25 @@ from emery.config import ENABLE_MEMORY, REOLINK_CAMERAS
 from emery.memory import save_user_memory, get_camera_security_log
 from emery.scratchpad import clear_scratchpad, jot_down_note, read_scratchpad
 from emery.command_execution import run_command
+from emery.terminal_tools import (
+    terminal_exec,
+    terminal_session_start,
+    terminal_session_write,
+    terminal_session_read,
+    terminal_session_close,
+    terminal_job_start,
+    terminal_job_status,
+    terminal_job_read,
+    terminal_job_wait,
+    terminal_job_cancel,
+    terminal_list_sessions,
+    terminal_list_jobs,
+)
 from emery.browser_control import (
     browser_click,
     browser_back,
+    close_browser,
+    close_browser_tab,
     browser_console,
     browser_handle_dialog,
     browser_navigate,
@@ -15,6 +31,14 @@ from emery.browser_control import (
     browser_type,
     list_browser_tabs,
     open_browser_tab,
+)
+from emery.browser_session_tools import (
+    browser_session_cleanup,
+    browser_session_close,
+    browser_session_list,
+    browser_session_open_tab,
+    browser_session_start,
+    browser_session_status,
 )
 
 from emery.tools import (
@@ -68,15 +92,14 @@ tools_schema.extend([
         "function": {
             "name": "jot_down_note",
             "description": (
-                "Store temporary working context in the current chat/thread scratchpad. Use during multi-step work or research for confirmed facts, source takeaways, decisions, and open questions that may need to survive context compaction. "
-                "This is not durable personal memory; do not save secrets, private facts, or every intermediate result unless the user explicitly asks."
+                "Save one temporary working note for the current chat/thread. Use during multi-step work or research for confirmed facts, source takeaways, decisions, or unresolved questions that may be needed later. Read it with read_scratchpad. This is not durable personal memory: do not store secrets, sensitive personal facts, or every intermediate thought."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "note": {
                         "type": "string",
-                        "description": "One self-contained working note; include enough context to understand it later.",
+                        "description": "One self-contained note with enough context to make sense later; record a fact, decision, source takeaway, or open question rather than raw chain-of-thought.",
                     },
                     "title": {
                         "type": "string",
@@ -92,7 +115,7 @@ tools_schema.extend([
         "function": {
             "name": "read_scratchpad",
             "description": (
-                "Read all temporary working notes saved for the current chat/thread. Use before continuing a multi-step task when earlier research, decisions, or unresolved questions may be outside the active conversation context. Do not use it as a substitute for long-term personal memory."
+                "Read all temporary working notes for the current chat/thread. Use at the start or continuation of a long task when earlier research, decisions, or open questions may be outside the active context. This is temporary task state, not long-term personal memory."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -102,7 +125,7 @@ tools_schema.extend([
         "function": {
             "name": "clear_scratchpad",
             "description": (
-                "Delete all temporary working notes for the current chat/thread. Use only when the user explicitly asks to clear, reset, or forget the scratchpad; never clear it merely because a task is complete."
+                "Delete every temporary working note for the current chat/thread. Use only when the user explicitly asks to clear, reset, or forget the scratchpad. Do not clear it merely because a task is complete."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -116,31 +139,172 @@ if is_enabled("ENABLE_COMMAND_EXECUTION"):
         "function": {
             "name": "run_command",
             "description": (
-                "Run one bounded, non-interactive shell command on the Emery host and return its exit code and output. "
-                "Use for concrete system or project work that requires a command-line tool. Commands run with a configured working directory, "
-                "stdin closed, a timeout, and truncated output. Do not use for interactive programs, passwords, or commands that require a human prompt. "
-                "Clearly destructive or externally publishing commands pause for an approve-once Telegram confirmation; if confirmation is denied or expires, the command is not executed."
+                "Run one bounded, non-interactive shell command and return its exit code and capped output. Use for concrete system or project work that needs a command-line tool. The command runs with a configured working directory, closed stdin, and a timeout. Do not use for interactive programs, passwords, or commands that wait for a human prompt. Commands that write, delete, change services, or publish externally may pause for Telegram approval; denial or expiry means the command is not executed."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The exact non-interactive shell command to run.",
+                        "description": "The complete non-interactive shell command to run; do not rely on interactive prompts or stdin.",
                     },
                     "working_directory": {
                         "type": "string",
-                        "description": "Optional absolute or configured-root-relative directory; defaults to COMMAND_EXECUTION_CWD.",
+                        "description": "Optional absolute path or path relative to the configured command directory; defaults to COMMAND_EXECUTION_CWD.",
                     },
                     "timeout_seconds": {
                         "type": "number",
                         "description": "Optional timeout in seconds; bounded by COMMAND_EXECUTION_MAX_TIMEOUT_SECONDS.",
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Short reason this command is needed; include it when the command may trigger an approval check.",
                     },
                 },
                 "required": ["command"],
             },
         },
     })
+    AVAILABLE_TOOLS.update({
+        "terminal_exec": terminal_exec,
+        "terminal_session_start": terminal_session_start,
+        "terminal_session_write": terminal_session_write,
+        "terminal_session_read": terminal_session_read,
+        "terminal_session_close": terminal_session_close,
+        "terminal_job_start": terminal_job_start,
+        "terminal_job_status": terminal_job_status,
+        "terminal_job_read": terminal_job_read,
+        "terminal_job_wait": terminal_job_wait,
+        "terminal_job_cancel": terminal_job_cancel,
+        "terminal_list_sessions": terminal_list_sessions,
+        "terminal_list_jobs": terminal_list_jobs,
+    })
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_exec",
+                "description": "Run one non-interactive shell command and wait for it to finish. Use for a command that should complete within one bounded timeout. The command runs through Emery's terminal runtime, returns a request ID, exit status, working directory, and capped output, and may require approval when it changes system or project state. For a command that must keep running or needs shell state between calls, use terminal_job_start or terminal_session_start instead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The complete non-interactive shell command to run. Do not include a command that waits for keyboard input."},
+                        "working_directory": {"type": "string", "description": "Optional absolute path or path relative to Emery's configured command directory."},
+                        "timeout_seconds": {"type": "number", "description": "Optional maximum runtime in seconds; Emery clamps it to the configured limit."},
+                        "justification": {"type": "string", "description": "Optional short explanation of why this command is needed; useful when the command may trigger approval."},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_session_start",
+                "description": "Start a persistent interactive bash session and return a session ID. Use when later commands need the same working directory, environment, or shell state. After starting, send commands with terminal_session_write and read their output with terminal_session_read; close it with terminal_session_close when finished. The session is scoped to this chat and expires when its idle or lifetime limit is reached.",
+                "parameters": {"type": "object", "properties": {
+                    "working_directory": {"type": "string", "description": "Optional absolute path or path relative to Emery's configured command directory."},
+                    "idle_timeout_seconds": {"type": "number", "description": "Optional idle timeout in seconds; the session closes after no activity for this long."},
+                    "max_lifetime_seconds": {"type": "number", "description": "Optional hard lifetime in seconds; the session cannot outlive this limit."},
+                }},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_session_write",
+                "description": "Send input to an existing persistent terminal session. Include a trailing newline to execute a command; without it, the text is only typed into the shell. Call terminal_session_read afterward to collect output. Use the exact session_id returned by terminal_session_start.",
+                "parameters": {"type": "object", "properties": {
+                    "session_id": {"type": "string", "description": "Exact session_id returned by terminal_session_start or terminal_list_sessions."},
+                    "input": {"type": "string", "description": "Input to write; do not include secrets unless explicitly requested."},
+                    "justification": {"type": "string", "description": "Optional short explanation for input that may trigger approval."},
+                }, "required": ["session_id", "input"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_session_read",
+                "description": "Read output currently buffered by a persistent terminal session. Use after terminal_session_write, and call again if the command is still producing output. This only reads output; it does not send input or wait indefinitely.",
+                "parameters": {"type": "object", "properties": {
+                    "session_id": {"type": "string", "description": "Exact session_id returned by terminal_session_start or terminal_list_sessions."},
+                    "max_output_chars": {"type": "integer", "description": "Optional maximum number of output characters to return."},
+                }, "required": ["session_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_session_close",
+                "description": "Close a persistent terminal session and terminate its shell process. Use after the session is no longer needed or when a command must be stopped. This invalidates the session_id for future calls.",
+                "parameters": {"type": "object", "properties": {
+                    "session_id": {"type": "string", "description": "Exact session_id returned by terminal_session_start or terminal_list_sessions."},
+                    "reason": {"type": "string", "description": "Optional reason for closing the session."},
+                }, "required": ["session_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_job_start",
+                "description": "Start a non-interactive shell command in the background and return a job_id immediately. Use for work that may outlast one tool call but does not need an interactive shell. Follow up with terminal_job_status to check state, terminal_job_read for buffered output, terminal_job_wait to wait for completion, or terminal_job_cancel to stop it. The job is bounded by a maximum lifetime and may require approval.",
+                "parameters": {"type": "object", "properties": {
+                    "command": {"type": "string", "description": "The complete non-interactive shell command to run in the background."},
+                    "working_directory": {"type": "string", "description": "Optional absolute path or path relative to Emery's configured command directory."},
+                    "max_lifetime_seconds": {"type": "number", "description": "Optional maximum job lifetime in seconds; Emery clamps it to the configured limit."},
+                    "justification": {"type": "string", "description": "Optional short explanation of why this background command is needed; useful when approval may be required."},
+                }, "required": ["command"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_job_status",
+                "description": "Check whether a background terminal job is queued, running, completed, failed, cancelled, or expired. Use the exact job_id returned by terminal_job_start. This does not return the job's full output; use terminal_job_read for that.",
+                "parameters": {"type": "object", "properties": {"job_id": {"type": "string", "description": "Exact job_id returned by terminal_job_start or terminal_list_jobs."}}, "required": ["job_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_job_read",
+                "description": "Read output currently buffered by a background terminal job. Use the exact job_id returned by terminal_job_start. If the job is still running, call again later or use terminal_job_wait; this tool does not stop the job.",
+                "parameters": {"type": "object", "properties": {"job_id": {"type": "string", "description": "Exact job_id returned by terminal_job_start or terminal_list_jobs."}, "max_output_chars": {"type": "integer", "description": "Optional maximum number of output characters to return."}}, "required": ["job_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_job_wait",
+                "description": "Wait for a background terminal job to finish, fail, cancel, or reach a bounded wait timeout. Use the exact job_id returned by terminal_job_start. A wait timeout does not cancel the job; check it again with terminal_job_status or terminal_job_read.",
+                "parameters": {"type": "object", "properties": {"job_id": {"type": "string", "description": "Exact job_id returned by terminal_job_start or terminal_list_jobs."}, "timeout_seconds": {"type": "number", "description": "Optional maximum number of seconds to wait for this call."}}, "required": ["job_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_job_cancel",
+                "description": "Request cancellation of a running background terminal job. Use only when the user wants the job stopped or it is no longer useful. This may require approval and does not undo changes the job already made. Use the exact job_id returned by terminal_job_start.",
+                "parameters": {"type": "object", "properties": {"job_id": {"type": "string", "description": "Exact job_id returned by terminal_job_start or terminal_list_jobs."}, "justification": {"type": "string", "description": "Optional short explanation for cancelling the job; useful when approval may be required."}}, "required": ["job_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_list_sessions",
+                "description": "List persistent terminal sessions visible to this chat, including their IDs and lifecycle status. Use when you need to recover a session_id or inspect existing interactive work. It does not create, modify, or close sessions.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal_list_jobs",
+                "description": "List background terminal jobs visible to this chat, including their IDs and lifecycle status. Use when you need to recover a job_id or inspect existing background work. It does not create, cancel, or wait for jobs.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ])
 
 if is_enabled("ENABLE_BROWSER"):
     AVAILABLE_TOOLS.update({
@@ -156,13 +320,82 @@ if is_enabled("ENABLE_BROWSER"):
         "browser_scroll": browser_scroll,
         "browser_console": browser_console,
         "browser_handle_dialog": browser_handle_dialog,
+        "close_browser_tab": close_browser_tab,
+        "close_browser": close_browser,
+    })
+    tools_schema.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_start",
+                "description": "Start a logical browser session owned by this chat/thread/user and return a browser_session_id. Use this when browser work should be isolated from other chats or when you need a group of tabs with one lifecycle. Open tabs with browser_session_open_tab, inspect the session with browser_session_status, and close it with browser_session_close when finished.",
+                "parameters": {"type": "object", "properties": {
+                    "lease_seconds": {"type": "number", "description": "Optional maximum session lifetime in seconds."},
+                    "idle_timeout_seconds": {"type": "number", "description": "Optional idle timeout in seconds; idle sessions can be cleaned up automatically."},
+                }},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_status",
+                "description": "Inspect one logical browser session, including its lifecycle state and the tabs owned by it. Use the exact browser_session_id returned by browser_session_start or browser_session_list. This is read-only.",
+                "parameters": {"type": "object", "properties": {"browser_session_id": {"type": "string", "description": "Exact session ID returned by browser_session_start or browser_session_list."}}, "required": ["browser_session_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_list",
+                "description": "List logical browser sessions owned by this chat/thread/user. Use when you need to recover a browser_session_id or see which isolated sessions are still open. This does not list individual tabs outside those sessions.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_open_tab",
+                "description": "Open one absolute HTTP(S) URL in an existing logical browser session and attach the new tab to it. Use the resulting target_id with the ordinary browser_snapshot, browser_click, browser_type, and related tab tools. The URL is opened only; inspect the page before claiming that an action succeeded.",
+                "parameters": {"type": "object", "properties": {
+                    "browser_session_id": {"type": "string", "description": "Exact session ID returned by browser_session_start or browser_session_list."},
+                    "url": {"type": "string", "description": "One absolute HTTP(S) URL; embedded credentials are not allowed."},
+                }, "required": ["browser_session_id", "url"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_close",
+                "description": "Close one logical browser session and, by default, its owned tabs. Use only when the user is finished with that isolated browser work or explicitly asks to close it. This invalidates the session and may close multiple tabs.",
+                "parameters": {"type": "object", "properties": {
+                    "browser_session_id": {"type": "string", "description": "Exact session ID returned by browser_session_start or browser_session_list."},
+                    "close_tabs": {"type": "boolean", "description": "Whether to close tabs owned by the session; defaults to true. Set false only when the tabs must remain open independently."},
+                }, "required": ["browser_session_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_session_cleanup",
+                "description": "Clean up browser sessions that have expired or exceeded their idle timeout. Use for explicit housekeeping or after browser work is complete; it does not close active sessions that are still within their lease.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ])
+    AVAILABLE_TOOLS.update({
+        "browser_session_start": browser_session_start,
+        "browser_session_status": browser_session_status,
+        "browser_session_list": browser_session_list,
+        "browser_session_open_tab": browser_session_open_tab,
+        "browser_session_close": browser_session_close,
+        "browser_session_cleanup": browser_session_cleanup,
     })
     tools_schema.extend([
         {
             "type": "function",
             "function": {
                 "name": "list_browser_tabs",
-                "description": "List tabs currently exposed by Emery's configured Chromium DevTools endpoint. Use before browser work when you need to inspect the current browser state.",
+                "description": "List tabs currently exposed by Emery's configured Chromium DevTools endpoint and return each tab's target_id, title, and URL. Use this first when working with an existing browser, or when a target_id is unknown. This does not open, navigate, or modify a tab.",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -170,7 +403,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "open_browser_tab",
-                "description": "Open one absolute http(s) URL as a new tab in the configured Chromium browser through CDP. This only opens the tab; it does not claim that a page was logged into, clicked, or otherwise acted on.",
+                "description": "Open one absolute HTTP(S) URL as a new tab in the configured Chromium browser and return its target_id. This only loads the URL; it does not log in, click, submit, or prove that any page action succeeded. Call browser_snapshot before interacting with the new tab.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -184,7 +417,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_snapshot",
-                "description": "Read the selected Chromium tab as text and expose visible interactive elements with short refs such as @e1. Call this before clicking or typing; refs become stale after page changes.",
+                "description": "Inspect one Chromium tab and return readable page text plus visible interactive elements labeled with short refs such as @e1. Call this before clicking, typing, or pressing keys. Use only refs from the latest snapshot: navigation, clicks, typing, scrolling, and many page updates make old refs stale.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -200,7 +433,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_screenshot",
-                "description": "Capture a screenshot of the selected Chromium tab and attach it to the current model turn for visual inspection.",
+                "description": "Capture the current view of one Chromium tab and attach the screenshot to the model turn for visual inspection. Use when layout, images, visual state, or text not exposed by browser_snapshot matters. This does not click or change the page.",
                 "parameters": {
                     "type": "object",
                     "properties": {"target_id": {"type": "string", "description": "Chromium target_id from list_browser_tabs or open_browser_tab."}},
@@ -212,7 +445,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_navigate",
-                "description": "Navigate an existing Chromium tab to one absolute http(s) URL. Use browser_snapshot afterward because prior element refs are invalidated.",
+                "description": "Navigate an existing Chromium tab to one absolute HTTP(S) URL. Navigation replaces the page and invalidates all previous element refs, so call browser_snapshot afterward before any click or typing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -227,7 +460,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_click",
-                "description": "Click one visible element by its ref from the latest browser_snapshot. Use only the exact ref returned by that snapshot.",
+                "description": "Click one visible interactive element in a Chromium tab by its exact ref from the latest browser_snapshot. Do not guess refs or reuse refs after the page changes. Inspect the resulting page with browser_snapshot before taking another action; the click may trigger approval or a native dialog.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -242,7 +475,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_type",
-                "description": "Clear and type text into one visible input/contenteditable element by its ref from the latest browser_snapshot.",
+                "description": "Clear the selected visible input or contenteditable element and type new text into it. Use only an exact input ref from the latest browser_snapshot, then inspect the result or submit with browser_press if needed. This is a page interaction, not a password manager; do not include secrets unless the user explicitly requested that exact action.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -258,7 +491,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_press",
-                "description": "Press a basic key in the selected Chromium tab after browser_type or browser_click, such as Enter, Tab, Escape, Backspace, Delete, an arrow key, or one character.",
+                "description": "Press one supported keyboard key in the selected Chromium tab, typically after browser_type or browser_click. Use keys such as Enter, Tab, Escape, Backspace, Delete, an arrow key, or one character. Inspect the page afterward if the key changes navigation, focus, or content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -273,7 +506,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_back",
-                "description": "Go back one entry in a Chromium tab's navigation history. Refresh the browser snapshot afterward.",
+                "description": "Go back one entry in a Chromium tab's navigation history. The page changes and prior element refs become invalid, so call browser_snapshot afterward.",
                 "parameters": {"type": "object", "properties": {"target_id": {"type": "string", "description": "Chromium target_id."}}, "required": ["target_id"]},
             },
         },
@@ -281,7 +514,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_scroll",
-                "description": "Scroll a Chromium page by a bounded amount in one direction, then use browser_snapshot to inspect the new viewport.",
+                "description": "Scroll one Chromium page by a bounded amount in one direction. Use browser_snapshot afterward to inspect the new viewport and obtain fresh element refs; scrolling can make the previous visible refs unusable.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -297,7 +530,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_console",
-                "description": "Read recent console messages and JavaScript exceptions observed for a Chromium tab; use this for debugging page behavior, not as proof that a user-facing action succeeded.",
+                "description": "Read recent console messages and JavaScript exceptions observed in one Chromium tab. Use for debugging page behavior or failed interactions, not as proof that a user-facing action succeeded; verify visible results with browser_snapshot or browser_screenshot.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -313,7 +546,7 @@ if is_enabled("ENABLE_BROWSER"):
             "type": "function",
             "function": {
                 "name": "browser_handle_dialog",
-                "description": "Accept or dismiss a currently open native JavaScript alert, confirm, or prompt in a Chromium tab. Use only after a browser action returns awaiting_dialog and inspect the dialog text first.",
+                "description": "Accept or dismiss a currently open native JavaScript alert, confirm, or prompt. Use only when a previous browser action returned awaiting_dialog, and choose based on the returned dialog text. After handling it, inspect the page again; accepting may submit or confirm a user-visible action.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -323,6 +556,26 @@ if is_enabled("ENABLE_BROWSER"):
                     },
                     "required": ["target_id", "action"],
                 },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "close_browser_tab",
+                "description": "Close one selected Chromium tab by target_id. This is a destructive browser action and may require approval; use only when the user asked to close it or the tab is clearly no longer needed. Do not confuse this with browser_back, which keeps the tab open.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target_id": {"type": "string", "description": "Chromium target_id from list_browser_tabs."}},
+                    "required": ["target_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "close_browser",
+                "description": "Close Emery-managed CDP browser sessions and terminate Chromium only if Emery launched that browser process. Use only for explicit browser shutdown or cleanup. An externally managed Chromium process is left running, but active Emery tabs may be closed.",
+                "parameters": {"type": "object", "properties": {}},
             },
         },
     ])
@@ -562,8 +815,8 @@ if is_enabled("ENABLE_SEARCH"):
         "type": "function", 
         "function": {
             "name": "web_search", 
-            "description": "Search the public web only when current or unfamiliar information is needed and no more specific structured tool applies. Start with one targeted search. Use at most one follow-up search, and only when the first results are empty or genuinely contradictory; never repeat the same query. If the user supplied a URL, use `fetch_web_content` instead. Do not use this for direct structured finance data when a finance tool applies. Keep raw result URLs out of the final user-facing response unless the user asks for them.",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The web-search query describing the information or topic to find."}}, "required": ["query"]}
+            "description": "Search the public web for current, unfamiliar, or source-based information when no more specific tool applies. Use one focused query first and at most one different follow-up if results are empty or genuinely contradictory. If the user supplied a URL, use fetch_web_content instead; for structured market or economic data, use the relevant finance tool. Do not repeat the same query or put raw result URLs in the final answer unless the user asks.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "One focused search query containing the topic, entity, and important constraint or date."}}, "required": ["query"]}
         }
     })
 
@@ -573,8 +826,8 @@ if is_enabled("ENABLE_IMAGEGEN"):
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "Generate a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image; do not use for ordinary text descriptions, image analysis, or finding an existing image. Expand the prompt with useful visual details while preserving the user's subject, style, composition, and constraints.",
-            "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "A self-contained visual prompt describing the requested subject, style, composition, and important constraints."}}, "required": ["prompt"]}
+            "description": "Create a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image. Do not use for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained.",
+            "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}}, "required": ["prompt"]}
         }
     })
 
@@ -584,7 +837,7 @@ if is_enabled("ENABLE_VOICE"):
         "type": "function", 
         "function": {
             "name": "speak_message", 
-            "description": "Convert a natural spoken script to audio and send it as a voice memo. Use only when the user's most recent message explicitly asks to speak, say something aloud, or send a voice message. Do not use for an ordinary written answer. The script must be conversational prose with no Markdown, headings, lists, labels, emojis, or symbols.",
+            "description": "Convert a spoken script to audio and send one voice memo. Use only when the user's most recent message explicitly asks to speak, say something aloud, or send a voice message; do not use for an ordinary written answer. Pass natural conversational prose only—no Markdown, headings, lists, labels, emojis, or symbols.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -616,22 +869,22 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Fetch and extract the readable content of one specific public webpage or document URL. For ordinary questions, fetch at most one promising result after `web_search`; fetch additional pages only when the user explicitly asks for comparison or deep research. If the user gives you a URL, fetch that URL directly. Never fetch the same URL twice in one turn and do not use this to discover pages; use `web_search` for that. Pass only the URL; the tool returns the page title, resolved URL, extracted text, and a small set of image candidates. Image candidates are metadata only and are not downloaded or sent automatically.",
-            "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "The single HTTP or HTTPS URL to read."}}, "required": ["url"]}
+            "description": "Read and extract the main text from one specific public webpage or document URL. If the user supplied a URL, use this directly; otherwise fetch at most one promising result after web_search unless the user asks for comparison or deep research. Do not use this to discover pages or fetch the same URL twice in one turn. The result includes the page title, resolved URL, extracted text, and image-candidate metadata; images are not downloaded or sent automatically.",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Exactly one HTTP or HTTPS URL to read."}}, "required": ["url"]}
         }
     })
     tools_schema.append({
         "type": "function",
         "function": {
             "name": "use_research_image",
-            "description": "Use one image candidate returned by fetch_web_content. Images are optional: do not call this merely because a page contains an image. Use action=send or inspect_and_send only when the user requested a visual or the subject is inherently visual and the image materially improves comprehension. Prefer one image; never exceed the enforced per-turn maximum of two. Use inspect for OCR/visual verification, and attach only when the multimodal main model needs to inspect the pixels; attach does not send the image to the user.",
+            "description": "Act on one image candidate returned by fetch_web_content. Images are optional: do not call this just because a page contains an image. Use inspect for OCR/visual verification, attach when the main model needs to see the pixels, send when the user should receive the image, or inspect_and_send for both. Prefer one image and never exceed the enforced per-turn maximum of two; attach alone does not send anything to the user.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_id": {"type": "string", "description": "The candidate ID returned by fetch_web_content, such as research_img_abc123."},
-                    "action": {"type": "string", "enum": ["inspect", "attach", "send", "inspect_and_send"], "description": "inspect for vision/OCR, attach to the main model, send to Telegram, or inspect then send."},
-                    "question": {"type": "string", "description": "Optional focused question for vision inspection or OCR."},
-                    "caption": {"type": "string", "description": "Optional concise Telegram caption; source attribution is added automatically."},
+                    "image_id": {"type": "string", "description": "Candidate ID returned by fetch_web_content, such as research_img_abc123."},
+                    "action": {"type": "string", "enum": ["inspect", "attach", "send", "inspect_and_send"], "description": "Choose inspect for OCR/visual analysis, attach to show the pixels to the main model, send to deliver the image to Telegram, or inspect_and_send for both analysis and delivery."},
+                    "question": {"type": "string", "description": "Optional focused question to answer from the image during inspect or inspect_and_send."},
+                    "caption": {"type": "string", "description": "Optional concise Telegram caption for send or inspect_and_send; source attribution is added automatically."},
                 },
                 "required": ["image_id", "action"],
             },

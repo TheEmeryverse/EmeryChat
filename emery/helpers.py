@@ -530,13 +530,15 @@ def _get_compact_stable_system_prompt() -> str:
     if ENABLE_COMMAND_EXECUTION:
         policies.append(
             "- Command execution: use `run_command` for concrete non-interactive shell work when a normal tool does not apply. "
-            "Give it the exact command, use a specific working directory when needed, respect its timeout, and treat blocked/destructive commands as not executed. "
+            "In production, commands use the configured host runner and execute as the host service user, not as the Emery container user. "
+            "Give it the exact command, use a specific working directory when needed, respect its timeout, and for commands that may be dangerous include a short honest sentence in `justification` explaining why the command is needed. "
+            "Treat blocked/destructive commands as not executed. "
             "Never put passwords, API keys, tokens, or other secrets in a command."
         )
     if ENABLE_BROWSER:
         policies.append(
             "- Browser control: use `list_browser_tabs` and `open_browser_tab` for explicit tab work. For interaction, call `browser_snapshot` first, then use only its current refs with `browser_click` or `browser_type`; refresh the snapshot after navigation, scrolling, or clicks. "
-            "Use `browser_screenshot` when visual state matters, `browser_press` for basic keys, `browser_back` for history, and `browser_console` for page debugging. If a tool returns `awaiting_dialog`, inspect the dialog and use `browser_handle_dialog` only for the user's intended response. Never claim a login, click, submission, or other page action succeeded without a confirmed tool result."
+            "Use `browser_screenshot` when visual state matters, `browser_press` for basic keys, `browser_back` for history, and `browser_console` for page debugging. Use `close_browser_tab` only when the user asks to close a specific tab, and `close_browser` to shut down Emery-launched Chromium. If a tool returns `awaiting_dialog`, inspect the dialog and use `browser_handle_dialog` only for the user's intended response. Never claim a login, click, submission, or other page action succeeded without a confirmed tool result."
         )
 
     return f"""# Identity

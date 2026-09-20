@@ -5,6 +5,15 @@ services:
     build: .
     container_name: emerychat
     restart: unless-stopped
+    # Match the host service user so bind mounts and the command socket are
+    # not accessed by a root process inside the container.
+    user: "1000:1000"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
     # Using host network mode allows the container to easily communicate with local services
     # (like Ollama on localhost:11434 or Kokoro on localhost:8880).
     # NOTE: If you are on macOS or Windows and host mode doesn't route properly,
@@ -17,3 +26,5 @@ services:
       - ./config:/app/config
       - ./data:/app/data
       - ./secrets:/app/secrets
+      # Host-side command runner socket; commands execute as hudson outside this container.
+      - /run/user/1000/emery-command:/run/emery-command
