@@ -506,8 +506,6 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
             thread_id,
             bot=context.bot,
             reply_to_message_id=update.message.message_id,
-            caption_prefix="",
-            include_description=False,
         )
         await update.message.reply_text("Image generation started; I’ll send it here when ready.")
         logging.info("🖼️ DIRECT IMAGE: queued for chat_id=%s without Emery context.", chat_id)

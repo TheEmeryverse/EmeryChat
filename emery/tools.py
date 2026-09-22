@@ -483,49 +483,6 @@ async def speak_message(text): # What the model calls to create a voice message 
     return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
 
 # --- IMAGE GENERATION ---
-async def _finish_generated_image_description(
-    *,
-    chat_id: int,
-    thread_id: int | None,
-    photo_message_id: int | None,
-    image_bytes: bytes,
-    prompt: str,
-) -> None:
-    """Analyze a delivered image, add the observation to history, and follow up."""
-    try:
-        compressed_bytes = compress_image_bytes(image_bytes)
-        vision_b64 = base64.b64encode(compressed_bytes).decode("utf-8")
-        vision_prompt = (
-            "Describe the generated image in detail so Emery can use the observation in later context. "
-            "State only visible facts and notable differences from the requested prompt; do not speculate.\n\n"
-            f"Requested prompt:\n{prompt[:4000]}"
-        )
-        description = (await get_image_description(vision_b64, vision_prompt)).strip()
-        if not description:
-            logging.warning("⚠️ IMAGE: Background vision analysis returned no description.")
-            return
-
-        history = globals.chat_histories.setdefault(chat_id, deque())
-        history.append({
-            "role": "assistant",
-            "content": f"[Background vision observation for the generated image]\n{description}",
-            "message_thread_id": thread_id,
-            "timestamp": datetime.now(USER_TIMEZONE),
-            "reply_to_message_id": photo_message_id,
-        })
-
-        await send_rich_or_split_html_message(
-            globals.application_bot,
-            chat_id,
-            f"**Image description**\n\n{description}",
-            reply_to_message_id=photo_message_id,
-            message_thread_id=thread_id,
-        )
-        logging.info("🖼️ IMAGE: Background description sent and added to chat context for chat_id=%s.", chat_id)
-    except Exception as exc:
-        logging.error("❌ IMAGE: Background description failed: %s", exc, exc_info=True)
-
-
 def _track_background_image_task(task: asyncio.Task) -> asyncio.Task:
     """Keep a reference to a background image task until it completes."""
     globals.background_image_tasks.add(task)
@@ -579,8 +536,7 @@ async def _generate_and_deliver_image(
     *,
     bot=None,
     reply_to_message_id: int | None = None,
-    caption_prefix: str = "Here's your picture: ",
-    include_description: bool = True,
+    caption_prefix: str | None = None,
 ) -> None:
     """Generate and deliver an image after the foreground model turn returns."""
     bot = bot or globals.application_bot
@@ -598,24 +554,18 @@ async def _generate_and_deliver_image(
                 allow_sending_without_reply=True,
             )
 
-        sent_photo = await bot.send_photo(
+        caption = (
+            f"{caption_prefix}{prompt[:1000]}"
+            if caption_prefix is not None
+            else None
+        )
+        await bot.send_photo(
             chat_id=chat_id,
             photo=image_bytes,
-            caption=f"{caption_prefix}{prompt[:1000]}",
+            caption=caption,
             reply_parameters=reply_parameters,
             message_thread_id=thread_id,
         )
-        if include_description:
-            description_task = asyncio.create_task(
-                _finish_generated_image_description(
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    photo_message_id=getattr(sent_photo, "message_id", None),
-                    image_bytes=image_bytes,
-                    prompt=prompt,
-                )
-            )
-            _track_background_image_task(description_task)
         logging.info("🖼️ IMAGE: Background image delivered for chat_id=%s.", chat_id)
     except Exception as exc:
         logging.error("❌ IMAGE: Background generation/delivery failed: %s", exc, exc_info=True)
@@ -639,8 +589,7 @@ def queue_image_generation(
     *,
     bot=None,
     reply_to_message_id: int | None = None,
-    caption_prefix: str = "Here's your picture: ",
-    include_description: bool = True,
+    caption_prefix: str | None = None,
 ) -> asyncio.Task:
     """Start image generation in the background and return its task handle."""
     task = asyncio.create_task(
@@ -651,7 +600,6 @@ def queue_image_generation(
             bot=bot,
             reply_to_message_id=reply_to_message_id,
             caption_prefix=caption_prefix,
-            include_description=include_description,
         )
     )
     return _track_background_image_task(task)
