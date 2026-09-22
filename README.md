@@ -50,6 +50,7 @@ The project is built around a simple operating model:
 │   ├── engine.py               # Model/tool orchestration
 │   ├── helpers.py              # Prompting, formatting, delegation helpers
 │   ├── memory.py               # Persistent memory read/write/consolidation
+│   ├── skills.py               # Durable procedural skills and scoped retrieval
 │   ├── scheduler.py            # Custom job persistence and job queue wiring
 │   └── tools.py                # Tool implementations
 ├── config/                     # Auto-generated persistent JSON config/state
@@ -78,6 +79,18 @@ The project is built around a simple operating model:
 - The embedding model can rank semantically relevant memories, while lexical fallback still works if embeddings are unavailable.
 - Group-chat topic memory is stored separately from private user memory so public context does not automatically leak into DM recall.
 - Topic summarization now asks the fast model for strict JSON, then validates and normalizes the result before storing it.
+
+### Durable skills
+
+- Durable procedural skills live in `data/skills/skills_store.json`.
+- Human-readable skill documents are materialized under `data/skills/<category>/<slug>/SKILL.md`; the JSON file remains a compatibility index and migration cache. Supporting `references/`, `templates/`, `scripts/`, and `assets/` files are loaded on demand.
+- Skills are reusable playbooks, separate from personal memory: memory stores facts, while a skill stores steps, prerequisites, verification rules, and known failure modes.
+- Ask Emery to remember how to do something after a successful multi-step task. It can save a draft with `skill_save` or `skill_manage`, then review or manage it with `skill_list`, `skill_view`, `skill_manage`, and `skill_set_status`.
+- Relevant active skills are retrieved per turn as compact summaries; Emery calls `skill_view` to load a full procedure or supporting reference only when needed.
+- In Telegram, use `/skills list`, `/skills search <query>`, `/skills show <name>`, `/skills status <name>`, `/skills archive <name>`, `/skills pending`, `/skills diff <id>`, `/skills approve <id>`, and `/skills reject <id>`.
+- Set `SKILL_WRITE_APPROVAL=true` to stage model-originated skill writes in `data/skills/skill_approvals.json`; review them with `/skills pending` and `/skills diff <id>`, then apply or discard them with `/skills approve <id>` or `/skills reject <id>`. The queue is scoped to the current Telegram user/chat, and approval applies the change through Emery's normal skill APIs.
+- Set `SKILL_AUTO_APPROVE=true` together with `SKILL_WRITE_APPROVAL=true` to keep an audit record while automatically applying each staged skill change. Leave it `false` when human review is required.
+- Private skills stay in private chats; group skills are scoped to their group. Skills never grant permissions or bypass normal tool schemas, privacy rules, approvals, browser authorization, or temporary mode.
 
 ### Topic Debugging
 
@@ -146,7 +159,7 @@ By default the app expects a primary OpenAI-compatible chat-completions endpoint
 - `VISION_OLLAMA_URL=http://localhost:11434/api/chat`
 - `EMBEDDING_OLLAMA_URL=http://localhost:11434/api/embed` (Ollama) or an explicit OpenAI-compatible `/v1/embeddings` URL (such as llama.cpp)
 
-The fast text coprocessor uses an OpenAI-compatible chat-completions endpoint. For a local llama.cpp server, point it at `FAST_MODEL_URL=http://127.0.0.1:8082/v1/chat/completions`. It is used for delegated text processing and lightweight helper tasks, but it does not inspect or execute tool calls before the main-model turn.
+The fast text coprocessor accepts either an OpenAI-compatible chat-completions endpoint or Ollama's native `/api/chat` endpoint. The native Ollama path supports per-request context sizing, thinking control, and indefinite model keep-alive. It is used for delegated text processing and lightweight helper tasks, but it does not inspect or execute tool calls before the main-model turn.
 
 #### llama.cpp main-model backend
 
@@ -502,6 +515,13 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `LIVE_STEERING_MAX_PENDING` | `4` | Maximum queued updates per active turn |
 | `ENABLE_TELEGRAM_RICH_MESSAGES` | `false` | Opts into Telegram Bot API rich Markdown; disabled by default for client compatibility, with HTML formatting used otherwise |
 | `MEMORY_STORE_PATH` | `data/memory/memory_store.json` | Structured memory store path |
+| `SKILLS_STORE_PATH` | `data/skills/skills_store.json` | Durable procedural skill store path |
+| `SKILLS_FILESYSTEM_PATH` | directory containing the JSON store | Optional root for category-based `SKILL.md` documents |
+| `SKILL_WRITE_APPROVAL` | `false` | Stage skill writes for `/skills pending`, diff, approval, or rejection |
+| `SKILL_AUTO_APPROVE` | `false` | Automatically approve and apply staged skill writes while retaining the audit record; requires `SKILL_WRITE_APPROVAL=true` |
+| `SKILL_APPROVAL_STORE_PATH` | `data/skills/skill_approvals.json` | Persistent staged skill-change store |
+| `SKILL_MAX_CHARS` | `12000` | Maximum procedure size for one skill |
+| `SKILL_MAX_RETRIEVAL_CHARS` | `8000` | Maximum skill context attached to one turn |
 | `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 
 The production `host` backend keeps Emery's Telegram process containerized but
@@ -606,6 +626,7 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 | `EXPERT_ARCHIVE_DIR`, `EXPERT_INDEX_PATH`, `EXPERT_DEFAULT_TARGET_SOURCES`, `EXPERT_MIN_TARGET_SOURCES`, `EXPERT_MAX_SOURCES`, `EXPERT_MAX_AGENDA_QUESTIONS`, `EXPERT_MAX_NEW_QUESTIONS`, `EXPERT_MAX_SUBTASKS_PER_QUESTION`, `EXPERT_ALLOW_MIDLOOP_QUESTIONS`, `EXPERT_MAIN_*`, `EXPERT_FAST_*` | `/expert` research archives, index, adjustable source depth, bounded agenda expansion, optional mid-loop question pauses, archive resume/open behavior, and expert-specific model tuning |
 | `SCRATCHPAD_STORE_PATH` | Persistent general scratchpad JSON path; defaults to `data/scratchpad/scratchpad_store.json` |
 | `DEBATE_ARCHIVE_DIR`, `DEBATE_INDEX_PATH` | `/debate` memo, transcript, source appendix, and archive index paths |
+| `DEBATE_INITIAL_POSITION_SOURCE_LIMIT`, `DEBATE_SIDE_LIGHT_SOURCE_LIMIT`, `DEBATE_SIDE_DEEP_SOURCE_LIMIT`, `DEBATE_ROUND_SOURCE_LIMIT`, `DEBATE_MIN_ROUNDS`, `DEBATE_MAX_ROUNDS` | `/debate` research depth and formal-round tuning; defaults favor a faster three-round debate |
 | `ENABLE_FINANCE`, `FRED_API_KEY`, `ALPHA_VANTAGE_API_KEY` | Finance tools |
 | `ENABLE_VOICE`, `TTS_URL`, `TTS_VOICE`, `STT_URL`, `OPEN_WEBUI_KEY` | Voice I/O |
 | `ENABLE_IMAGEGEN`, `GEMINI_API_KEY`, `IMAGE_MODEL` | Image generation |
@@ -624,6 +645,13 @@ These files are app-managed and should survive restarts and rebuilds when `confi
 
 - By default, `fetch_web_content` blocks localhost, private LAN, link-local, multicast, and reserved IP ranges, including redirects to those ranges.
 - Set `ALLOW_PRIVATE_WEB_FETCH=true` only if you intentionally want the model to fetch local or LAN URLs.
+
+### Document extraction
+
+- For PDF, DOCX, and PPTX URLs, Emery exposes `extract_document_with_docling` as the preferred model-facing tool. It routes the URL through Docling; terminal, curl, wget, Python, and browser tools are not document-extraction substitutes.
+- The pipeline uploads the exact validated download bytes to Docling, requests page-aware Markdown plus structured JSON, preserves table/layout signals, and uses the user's question to prioritize relevant pages.
+- PDFs with weak text extraction or visual content can receive a bounded vision-model pass over rendered pages for colors, maps, charts, shaded cells, and other information that text export cannot represent.
+- Telegram PDF, DOCX, and PPTX uploads are routed through the same pipeline automatically before Emery answers.
 
 ### `/expert open` cannot find an archived report
 

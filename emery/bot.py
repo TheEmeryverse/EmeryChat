@@ -19,7 +19,7 @@ from emery.config import (
     TELEGRAM_GROUP_CHAT_ID, CHAT_TOPIC_ID, TELEGRAM_STICKER_SET,
     ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS,
     ENABLE_LIVE_STEERING,
-    LIVE_STEERING_MAX_PENDING
+    LIVE_STEERING_MAX_PENDING,
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -47,28 +47,15 @@ from emery.telegram_delivery import (
 from emery.docling import (
     detect_supported_document_type,
     convert_document_bytes,
+    analyze_pdf_visual_fallback,
     build_extracted_text_preview,
     build_document_context_text,
 )
-from emery.tools import get_noaa_weather_alerts, get_voice_audio
+from emery.tools import get_noaa_weather_alerts, get_voice_audio, queue_image_generation
 from emery.telegram_utils import normalize_message_thread_id
 
 
-LIVE_PROGRESS_INTERVAL_SECONDS = 10.0
-LIVE_PREFILL_MESSAGES = [
-    "💭 I’m taking a moment to understand your request…",
-    "💭 I’m thinking through the best way to help…",
-    "💭 I’m gathering the context I need…",
-    "💭 I’m working through the details…",
-    "💭 I’m considering the relevant pieces…",
-    "💭 I’m organizing my response…",
-    "💭 I’m checking the path to a useful answer…",
-    "💭 I’m connecting this with what you asked…",
-    "💭 I’m making sure I cover the important parts…",
-    "💭 I’m weighing the details carefully…",
-    "💭 I’m shaping the answer now…",
-    "💭 I’m taking another pass for completeness…",
-]
+PREFILL_FALLBACK_STATUS = "Preparing response…"
 
 TOOL_DISPLAY_NAMES = {
     "get_noaa_weather": "weather lookup",
@@ -237,6 +224,11 @@ def _fallback_thought_html(title: str, thought_text: str) -> str:
     )
 
 
+def _final_reasoning_summary_html(summary: str) -> str:
+    """Render the completed reasoning summary as a collapsed Telegram block."""
+    return _fallback_thought_html("💭 Final reasoning summary", summary)
+
+
 async def send_model_thought_message(chat_id: int, thought_text: str, *, part_index: int = None, part_count: int = None, message_thread_id: int = None):
     """Send intentionally visible model thoughts as hidden Rich Message details with HTML fallback."""
     clean_thought = str(thought_text or "").strip()
@@ -289,8 +281,18 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         len(extraction.get("errors") or []),
     )
     extracted_preview = ""
+    visual_analysis = []
     if extraction.get("success"):
-        extracted_preview = build_extracted_text_preview(extraction, max_len=2000)
+        extracted_preview = build_extracted_text_preview(
+            extraction,
+            max_len=12000,
+            question=caption,
+        )
+        visual_analysis = await analyze_pdf_visual_fallback(
+            bytes(file_bytes),
+            extraction,
+            question=caption,
+        )
     error = None if extraction.get("success") else "; ".join(extraction.get("errors") or []) or "Document extraction failed."
     if extracted_preview:
         logging.info(
@@ -312,6 +314,8 @@ async def _build_supported_document_content_text(document, caption: str = "") ->
         docling_status=extraction.get("docling_status"),
         extracted_preview=extracted_preview,
         error=error,
+        page_count=extraction.get("page_count"),
+        visual_analysis=visual_analysis,
     )
 
 def is_user_allowed(update: Update) -> bool:
@@ -435,10 +439,12 @@ def _help_text() -> str:
         "/help - Show this command list.",
         "/clear - Clear this chat's active context history.",
         "/temporary on|off - Use an ephemeral raw-model conversation with no prompt, tools, or memory.",
+        "/image &lt;prompt&gt; - Generate and send an image directly, bypassing Emery and conversation history.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
         "/bridge &lt;message&gt; - Send an authenticated request to Hermes.",
+        "/skills - List, search, inspect, archive, and review durable procedural skills.",
         "",
         "<b>Expert research</b>",
         "/expert &lt;topic&gt; - Start a foreground deep research session.",
@@ -471,6 +477,43 @@ async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_user_allowed(update):
         return
     await update.message.reply_text(_help_text(), parse_mode="HTML")
+
+
+async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Queue one image directly without invoking Emery or writing chat history."""
+    if not is_user_allowed(update):
+        return
+
+    prompt = " ".join(context.args or []).strip()
+    if not prompt:
+        await update.message.reply_text("Usage: /image <description of the image to generate>")
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = normalize_message_thread_id(
+        chat_id,
+        update.message.message_thread_id if update.message else None,
+    )
+    try:
+        await context.bot.send_chat_action(
+            chat_id=chat_id,
+            action="upload_photo",
+            message_thread_id=thread_id,
+        )
+        queue_image_generation(
+            prompt,
+            chat_id,
+            thread_id,
+            bot=context.bot,
+            reply_to_message_id=update.message.message_id,
+            caption_prefix="",
+            include_description=False,
+        )
+        await update.message.reply_text("Image generation started; I’ll send it here when ready.")
+        logging.info("🖼️ DIRECT IMAGE: queued for chat_id=%s without Emery context.", chat_id)
+    except Exception as exc:
+        logging.error("❌ DIRECT IMAGE: generation failed for chat_id=%s: %s", chat_id, exc, exc_info=True)
+        await update.message.reply_text(f"Direct image generation failed: {safe_preview(str(exc), max_len=500)}")
 
 
 async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -856,6 +899,7 @@ async def _deliver_pending_media(chat_id: int, reply_to_message_id: int | None =
 async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, model_to_use: str, is_input_voice: bool) -> None:
     chat_id = update.effective_chat.id
     globals.chat_histories.setdefault(chat_id, deque())
+
     from emery.media import begin_media_turn, clear_media_turn
     begin_media_turn()
     
@@ -876,10 +920,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             await asyncio.sleep(4)
 
     typing_task = asyncio.create_task(keep_typing())
-    progress_stop = asyncio.Event()
-    progress_task = None
-    progress_phase = "prefill"
     status_stack = None
+    final_reasoning_summary = False
     status_key = None
     status_store = None
     if ENABLE_LIVE_PROGRESS:
@@ -915,27 +957,6 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         controllers[status_key] = status_stack
         await status_stack.ensure_visible()
 
-        async def keep_progress_updated():
-            message_index = 1
-            while not progress_stop.is_set():
-                try:
-                    await asyncio.wait_for(
-                        progress_stop.wait(),
-                        timeout=LIVE_PROGRESS_INTERVAL_SECONDS,
-                    )
-                    return
-                except asyncio.TimeoutError:
-                    pass
-                if progress_phase == "prefill" and status_stack is not None:
-                    await status_stack.set_slot(
-                        "reasoning",
-                        LIVE_PREFILL_MESSAGES[message_index % len(LIVE_PREFILL_MESSAGES)],
-                        force=False,
-                    )
-                    message_index += 1
-
-        progress_task = asyncio.create_task(keep_progress_updated())
-
     def friendly_tool_name(event: dict) -> str:
         explicit_name = (
             event.get("friendly_name")
@@ -961,34 +982,56 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         *,
         force: bool = True,
         mode: str | None = None,
+        rendered_html: str | None = None,
     ) -> None:
         if status_stack is None:
             return
-        await status_stack.set_slot(slot, text, force=force, mode=mode)
+        await status_stack.set_slot(
+            slot,
+            text,
+            force=force,
+            mode=mode,
+            rendered_html=rendered_html,
+        )
 
     async def handle_engine_event(event: dict) -> None:
-        nonlocal progress_phase
+        nonlocal final_reasoning_summary
         if status_stack is None:
             return
 
         event_type = event.get("type")
         if event_type == "prefill_started":
-            progress_phase = "prefill"
-            await update_status_slot("reasoning", LIVE_PREFILL_MESSAGES[0])
-        elif event_type == "reasoning_started":
-            progress_phase = "reasoning"
+            await update_status_slot("reasoning", PREFILL_FALLBACK_STATUS)
+        elif event_type == "prefill_progress":
+            try:
+                percent = max(0, min(100, int(event.get("percent"))))
+            except (TypeError, ValueError):
+                percent = None
+            if percent is not None:
+                await update_status_slot("reasoning", f"Preparing response: {percent}%")
         elif event_type == "reasoning_summary":
-            progress_phase = "reasoning"
             summary = str(event.get("text") or event.get("summary") or "").strip()
             if summary:
-                await update_status_slot("reasoning", summary)
+                if event.get("full_turn"):
+                    final_reasoning_summary = True
+                    # The final collapsed summary keeps only the reasoning
+                    # and tool-call timeline. Remove the live tool and
+                    # browser/terminal state messages before showing it.
+                    await status_stack.close(preserve_slots={"reasoning"})
+                await update_status_slot(
+                    "reasoning",
+                    summary,
+                    rendered_html=(
+                        _final_reasoning_summary_html(summary)
+                        if event.get("full_turn")
+                        else None
+                    ),
+                )
         elif event_type == "preamble":
-            progress_phase = "reasoning"
             preamble = str(event.get("text") or "").strip()
             if preamble:
                 await update_status_slot("reasoning", preamble, force=False)
         elif event_type == "tool_started":
-            progress_phase = "reasoning"
             # Engine status formatters historically returned HTML-escaped
             # fragments because they were sent directly as HTML. The fixed
             # status messages escape exactly once at delivery time, so decode
@@ -1041,7 +1084,6 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             # back below it after the tool completes.
             await status_stack.bring_to_bottom()
         elif event_type in {"steering_queued", "steering_applied", "steering_deferred"}:
-            progress_phase = "reasoning"
             await update_status_slot("reasoning", str(event.get("text") or "").strip())
 
     async def refresh_live_progress() -> None:
@@ -1065,12 +1107,16 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as exc:
             logging.warning("TELEGRAM STATUS: unable to finalize status stack: %s", exc)
 
-    async def close_completed_status() -> None:
-        """Delete the three live-status messages after delivery completes."""
+    async def close_completed_status(*, preserve_final_reasoning: bool = False) -> None:
+        """Delete transient statuses while optionally keeping the final summary."""
         if status_stack is None:
             return
         try:
-            await status_stack.close()
+            await status_stack.close(
+                preserve_slots={"reasoning"}
+                if preserve_final_reasoning and final_reasoning_summary
+                else set(),
+            )
         except Exception as exc:
             logging.warning("TELEGRAM STATUS: unable to delete completed status stack: %s", exc)
         finally:
@@ -1124,9 +1170,6 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 globals.active_turns.pop(turn_key, None)
         typing_stop.set()
         await typing_task
-        progress_stop.set()
-        if progress_task:
-            await progress_task
         controllers = getattr(globals, "persistent_status_controllers", None)
         if controllers is not None and status_key is not None:
             if controllers.get(status_key) is status_stack:
@@ -1134,12 +1177,6 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # --- THINKING SPLITTER LOGIC ---
     clean_response = clean_thinking_tags(response_text).strip()
-    temporary_banner = "🕶️ Temporary mode — no long-term memory."
-    delivered_response = (
-        f"{temporary_banner}\n\n{clean_response}"
-        if temporary_response_mode and clean_response
-        else clean_response
-    )
 
     # --- SILENT HANDSHAKE DETECTION ---
     handshake_check = re.sub(r'[^a-zA-Z]', '', clean_response).upper()
@@ -1161,6 +1198,13 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
         clear_media_turn()
         return
 
+    temporary_banner = "🕶️ Temporary mode — no long-term memory."
+    delivered_response = (
+        f"{temporary_banner}\n\n{clean_response}"
+        if temporary_response_mode and clean_response
+        else clean_response
+    )
+
     # Raw model thinking is intentionally not emitted as separate Telegram
     # messages. The live status stack already contains the concise reasoning
     # summary, so the completed turn contains only that summary and the final
@@ -1169,7 +1213,8 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     sent_msgs = []
     media_msgs = []
     # Clear any approval overlay before the final answer. The live status
-    # messages remain visible through the final answer, then are deleted.
+    # messages remain visible through the final answer; the finalized
+    # reasoning message is preserved as a collapsed summary.
     await clear_completed_status(
         reanchor=True,
     )
@@ -1206,7 +1251,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
 
         media_msgs = await _deliver_pending_media(chat_id, reply_target_id)
-        await close_completed_status()
+        await close_completed_status(preserve_final_reasoning=True)
     except Exception:
         raise
 

@@ -1,6 +1,22 @@
-from emery.config import ENABLE_MEMORY, REOLINK_CAMERAS
+from emery.config import ENABLE_DOCLING, ENABLE_MEMORY, REOLINK_CAMERAS, SKILL_WRITE_APPROVAL
 from emery.memory import save_user_memory, get_camera_security_log
 from emery.scratchpad import clear_scratchpad, jot_down_note, read_scratchpad
+from emery.skills import (
+    archive_skill,
+    skill_list,
+    skill_read,
+    read_skill,
+    skill_view,
+    skill_save,
+    skill_search,
+    skill_set_status,
+    set_skill_status as apply_skill_status,
+    update_skill,
+    write_skill_file,
+    remove_skill_file,
+)
+from emery.skill_approval import stage_skill_change
+import emery.globals as skill_globals
 from emery.command_execution import run_command
 from emery.terminal_tools import (
     terminal_exec,
@@ -53,7 +69,7 @@ from emery.tools import (
     generate_image,
     speak_message,
     get_system_stats,
-    fetch_web_content, use_research_image, get_youtube_transcript,
+    fetch_web_content, extract_document_with_docling, use_research_image, get_youtube_transcript,
     search_fred_series, get_fred_series_observations,
     search_imf_indicators, get_imf_datamapper_series,
     get_stock_snapshot, get_stock_price_history,
@@ -81,6 +97,172 @@ def is_enabled(var_name):
 
 AVAILABLE_TOOLS = {}
 tools_schema = []
+
+
+async def skill_manage(
+    operation: str,
+    skill_id: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    procedure: str | None = None,
+    triggers=None,
+    prerequisites: str = "",
+    verification: str = "",
+    failure_modes: str = "",
+    tools=None,
+    category: str | None = None,
+    files=None,
+    scope: str | None = None,
+    status: str | None = None,
+    approval: str | None = None,
+    path: str | None = None,
+    content: str | None = None,
+    user_id: int | None = None,
+    chat_id: int | None = None,
+) -> dict:
+    """Hermes-shaped lifecycle adapter over the existing skill backend.
+
+    ``create``, ``patch``/``update``, ``approve``, and ``archive``/``delete``
+    are real operations delegated to :mod:`emery.skills`. Supporting-file
+    paths are relative to the selected skill directory and are scope-checked
+    by the backend.
+    """
+    operation = str(operation or "").strip().casefold()
+    user_id = skill_globals.current_user_id.get() if user_id is None else user_id
+    chat_id = skill_globals.TARGET_CHAT_ID.get() if chat_id is None else chat_id
+
+    requested_status = str(status or "").strip().casefold()
+    requested_approval = str(approval or "").strip().casefold()
+    if requested_approval:
+        if requested_approval not in {"draft", "approved"}:
+            return {"ok": False, "error": "approval must be draft or approved"}
+        requested_status = "active" if requested_approval == "approved" else "draft"
+    if requested_status and requested_status not in {"draft", "active", "archived"}:
+        return {"ok": False, "error": "status must be draft, active, or archived"}
+    if requested_status == "active" and requested_approval != "approved" and not SKILL_WRITE_APPROVAL:
+        return {"ok": False, "error": "activating a skill requires approval='approved'"}
+
+    if SKILL_WRITE_APPROVAL and operation in {"patch", "update", "archive", "delete", "write_file", "remove_file"}:
+        if not skill_id:
+            return {"ok": False, "error": f"{operation} requires skill_id"}
+        try:
+            current = read_skill(skill_id, include_drafts=True, include_archived=True, user_id=user_id, chat_id=chat_id)
+            current_procedure = current.get("procedure") or current.get("instructions") or ""
+            if operation in {"patch", "update"}:
+                payload = {
+                    key: value for key, value in {
+                        "description": description,
+                        "instructions": procedure,
+                        "triggers": triggers,
+                        "prerequisites": prerequisites or None,
+                        "verification": verification or None,
+                        "failure_modes": failure_modes or None,
+                        "tools": tools,
+                    }.items() if value is not None
+                }
+                if requested_status:
+                    payload["status"] = requested_status
+                after = procedure if procedure is not None else current_procedure
+                return stage_skill_change(
+                    "update", skill_id=skill_id, before=current_procedure, after=after,
+                    payload=payload, user_id=user_id, chat_id=chat_id,
+                )
+            if operation in {"archive", "delete"}:
+                return stage_skill_change(
+                    "archive", skill_id=skill_id, before=current_procedure,
+                    summary=f"Archive skill {current.get('name') or skill_id}",
+                    user_id=user_id, chat_id=chat_id,
+                )
+            if not path:
+                return {"ok": False, "error": f"{operation} requires path"}
+            if operation == "write_file" and content is None:
+                return {"ok": False, "error": "write_file requires content"}
+            return stage_skill_change(
+                operation, skill_id=skill_id, target_path=path,
+                after=content if operation == "write_file" else None,
+                payload={}, user_id=user_id, chat_id=chat_id,
+            )
+        except (KeyError, LookupError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    try:
+        if operation == "create":
+            if not name or not description or not procedure:
+                return {"ok": False, "error": "create requires name, description, and procedure"}
+            result = await skill_save(
+                name=name,
+                description=description,
+                procedure=procedure,
+                triggers=triggers,
+                prerequisites=prerequisites,
+                verification=verification,
+                failure_modes=failure_modes,
+                tools=tools,
+                category=category,
+                files=files,
+                scope=scope,
+                status=requested_status or "draft",
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+            return result
+
+        if operation in {"write_file", "remove_file"}:
+            if requested_approval != "approved":
+                return {"ok": False, "error": f"{operation} requires approval='approved'"}
+            if not skill_id or not path:
+                return {"ok": False, "error": f"{operation} requires skill_id and path"}
+            if operation == "write_file":
+                if content is None:
+                    return {"ok": False, "error": "write_file requires content"}
+                return {"ok": True, "file": write_skill_file(
+                    path, content, identifier=skill_id, user_id=user_id, chat_id=chat_id,
+                )}
+            return {"ok": True, "file": remove_skill_file(
+                path, identifier=skill_id, user_id=user_id, chat_id=chat_id,
+            )}
+
+        if operation in {"patch", "update"}:
+            if not skill_id:
+                return {"ok": False, "error": "patch/update requires skill_id"}
+            if description is None and procedure is None and triggers is None and not any(
+                value for value in (prerequisites, verification, failure_modes, tools, requested_status)
+            ):
+                return {"ok": False, "error": "patch/update requires at least one skill field"}
+            patch_kwargs = {}
+            if description is not None:
+                patch_kwargs["description"] = description
+            if procedure is not None:
+                patch_kwargs["instructions"] = procedure
+            if triggers is not None:
+                patch_kwargs["triggers"] = triggers
+            if prerequisites:
+                patch_kwargs["prerequisites"] = prerequisites
+            if verification:
+                patch_kwargs["verification"] = verification
+            if failure_modes:
+                patch_kwargs["failure_modes"] = failure_modes
+            if tools is not None:
+                patch_kwargs["tools"] = tools
+            result = update_skill(skill_id, user_id=user_id, chat_id=chat_id, **patch_kwargs)
+            if requested_status in {"draft", "active", "archived"}:
+                result = apply_skill_status(skill_id, requested_status, user_id=user_id, chat_id=chat_id)
+            return {"ok": True, "skill": result}
+
+        if operation in {"approve", "activate"}:
+            if not skill_id:
+                return {"ok": False, "error": "approve requires skill_id"}
+            return {"ok": True, "skill": apply_skill_status(skill_id, "active", user_id=user_id, chat_id=chat_id)}
+
+        if operation in {"archive", "delete"}:
+            if not skill_id:
+                return {"ok": False, "error": "archive/delete requires skill_id"}
+            return {"ok": True, "skill": archive_skill(skill_id, user_id=user_id, chat_id=chat_id)}
+
+        return {"ok": False, "error": "operation must be create, patch, update, approve, activate, archive, delete, write_file, or remove_file"}
+    except (KeyError, LookupError, TypeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
 
 # --- General Scratchpad (always enabled) ---
 AVAILABLE_TOOLS["jot_down_note"] = jot_down_note
@@ -132,6 +314,159 @@ tools_schema.extend([
     },
 ])
 
+# --- Durable procedural skills ---
+AVAILABLE_TOOLS.update({
+    "skill_search": skill_search,
+    "skill_read": skill_read,
+    "skill_view": skill_view,
+    "skill_save": skill_save,
+    "skill_list": skill_list,
+    "skill_set_status": skill_set_status,
+    "skill_manage": skill_manage,
+})
+tools_schema.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_manage",
+            "description": (
+                "Manage the lifecycle of a durable procedural skill. Use operation='create' for a new skill, "
+                "'patch' or 'update' for targeted metadata/procedure changes, 'approve' to activate an explicitly "
+                "approved draft, and 'archive'/'delete' to disable it without erasing history. Use 'write_file' or "
+                "'remove_file' for approved changes to references, templates, scripts, or assets. New or inferred "
+                "skills must remain drafts unless the user explicitly approves activation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["create", "patch", "update", "approve", "activate", "archive", "delete", "write_file", "remove_file"],
+                        "description": "Lifecycle operation to perform.",
+                    },
+                    "skill_id": {"type": "string", "description": "Existing skill ID, exact name, or slug for non-create operations."},
+                    "name": {"type": "string", "description": "Short human-readable name for create."},
+                    "description": {"type": "string", "description": "Purpose and matching context; required for create."},
+                    "procedure": {"type": "string", "description": "Reusable procedure; required for create and optional for patch/update."},
+                    "category": {"type": "string", "description": "Optional category directory for a new skill."},
+                    "files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional supporting files for create, keyed by references/, templates/, scripts/, or assets/ paths."},
+                    "triggers": {"type": "array", "items": {"type": "string"}, "description": "Phrases or task descriptions that match this skill."},
+                    "prerequisites": {"type": "string", "description": "Required inputs, configuration, or assumptions."},
+                    "verification": {"type": "string", "description": "How to verify success before reporting completion."},
+                    "failure_modes": {"type": "string", "description": "Known failures and safe recovery behavior."},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "Normal Emery tool names used by the procedure."},
+                    "scope": {"type": "string", "enum": ["private", "group"], "description": "Skill scope for create; defaults from the active chat."},
+                    "status": {"type": "string", "enum": ["draft", "active", "archived"], "description": "Requested lifecycle status. Prefer draft unless explicitly approved."},
+                    "approval": {"type": "string", "enum": ["draft", "approved"], "description": "Conversational approval marker; approved maps to active."},
+                    "path": {"type": "string", "description": "Relative supporting-file path for write_file/remove_file; absolute and traversal paths are invalid by contract."},
+                    "content": {"type": "string", "description": "UTF-8 supporting-file content for write_file."},
+                },
+                "required": ["operation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_search",
+            "description": "Search durable procedural skills relevant to the user's request. Skills are reusable playbooks, not permissions; normal tool schemas, privacy rules, approvals, and user instructions always win.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Plain-language task or goal to search for."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 9, "description": "Maximum number of matching skills."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_view",
+            "description": "Progressively disclose one complete skill by ID, exact name, or slug. Automatic skill context is summary-only; call this before relying on the procedure, verification, or failure guidance. Drafts and archived skills can be viewed for review but are not automatically applied.",
+            "parameters": {
+                "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "Skill ID, exact name, or slug."},
+                        "file_path": {"type": "string", "description": "Optional relative supporting-file path such as references/api.md."},
+                    },
+                "required": ["skill_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_read",
+            "description": "Read the complete durable skill identified by skill ID, name, or slug when the automatically supplied skill context is incomplete or you need its exact procedure.",
+            "parameters": {
+                "type": "object",
+                "properties": {"skill_id": {"type": "string", "description": "Skill ID, exact name, or slug."}},
+                "required": ["skill_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_save",
+            "description": "Save a reusable procedural playbook in the current private or group scope. Use when the user explicitly asks Emery to remember how to do something, when the user approves saving a successful repeatable procedure, or to preserve a genuinely reusable successful workflow as a draft. Prefer status='draft' for inferred procedures; use status='active' only when the user clearly asks to make it available immediately. Do not store secrets or raw chain-of-thought.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short human-readable skill name."},
+                    "description": {"type": "string", "description": "What task this skill handles and when it is useful."},
+                    "procedure": {"type": "string", "description": "Numbered, reusable steps. Reference normal Emery tool names; do not write executable code or claim permissions."},
+                    "triggers": {"type": "array", "items": {"type": "string"}, "description": "Phrases or task descriptions that should match this skill."},
+                    "prerequisites": {"type": "string", "description": "Required configuration, inputs, or assumptions."},
+                    "verification": {"type": "string", "description": "How to verify the procedure succeeded before reporting success."},
+                    "failure_modes": {"type": "string", "description": "Known failure cases and safe recovery behavior."},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "Normal Emery tool names used by the procedure."},
+                    "category": {"type": "string", "description": "Optional category directory for the SKILL.md document."},
+                    "files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional supporting files keyed by references/, templates/, scripts/, or assets/ paths."},
+                    "scope": {"type": "string", "enum": ["private", "group"], "description": "Defaults to private in a DM and group in a group chat."},
+                    "status": {"type": "string", "enum": ["draft", "active"], "description": "Draft is stored for review; active is eligible for automatic retrieval."},
+                },
+                "required": ["name", "description", "procedure"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_list",
+            "description": "List durable skills visible in the current private or group scope. Use when the user asks what Emery has learned or wants to review saved procedures.",
+            "parameters": {
+                "type": "object",
+                "properties": {"include_drafts": {"type": "boolean", "description": "Include saved draft skills; defaults to true."}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_set_status",
+            "description": "Change a visible skill between draft, active, and archived. Archive when the user asks to forget or disable a learned procedure. Activate only with clear user intent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_id": {"type": "string", "description": "Skill ID, exact name, or slug."},
+                    "status": {"type": "string", "enum": ["draft", "active", "archived"]},
+                },
+                "required": ["skill_id", "status"],
+                "additionalProperties": False,
+            },
+        },
+    },
+])
+
 if is_enabled("ENABLE_COMMAND_EXECUTION"):
     AVAILABLE_TOOLS["run_command"] = run_command
     tools_schema.append({
@@ -139,7 +474,7 @@ if is_enabled("ENABLE_COMMAND_EXECUTION"):
         "function": {
             "name": "run_command",
             "description": (
-                "Run one bounded, non-interactive shell command and return its exit code and capped output. Use for concrete system or project work that needs a command-line tool. The command runs with a configured working directory, closed stdin, and a timeout. Do not use for interactive programs, passwords, or commands that wait for a human prompt. Commands that write, delete, change services, or publish externally may pause for Telegram approval; denial or expiry means the command is not executed."
+                "Run one bounded, non-interactive shell command and return its exit code and capped output. Use for concrete system or project work that needs a command-line tool. Do not use this to download or parse PDF, DOCX, or PPTX files; use extract_document_with_docling. The command runs with a configured working directory, closed stdin, and a timeout. Do not use for interactive programs, passwords, or commands that wait for a human prompt. Commands that write, delete, change services, or publish externally may pause for Telegram approval; denial or expiry means the command is not executed."
             ),
             "parameters": {
                 "type": "object",
@@ -184,7 +519,7 @@ if is_enabled("ENABLE_COMMAND_EXECUTION"):
             "type": "function",
             "function": {
                 "name": "terminal_exec",
-                "description": "Run one non-interactive shell command and wait for it to finish. Use for a command that should complete within one bounded timeout. The command runs through Emery's terminal runtime, returns a request ID, exit status, working directory, and capped output, and may require approval when it changes system or project state. For a command that must keep running or needs shell state between calls, use terminal_job_start or terminal_session_start instead.",
+                "description": "Run one non-interactive shell command and wait for it to finish. Use for a command that should complete within one bounded timeout. Do not use this to download or parse PDF, DOCX, or PPTX files; use extract_document_with_docling. The command runs through Emery's terminal runtime, returns a request ID, exit status, working directory, and capped output, and may require approval when it changes system or project state. For a command that must keep running or needs shell state between calls, use terminal_job_start or terminal_session_start instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -247,7 +582,7 @@ if is_enabled("ENABLE_COMMAND_EXECUTION"):
             "type": "function",
             "function": {
                 "name": "terminal_job_start",
-                "description": "Start a non-interactive shell command in the background and return a job_id immediately. Use for work that may outlast one tool call but does not need an interactive shell. Follow up with terminal_job_status to check state, terminal_job_read for buffered output, terminal_job_wait to wait for completion, or terminal_job_cancel to stop it. The job is bounded by a maximum lifetime and may require approval.",
+                "description": "Start a non-interactive shell command in the background and return a job_id immediately. Use for work that may outlast one tool call but does not need an interactive shell. Do not use this to download or parse PDF, DOCX, or PPTX files; use extract_document_with_docling. Follow up with terminal_job_status to check state, terminal_job_read for buffered output, terminal_job_wait to wait for completion, or terminal_job_cancel to stop it. The job is bounded by a maximum lifetime and may require approval.",
                 "parameters": {"type": "object", "properties": {
                     "command": {"type": "string", "description": "The complete non-interactive shell command to run in the background."},
                     "working_directory": {"type": "string", "description": "Optional absolute path or path relative to Emery's configured command directory."},
@@ -826,7 +1161,7 @@ if is_enabled("ENABLE_IMAGEGEN"):
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "Create a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image. Do not use for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained.",
+            "description": "Create a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image. Do not use for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
             "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}}, "required": ["prompt"]}
         }
     })
@@ -869,10 +1204,35 @@ if is_enabled("ENABLE_WEB_SCRAPING"):
         "type": "function", 
         "function": {
             "name": "fetch_web_content", 
-            "description": "Read and extract the main text from one specific public webpage or document URL. If the user supplied a URL, use this directly; otherwise fetch at most one promising result after web_search unless the user asks for comparison or deep research. Do not use this to discover pages or fetch the same URL twice in one turn. The result includes the page title, resolved URL, extracted text, and image-candidate metadata; images are not downloaded or sent automatically.",
+            "description": "Read and extract the main text from one specific public webpage URL. Use extract_document_with_docling instead for PDF, DOCX, or PPTX URLs. If the user supplied a normal webpage URL, use this directly; otherwise fetch at most one promising result after web_search unless the user asks for comparison or deep research. Do not use this to discover pages or fetch the same URL twice in one turn. The result includes the page title, resolved URL, extracted text, and image-candidate metadata; images are not downloaded or sent automatically.",
             "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Exactly one HTTP or HTTPS URL to read."}}, "required": ["url"]}
         }
     })
+    if is_enabled("ENABLE_DOCLING"):
+        AVAILABLE_TOOLS["extract_document_with_docling"] = extract_document_with_docling
+        tools_schema.append({
+            "type": "function",
+            "function": {
+                "name": "extract_document_with_docling",
+                "description": (
+                    "DEDICATED DOCLING PIPELINE: extract text from exactly one PDF, DOCX, or PPTX URL. "
+                    "Use this first whenever the user asks Emery to read, inspect, summarize, or analyze a document URL. "
+                    "Do not use run_command, terminal tools, curl, wget, Python, or browser tools to download or parse the document; those are for system or interactive web work, not document extraction. "
+                    "Pass the user's actual question or focus when available so the pipeline can prioritize relevant pages and inspect visual details such as colors, maps, charts, and shaded tables. "
+                    "The result contains Docling's structured, page-aware extraction plus a visual fallback when text alone may be insufficient, or an explicit extraction failure."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Exactly one HTTP or HTTPS URL for a PDF, DOCX, or PPTX document."},
+                        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 30000, "description": "Maximum extracted characters to return; defaults to 12000."},
+                        "question": {"type": "string", "description": "The user's document question or focus. Include it when available so relevant pages and visual details receive priority."},
+                    },
+                    "required": ["url"],
+                    "additionalProperties": False,
+                },
+            },
+        })
     tools_schema.append({
         "type": "function",
         "function": {

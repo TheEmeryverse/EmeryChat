@@ -15,6 +15,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from emery.config import (
     DEBATE_ARCHIVE_DIR,
     DEBATE_INDEX_PATH,
+    DEBATE_INITIAL_POSITION_SOURCE_LIMIT,
+    DEBATE_MAX_ROUNDS,
+    DEBATE_MIN_ROUNDS,
+    DEBATE_ROUND_SOURCE_LIMIT,
+    DEBATE_SIDE_DEEP_SOURCE_LIMIT,
+    DEBATE_SIDE_LIGHT_SOURCE_LIMIT,
     ENABLE_YOUTUBE_TRANSCRIPT,
     EXPERT_FAST_ENABLE_THINKING,
     EXPERT_FAST_MAX_TOKENS,
@@ -40,7 +46,7 @@ from emery.config import (
     SEARXNG_URL,
     USER_TIMEZONE,
 )
-from emery.helpers import emery_format
+from emery.helpers import emery_format, query_fast_model
 from emery.logging_utils import format_logging_payload, safe_preview
 from emery.telegram_delivery import send_rich_html_or_split_html_message, send_rich_or_split_html_message, send_split_html_message
 from emery.telegram_utils import normalize_message_thread_id
@@ -53,12 +59,12 @@ DEBATE_TASKS: dict[str, asyncio.Task] = {}
 DEBATE_COMMIT_LOCKS: dict[str, asyncio.Lock] = {}
 
 CALLBACK_PREFIX = "debate"
-INITIAL_POSITION_SOURCE_LIMIT = 2
-SIDE_LIGHT_SOURCE_LIMIT = 3
-SIDE_DEEP_SOURCE_LIMIT = 10
-ROUND_SOURCE_LIMIT = 2
-MIN_DEBATE_ROUNDS = 3
-MAX_DEBATE_ROUNDS = 5
+INITIAL_POSITION_SOURCE_LIMIT = DEBATE_INITIAL_POSITION_SOURCE_LIMIT
+SIDE_LIGHT_SOURCE_LIMIT = DEBATE_SIDE_LIGHT_SOURCE_LIMIT
+SIDE_DEEP_SOURCE_LIMIT = DEBATE_SIDE_DEEP_SOURCE_LIMIT
+ROUND_SOURCE_LIMIT = DEBATE_ROUND_SOURCE_LIMIT
+MIN_DEBATE_ROUNDS = DEBATE_MIN_ROUNDS
+MAX_DEBATE_ROUNDS = DEBATE_MAX_ROUNDS
 SEARCH_RESULTS_PER_QUERY = 8
 
 
@@ -163,6 +169,30 @@ def _extract_json_object(text: str):
         return None
 
 
+def _model_value_to_text(value, *, fallback: str = "") -> str:
+    """Normalize inconsistent local-model values into safe display text."""
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return _clean_thinking_tags(value).strip()
+    if isinstance(value, list):
+        parts = [_model_value_to_text(item) for item in value]
+        return "\n".join(part for part in parts if part).strip() or fallback
+    if isinstance(value, dict):
+        for key in ("text", "content", "response", "answer", "question", "query", "thesis", "opening_thesis", "role_brief", "summary", "rationale", "value"):
+            if key in value:
+                nested = _model_value_to_text(value.get(key))
+                if nested:
+                    return nested
+        parts = []
+        for key, nested_value in value.items():
+            nested = _model_value_to_text(nested_value)
+            if nested:
+                parts.append(f"{key}: {nested}")
+        return "\n".join(parts).strip() or fallback
+    return str(value).strip() or fallback
+
+
 def _extract_query_list(parsed) -> list[str]:
     if isinstance(parsed, dict):
         raw_queries = parsed.get("queries")
@@ -172,15 +202,18 @@ def _extract_query_list(parsed) -> list[str]:
         raw_queries = []
     if not isinstance(raw_queries, list):
         return []
-    return [str(query).strip() for query in raw_queries if str(query).strip()]
+    queries = []
+    for query in raw_queries:
+        if isinstance(query, dict):
+            query = query.get("query") or query.get("search_query") or query.get("text") or ""
+        clean = _model_value_to_text(query)
+        if clean:
+            queries.append(clean)
+    return queries
 
 
 def _message_content_to_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return str(content or "")
+    return _model_value_to_text(content)
 
 
 def _clean_thinking_tags(text: str) -> str:
@@ -194,7 +227,7 @@ def _telegram_escape(text: str) -> str:
 
 
 def _clean_side_name(raw: str, fallback: str) -> str:
-    clean = re.sub(r"\s+", " ", str(raw or "")).strip()
+    clean = re.sub(r"\s+", " ", _model_value_to_text(raw)).strip()
     clean = re.sub(r"[^\w\s&+/-]", "", clean).strip()
     if not clean:
         return fallback
@@ -292,11 +325,9 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
 
 
 async def _query_clerk_model(prompt: str, system_prompt: str) -> str:
-    return await _query_chat_model(
+    return await query_fast_model(
         prompt,
-        system_prompt,
-        model_id=FAST_MODEL_ID,
-        url=FAST_MODEL_URL,
+        system_prompt=system_prompt,
         max_tokens=EXPERT_FAST_MAX_TOKENS,
         temperature=EXPERT_FAST_TEMPERATURE,
         top_p=EXPERT_FAST_TOP_P,
@@ -305,8 +336,6 @@ async def _query_clerk_model(prompt: str, system_prompt: str) -> str:
         presence_penalty=EXPERT_FAST_PRESENCE_PENALTY,
         repetition_penalty=EXPERT_FAST_REPETITION_PENALTY,
         enable_thinking=EXPERT_FAST_ENABLE_THINKING,
-        lock=globals.fast_model_lock,
-        endpoint_label="clerk",
     )
 
 
@@ -380,11 +409,11 @@ async def _summarize_source(session: DebateSession, result: dict, fetched: dict)
         "fetch_success": bool(fetched.get("success")),
         "fetch_error": fetched.get("error", ""),
         "content": content[:10000],
-        "summary": str(parsed.get("summary") or content[:700] or fetched.get("error") or "No summary available.").strip(),
-        "key_claims": parsed.get("key_claims") if isinstance(parsed.get("key_claims"), list) else [],
-        "perspective": str(parsed.get("perspective") or "Unlabeled"),
-        "reliability_label": str(parsed.get("reliability_label") or "Unlabeled"),
-        "relevance_note": str(parsed.get("relevance_note") or "").strip(),
+        "summary": _model_value_to_text(parsed.get("summary"), fallback=content[:700] or fetched.get("error") or "No summary available."),
+        "key_claims": [_model_value_to_text(claim) for claim in parsed.get("key_claims", []) if _model_value_to_text(claim)] if isinstance(parsed.get("key_claims"), list) else [],
+        "perspective": _model_value_to_text(parsed.get("perspective"), fallback="Unlabeled"),
+        "reliability_label": _model_value_to_text(parsed.get("reliability_label"), fallback="Unlabeled"),
+        "relevance_note": _model_value_to_text(parsed.get("relevance_note")),
     }
 
 
@@ -418,7 +447,7 @@ async def _refine_side_search_queries(
         f"Prior search queries:\n{_recent_search_query_text(session)}\n\n"
         f"Return {max_queries} or fewer queries."
     )
-    parsed = _extract_json_object(await _query_main_model(prompt, f"You are {_advocate_name(session, side)}, refining search terms for your debate side. Return only JSON."))
+    parsed = _extract_json_object(await _query_clerk_model(prompt, f"You are {_advocate_name(session, side)}, refining search terms for your debate side. Return only JSON."))
     queries = _extract_query_list(parsed)
     if not queries:
         queries = [f"{session.topic} {session.positions.get(side)} {research_need}".strip()]
@@ -446,6 +475,10 @@ async def _plan_clerk_queries(
             f"\nRequesting side: {_side_label(session, requester)}"
             f"\nPosition represented: {session.positions.get(requester)}"
         )
+    seed_queries = _extract_query_list(seed_queries or [])
+    if seed_queries:
+        return list(dict.fromkeys(seed_queries))[: min(4, max(1, limit))]
+
     prompt = (
         "Generate precise web search queries for the Clerk in a formal debate. Return strict JSON with key queries. "
         "Use keyword-style queries, not natural-language questions. "
@@ -458,8 +491,7 @@ async def _plan_clerk_queries(
         f"Max queries: {min(4, max(1, limit))}"
     )
     parsed = _extract_json_object(await _query_clerk_model(prompt, "You generate compact debate research queries. Return only JSON."))
-    queries = [str(query).strip() for query in (seed_queries or []) if str(query).strip()]
-    queries.extend(_extract_query_list(parsed))
+    queries = _extract_query_list(parsed)
     deduped = []
     seen = set()
     for query in queries:
@@ -759,7 +791,7 @@ def _record_formal_turn(session: DebateSession, speaker: str, kind: str, content
         "round": round_number,
         "speaker": speaker,
         "kind": kind,
-        "content": str(content or "").strip(),
+        "content": _model_value_to_text(content),
         "source_ids": source_ids or [],
         "created_at": _now_label(),
     })
@@ -779,10 +811,10 @@ async def _moderator_initial_research_brief(session: DebateSession) -> dict:
     )
     parsed = _extract_json_object(await _query_main_model(prompt, "You are a neutral debate Moderator. Return only JSON.")) or {}
     seed_queries = parsed.get("seed_queries") if isinstance(parsed.get("seed_queries"), list) else []
-    seed_queries = [str(query).strip() for query in seed_queries if str(query).strip()][:3]
-    research_question = str(parsed.get("research_question") or "").strip()
-    scope = str(parsed.get("scope") or "").strip()
-    relevance_criteria = str(parsed.get("relevance_criteria") or "").strip()
+    seed_queries = _extract_query_list(seed_queries)[:3]
+    research_question = _model_value_to_text(parsed.get("research_question"))
+    scope = _model_value_to_text(parsed.get("scope"))
+    relevance_criteria = _model_value_to_text(parsed.get("relevance_criteria"))
 
     if not research_question:
         research_question = f"Identify the major opposing positions in this debate topic: {session.topic}"
@@ -839,10 +871,10 @@ async def _define_positions(session: DebateSession, bot=None) -> None:
         "anti": _clean_side_name(parsed.get("anti_advocate_name"), "Mathias"),
     }
     session.positions = {
-        "pro": str(parsed.get("pro") or f"In favor of {session.topic}").strip(),
-        "anti": str(parsed.get("anti") or f"Opposed to {session.topic}").strip(),
+        "pro": _model_value_to_text(parsed.get("pro"), fallback=f"In favor of {session.topic}"),
+        "anti": _model_value_to_text(parsed.get("anti"), fallback=f"Opposed to {session.topic}"),
     }
-    session.position_framing = str(parsed.get("framing") or "").strip()
+    session.position_framing = _model_value_to_text(parsed.get("framing"))
     session.status = "defining_positions"
     session.touch()
     logging.info(
@@ -875,11 +907,11 @@ async def _revise_positions(session: DebateSession, instruction: str) -> None:
         "anti": _clean_side_name(parsed.get("anti_advocate_name"), _advocate_name(session, "anti")),
     }
     if parsed.get("pro"):
-        session.positions["pro"] = str(parsed.get("pro")).strip()
+        session.positions["pro"] = _model_value_to_text(parsed.get("pro"))
     if parsed.get("anti"):
-        session.positions["anti"] = str(parsed.get("anti")).strip()
+        session.positions["anti"] = _model_value_to_text(parsed.get("anti"))
     if parsed.get("framing"):
-        session.position_framing = str(parsed.get("framing")).strip()
+        session.position_framing = _model_value_to_text(parsed.get("framing"))
     session.user_inputs.append({"time": _now_label(), "text": instruction, "state": session.status})
     session.touch()
     logging.info(
@@ -896,9 +928,9 @@ async def _generate_side_questions(session: DebateSession, side: str, light_pack
         "Return strict JSON with key questions.\n\n"
         f"{_build_side_context(session, side)}\n\nLight research packet:\n{light_packet.get('summary')}"
     )
-    parsed = _extract_json_object(await _query_main_model(prompt, f"You are the {side} debate role. Return only JSON.")) or {}
+    parsed = _extract_json_object(await _query_clerk_model(prompt, f"You are the {side} debate role. Return only JSON.")) or {}
     raw_questions = parsed.get("questions") if isinstance(parsed.get("questions"), list) else []
-    questions = [str(question).strip() for question in raw_questions if str(question).strip()]
+    questions = [_model_value_to_text(question) for question in raw_questions if _model_value_to_text(question)]
     if not questions:
         questions = [
             f"What is the strongest evidence for {session.positions.get(side)}?",
@@ -953,14 +985,15 @@ async def _prepare_side(bot, session: DebateSession, side: str) -> str:
     )
     prompt = (
         "Build this side's private debate brief AND opening thesis. Return strict JSON with keys: "
-        "role_brief (prose with thesis, best evidence, likely objections, and response strategy), "
-        "opening_thesis (polished prose citing source IDs). Do not include hidden reasoning.\n\n"
+        "role_brief and opening_thesis. Both values MUST be plain strings, never objects or arrays. "
+        "role_brief should include the thesis, best evidence, likely objections, and response strategy. "
+        "opening_thesis should be polished prose citing source IDs. Do not include hidden reasoning.\n\n"
         f"{_build_side_context(session, side)}\n\nDeep packet:\n{deep_packet.get('summary')}"
     )
     raw = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
     parsed = _extract_json_object(raw) or {}
-    role_brief = parsed.get("role_brief") or ""
-    opening_thesis = parsed.get("opening_thesis") or ""
+    role_brief = _model_value_to_text(parsed.get("role_brief"))
+    opening_thesis = _model_value_to_text(parsed.get("opening_thesis"))
     # Fallback chain for role_brief.
     if not role_brief:
         role_brief = raw.strip() if raw and raw.strip() else (deep_packet.get("summary") or "No private brief was generated.")
@@ -987,12 +1020,13 @@ async def _moderator_questions(session: DebateSession) -> list[str]:
         "Return strict JSON with key questions. Do not use private research packets. "
         "Every question must be neutral and facilitate discussion between both positions. "
         "Do not favor either side, do not frame a question as a trap for one side, and do not ask a question only to one side. "
-        "Each question should invite both sides to answer from their positions and respond to each other.\n\n"
+        "Each question should invite both sides to answer from their positions and respond to each other. "
+        "Every item in questions MUST be a plain string, not an object.\n\n"
         f"{_build_moderator_context(session)}"
     )
-    parsed = _extract_json_object(await _query_main_model(prompt, "You are the neutral Moderator. Return only JSON.")) or {}
+    parsed = _extract_json_object(await _query_clerk_model(prompt, "You are the neutral Moderator. Return only JSON.")) or {}
     raw_questions = parsed.get("questions") if isinstance(parsed.get("questions"), list) else []
-    questions = [str(question).strip() for question in raw_questions if str(question).strip()]
+    questions = [_model_value_to_text(question) for question in raw_questions if _model_value_to_text(question)]
     if not questions:
         questions = [
             f"What criteria should determine the strongest case on both sides of {session.topic}?",
@@ -1028,7 +1062,7 @@ async def _round_side_turn(bot, session: DebateSession, side: str, kind: str, qu
         )
     prompt = (
         f"Write the {kind} for this debate round. Stay in role. Cite source IDs only if they appear in your private packets. "
-        "Return only the formal debate turn.\n\n"
+        "Return only the formal debate turn as plain text. Do not return JSON, an object, an array, or a code fence.\n\n"
         f"Round question: {question}\n"
         f"Opponent text to address: {opponent_text or 'None yet.'}\n\n"
         f"{_build_side_context(session, side)}"
@@ -1045,15 +1079,15 @@ async def _judge_round(session: DebateSession, round_number: int, question: str)
         "winner must be pro, anti, or tie.\n\n"
         f"Round number: {round_number}\nRound question: {question}\n\n{_build_moderator_context(session)}"
     )
-    parsed = _extract_json_object(await _query_main_model(prompt, "You are the neutral Moderator. Return only JSON.")) or {}
-    winner = str(parsed.get("winner") or "tie").strip().lower()
+    parsed = _extract_json_object(await _query_clerk_model(prompt, "You are the neutral Moderator. Return only JSON.")) or {}
+    winner = _model_value_to_text(parsed.get("winner"), fallback="tie").lower()
     if winner not in {"pro", "anti", "tie"}:
         winner = "tie"
     result = {
         "round": round_number,
         "question": question,
         "winner": winner,
-        "rationale": str(parsed.get("rationale") or "The Moderator did not return a rationale.").strip(),
+        "rationale": _model_value_to_text(parsed.get("rationale"), fallback="The Moderator did not return a rationale."),
     }
     session.round_results.append(result)
     logging.info("DEBATE: Moderator judged round session=%s round=%d winner=%s", session.id, round_number, winner)
@@ -1105,7 +1139,7 @@ async def _final_side_thesis_text(session: DebateSession, side: str) -> str:
     logging.info("DEBATE: Generating final thesis session=%s side=%s", session.id, side)
     prompt = (
         "Write this side's final thesis after all rounds. Address the formal debate record and preserve your position. "
-        "Return only the formal final thesis.\n\n"
+        "Return only the formal final thesis as plain text. Do not return JSON, an object, an array, or a code fence.\n\n"
         f"{_build_side_context(session, side)}"
     )
     thesis = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
@@ -1130,7 +1164,7 @@ async def _final_side_thesis(session: DebateSession, side: str) -> None:
     logging.info("DEBATE: Generating final thesis session=%s side=%s", session.id, side)
     prompt = (
         "Write this side's final thesis after all rounds. Address the formal debate record and preserve your position. "
-        "Return only the formal final thesis.\n\n"
+        "Return only the formal final thesis as plain text. Do not return JSON, an object, an array, or a code fence.\n\n"
         f"{_build_side_context(session, side)}"
     )
     thesis = await _query_main_model(prompt, f"You are the {side} side in a formal debate.")
@@ -1538,6 +1572,7 @@ def _question_rounds_text(session: DebateSession) -> str:
 
 
 async def _summarize_formal_response(session: DebateSession, side: str, label: str, text: str) -> str:
+    text = _model_value_to_text(text, fallback="No formal response was returned.")
     prompt = (
         "Summarize this formal debate response for Telegram readers. "
         "Return 2-4 concise sentences or bullets. Do not judge the argument; only summarize what this side said.\n\n"
@@ -1547,12 +1582,12 @@ async def _summarize_formal_response(session: DebateSession, side: str, label: s
         f"Formal response:\n{text[:9000]}"
     )
     summary = await _query_clerk_model(prompt, "You are the Clerk. Summarize formal debate responses without taking sides.")
-    clean = re.sub(r"\s+", " ", str(summary or "")).strip()
+    clean = re.sub(r"\s+", " ", _model_value_to_text(summary)).strip()
     return clean or _short_visible_summary(text)
 
 
 def _short_visible_summary(text: str, limit: int = 500) -> str:
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    clean = re.sub(r"\s+", " ", _model_value_to_text(text)).strip()
     if len(clean) <= limit:
         return clean
     return clean[: limit - 1].rstrip() + "…"
@@ -1565,7 +1600,7 @@ def _collapsed_argument_section(title: str, full_text: str) -> str:
 
 
 def _rich_text_block(text: str) -> str:
-    clean = _clean_thinking_tags(str(text or "")).strip()
+    clean = _model_value_to_text(text)
     if not clean:
         return "<p></p>"
     paragraphs = []

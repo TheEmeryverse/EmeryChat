@@ -8,8 +8,9 @@ import subprocess
 import requests
 import ipaddress
 import socket
+from collections import deque
 from bs4 import BeautifulSoup
-from urllib.parse import parse_qs, urljoin, quote, urlparse
+from urllib.parse import parse_qs, urljoin, quote, urlparse, unquote
 from datetime import datetime, time, timedelta
 import pytz
 import feedparser
@@ -23,7 +24,7 @@ from googleapiclient.discovery import build
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, SEARXNG_URL, NASA_API_KEY, GEMINI_API_KEY,
-    IMAGE_MODEL, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
+    IMAGE_MODEL, IMAGE_GENERATION_BACKEND, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,
     OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME,
     ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY,
@@ -37,12 +38,16 @@ from emery.config import (
 )
 from emery.config import FAST_MODEL_CONTEXT_TOKENS, CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN
 from emery.docling import (
+    MAX_DOCUMENT_BYTES,
     detect_supported_document_type,
-    convert_document_url,
+    convert_document_bytes,
+    analyze_pdf_visual_fallback,
     build_extracted_text_preview,
 )
 import emery.globals as globals
+from emery.comfyui_image import generate_comfyui_image
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
+from emery.telegram_delivery import send_rich_or_split_html_message
 from emery.media import (
     can_attach_model_image,
     can_use_research_image,
@@ -59,6 +64,7 @@ from emery.telegram_utils import normalize_message_thread_id
 
 REOLINK_TELEGRAM_READ_TIMEOUT_SECONDS = 90.0
 REOLINK_TELEGRAM_WRITE_TIMEOUT_SECONDS = 90.0
+REOLINK_TELEGRAM_CAPTION_LIMIT = 1024
 
 
 async def _send_reolink_alert_photo(**send_kwargs):
@@ -68,6 +74,78 @@ async def _send_reolink_alert_photo(**send_kwargs):
         read_timeout=REOLINK_TELEGRAM_READ_TIMEOUT_SECONDS,
         write_timeout=REOLINK_TELEGRAM_WRITE_TIMEOUT_SECONDS,
     )
+
+
+def _readable_reolink_alert_report(report):
+    """Strip the classifier protocol from a camera report for humans."""
+    report_text = str(report or "").strip()
+    if not report_text:
+        return "No active activity detected."
+
+    decision_match = re.search(
+        r"(?im)^\s*ALERT_DECISION\s*:\s*(CLEAR|ACTIVITY|UNCERTAIN)\s*$",
+        report_text,
+    )
+    decision = decision_match.group(1).upper() if decision_match else ""
+    summary_match = re.search(r"(?im)^\s*SUMMARY\s*:\s*(.+?)\s*$", report_text)
+    if summary_match:
+        readable = summary_match.group(1).strip().strip('"')
+    else:
+        # Preserve compatibility with older free-form vision responses while
+        # removing any protocol labels a partially compliant model emitted.
+        readable = re.sub(
+            r"(?im)^\s*(?:ALERT_DECISION|SUMMARY|CONFIDENCE)\s*:\s*",
+            "",
+            report_text,
+        )
+        readable = re.sub(r"\s+", " ", readable).strip().strip('"')
+
+    if not readable:
+        readable = "No active activity detected."
+    if decision == "UNCERTAIN" and not readable.lower().startswith("uncertain:"):
+        readable = f"Uncertain: {readable}"
+    return readable
+
+
+def _reolink_alert_decision(report):
+    """Return the vision model's explicit decision, failing safe."""
+    match = re.search(
+        r"(?im)^\s*ALERT_DECISION\s*:\s*(CLEAR|ACTIVITY|UNCERTAIN)\s*$",
+        str(report or ""),
+    )
+    return match.group(1).upper() if match else "UNCERTAIN"
+
+
+def _build_reolink_alert_caption(camera_name, report):
+    """Build a Telegram-safe alert caption without splitting HTML entities."""
+    camera_label = str(camera_name or "").upper()
+    report_text = str(report or "No active activity detected.")
+
+    def build_caption(text):
+        return (
+            f"📸 <b>Live: {telegram_escape(camera_label)}</b>\n\n"
+            f"🛡️ <i>{telegram_escape(text)}</i>"
+        )
+
+    caption = build_caption(report_text)
+    if len(caption) <= REOLINK_TELEGRAM_CAPTION_LIMIT:
+        return caption
+
+    # Bound the escaped payload itself so Telegram cannot reject the photo.
+    # Binary search keeps the truncation valid even when the report contains
+    # characters that expand during HTML escaping (for example, '&' or '<').
+    marker = "…"
+    low, high = 0, len(report_text)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        candidate = build_caption(report_text[:midpoint].rstrip() + marker)
+        if len(candidate) <= REOLINK_TELEGRAM_CAPTION_LIMIT:
+            low = midpoint
+        else:
+            high = midpoint - 1
+
+    truncated_report = report_text[:low].rstrip() + marker
+    return build_caption(truncated_report)
 
 
 def _format_large_number(value):
@@ -405,55 +483,194 @@ async def speak_message(text): # What the model calls to create a voice message 
     return "Failed to send voice message. Ensure TARGET_CHAT_ID is set."
 
 # --- IMAGE GENERATION ---
-async def generate_image(prompt): # Generates an image based on the prompt using Gemini API
+async def _finish_generated_image_description(
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    photo_message_id: int | None,
+    image_bytes: bytes,
+    prompt: str,
+) -> None:
+    """Analyze a delivered image, add the observation to history, and follow up."""
+    try:
+        compressed_bytes = compress_image_bytes(image_bytes)
+        vision_b64 = base64.b64encode(compressed_bytes).decode("utf-8")
+        vision_prompt = (
+            "Describe the generated image in detail so Emery can use the observation in later context. "
+            "State only visible facts and notable differences from the requested prompt; do not speculate.\n\n"
+            f"Requested prompt:\n{prompt[:4000]}"
+        )
+        description = (await get_image_description(vision_b64, vision_prompt)).strip()
+        if not description:
+            logging.warning("⚠️ IMAGE: Background vision analysis returned no description.")
+            return
+
+        history = globals.chat_histories.setdefault(chat_id, deque())
+        history.append({
+            "role": "assistant",
+            "content": f"[Background vision observation for the generated image]\n{description}",
+            "message_thread_id": thread_id,
+            "timestamp": datetime.now(USER_TIMEZONE),
+            "reply_to_message_id": photo_message_id,
+        })
+
+        await send_rich_or_split_html_message(
+            globals.application_bot,
+            chat_id,
+            f"**Image description**\n\n{description}",
+            reply_to_message_id=photo_message_id,
+            message_thread_id=thread_id,
+        )
+        logging.info("🖼️ IMAGE: Background description sent and added to chat context for chat_id=%s.", chat_id)
+    except Exception as exc:
+        logging.error("❌ IMAGE: Background description failed: %s", exc, exc_info=True)
+
+
+def _track_background_image_task(task: asyncio.Task) -> asyncio.Task:
+    """Keep a reference to a background image task until it completes."""
+    globals.background_image_tasks.add(task)
+
+    def _forget(completed_task: asyncio.Task) -> None:
+        globals.background_image_tasks.discard(completed_task)
+        if completed_task.cancelled():
+            return
+        try:
+            completed_task.result()
+        except Exception:
+            # The worker normally handles its own errors; this is a final
+            # guard against an unobserved exception from a future change.
+            logging.error("❌ IMAGE: Background task crashed.", exc_info=True)
+
+    task.add_done_callback(_forget)
+    return task
+
+
+async def _generate_image_bytes(prompt: str) -> bytes:
+    """Generate image bytes without tying up Emery's foreground turn."""
+    if IMAGE_GENERATION_BACKEND == "comfyui":
+        image_bytes, _mime_type = await generate_comfyui_image(prompt)
+        return image_bytes
+
     URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
+        "contents": [{
+            "parts": [{
+                "text": prompt,
+            }]
+        }]
     }
+    r = await globals.http_client.post(URL, json=payload, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Image API HTTP {r.status_code}: {r.text[:500]}")
+    data = r.json()
+    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    for part in parts:
+        if "inlineData" in part:
+            image_b64 = part["inlineData"].get("data")
+            if image_b64:
+                return base64.b64decode(image_b64)
+    raise RuntimeError("No image data found in response parts.")
+
+
+async def _generate_and_deliver_image(
+    prompt: str,
+    chat_id: int,
+    thread_id: int | None,
+    *,
+    bot=None,
+    reply_to_message_id: int | None = None,
+    caption_prefix: str = "Here's your picture: ",
+    include_description: bool = True,
+) -> None:
+    """Generate and deliver an image after the foreground model turn returns."""
+    bot = bot or globals.application_bot
     try:
-        r = await globals.http_client.post(URL, json=payload, timeout=60)
-        if r.status_code != 200:
-            logging.error(f"❌ API Error: {r.text}")
-            return f"Error: {r.status_code}"
-        data = r.json()
-        parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-        image_bytes = None
-        for part in parts:
-            if 'inlineData' in part:
-                image_b64 = part['inlineData'].get('data')
-                image_bytes = base64.b64decode(image_b64)
-                break
-        if not image_bytes:
-            return "No image data found in response parts."
+        image_bytes = await _generate_image_bytes(prompt)
+        if not bot:
+            raise RuntimeError("Telegram bot is not available for image delivery.")
 
-        compressed_bytes = compress_image_bytes(image_bytes)
-        vision_b64 = base64.b64encode(compressed_bytes).decode('utf-8')
-        vision_prompt = (
-            "Describe the generated image in detail so the calling model can compare it "
-            "against the original prompt and understand the final result."
-        )
-        generated_image_description = await get_image_description(vision_b64, vision_prompt)
+        reply_parameters = None
+        if reply_to_message_id:
+            from telegram import ReplyParameters
 
-        if globals.TARGET_CHAT_ID.get():
-            chat_id = globals.TARGET_CHAT_ID.get()
-            thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
-            await globals.application_bot.send_photo(
-                chat_id=chat_id,
-                photo=image_bytes,
-                caption=f"Here's your picture: {prompt[:1000]}",
-                message_thread_id=thread_id
+            reply_parameters = ReplyParameters(
+                message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
             )
-            return (
-                "Image sent successfully.\n"
-                f"Generated image description: {generated_image_description}"
-            )
-        return (
-            "Chat context lost.\n"
-            f"Generated image description: {generated_image_description}"
+
+        sent_photo = await bot.send_photo(
+            chat_id=chat_id,
+            photo=image_bytes,
+            caption=f"{caption_prefix}{prompt[:1000]}",
+            reply_parameters=reply_parameters,
+            message_thread_id=thread_id,
         )
-    except Exception as e:
-        logging.error(f"❌ Image Tool Crash: {e}")
-        return f"Error: {e}"
+        if include_description:
+            description_task = asyncio.create_task(
+                _finish_generated_image_description(
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    photo_message_id=getattr(sent_photo, "message_id", None),
+                    image_bytes=image_bytes,
+                    prompt=prompt,
+                )
+            )
+            _track_background_image_task(description_task)
+        logging.info("🖼️ IMAGE: Background image delivered for chat_id=%s.", chat_id)
+    except Exception as exc:
+        logging.error("❌ IMAGE: Background generation/delivery failed: %s", exc, exc_info=True)
+        if bot:
+            try:
+                await send_rich_or_split_html_message(
+                    bot,
+                    chat_id,
+                    f"Image generation failed: {safe_preview(str(exc), max_len=500)}",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=thread_id,
+                )
+            except Exception:
+                logging.error("❌ IMAGE: Could not send background failure notice.", exc_info=True)
+
+
+def queue_image_generation(
+    prompt: str,
+    chat_id: int,
+    thread_id: int | None,
+    *,
+    bot=None,
+    reply_to_message_id: int | None = None,
+    caption_prefix: str = "Here's your picture: ",
+    include_description: bool = True,
+) -> asyncio.Task:
+    """Start image generation in the background and return its task handle."""
+    task = asyncio.create_task(
+        _generate_and_deliver_image(
+            prompt,
+            chat_id,
+            thread_id,
+            bot=bot,
+            reply_to_message_id=reply_to_message_id,
+            caption_prefix=caption_prefix,
+            include_description=include_description,
+        )
+    )
+    return _track_background_image_task(task)
+
+
+async def generate_image(prompt):  # Generates an image without blocking Emery's reply
+    chat_id = globals.TARGET_CHAT_ID.get()
+    if not chat_id:
+        return "Chat context lost; the image could not be queued for delivery."
+
+    thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
+    queue_image_generation(prompt, chat_id, thread_id)
+    return (
+        "Image generation started in the background. You can continue chatting; "
+        "the image will be delivered here when it is ready.\n\n"
+        "FINAL RESPONSE REQUIREMENT: Include the exact prompt sent to the image "
+        "model under a clearly labeled `Image prompt:` section. Do not paraphrase it.\n"
+        f"Image prompt:\n{prompt}"
+    )
 
 # --- NOAA WEATHER ---
 WEATHER_GEOCODER_URL = "https://nominatim.openstreetmap.org/search"
@@ -1210,7 +1427,12 @@ async def _validate_fetch_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
-async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: bool = True) -> dict: # Fetches website content
+async def fetch_web_content(
+    url: str,
+    max_chars: int = 8000,
+    summarize_long: bool = True,
+    question: str | None = None,
+) -> dict: # Fetches website content
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -1275,27 +1497,86 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
                 resolved_document_type,
             )
             if resolved_document_type:
-                extraction = await convert_document_url(
-                    current_url,
-                    filename=None,
-                    content_type=content_type,
+                # The preflight response is the authoritative, validated byte
+                # stream. Upload those exact bytes to Docling instead of making
+                # the document server fetch the URL a second time. This avoids
+                # redirect/auth/cache differences and lets us inspect PDF pages
+                # visually when text alone is insufficient.
+                document_bytes = bytes(response.content or b"")
+                source_name = unquote(urlparse(current_url).path.rsplit("/", 1)[-1]) or "document"
+                if len(document_bytes) > MAX_DOCUMENT_BYTES:
+                    return {
+                        "success": False,
+                        "title": source_name,
+                        "url": current_url,
+                        "content": "",
+                        "images": [],
+                        "error": f"Document exceeds the {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB safety limit.",
+                    }
+                extraction = await convert_document_bytes(
+                    document_bytes,
+                    filename=source_name,
+                    mime_type=content_type,
+                    source_url=current_url,
                 )
                 if extraction.get("success"):
-                    preview_text = build_extracted_text_preview(extraction, max_len=max_chars)
+                    visual_analysis = await analyze_pdf_visual_fallback(
+                        document_bytes,
+                        extraction,
+                        question=question,
+                    )
+                    preview_text = build_extracted_text_preview(
+                        extraction,
+                        max_len=max_chars,
+                        question=question,
+                    )
                     logging.info(
-                        "📄 FETCH: docling success source=%s preview_chars=%s",
+                        "📄 FETCH: docling success source=%s preview_chars=%s pages=%s visual_pages=%s native_visual_chars=%s",
                         extraction.get("source_name"),
                         len(preview_text or ""),
+                        extraction.get("page_count"),
+                        len(visual_analysis),
+                        sum(len(str(item.get("native_facts") or "")) for item in visual_analysis),
                     )
-                    content = (
+                    header = (
                         f"[Docling extracted document]\n"
                         f"Name: {extraction.get('source_name')}\n"
                         f"Type: {extraction.get('source_type')}\n"
                         f"Docling Status: {extraction.get('docling_status')}\n"
-                        f"Extracted Text Preview: {preview_text}"
+                        f"Pages: {extraction.get('page_count') or 'unknown'}\n"
+                        f"Extraction Quality: {'visual review recommended' if extraction.get('visual_fallback_recommended') else 'text and structure available'}\n"
                     )
+                    visual_section = ""
+                    if visual_analysis:
+                        visual_section = "\nVisual Verification Evidence (supplemental; PDF-native geometry/color facts take precedence):\n" + "\n".join(
+                            "\n".join(
+                                part for part in [
+                                    f"[Page {item.get('page')} | region={item.get('focus_region', 'full-page')}]",
+                                    str(item.get('native_facts') or "").strip(),
+                                    f"Vision description (secondary): {item.get('description')}" if item.get('description') else "",
+                                ]
+                                if part
+                            )
+                            for item in visual_analysis
+                        )
+                    # Reserve room for visual evidence before truncating the
+                    # text preview; otherwise a long OCR result can hide the
+                    # very color/layout facts that triggered the fallback.
+                    preview_budget = max(
+                        256,
+                        max_chars - len(header) - len("Extracted Text Preview: ") - len(visual_section) - 1,
+                    )
+                    if len(preview_text) > preview_budget:
+                        preview_text = build_extracted_text_preview(
+                            extraction,
+                            max_len=preview_budget,
+                            question=question,
+                        )
+                    content = header + f"Extracted Text Preview: {preview_text}" + visual_section
                     if len(content) > max_chars:
-                        content = content[:max_chars] + "... [Content truncated for length]"
+                        content = header + f"Extracted Text Preview: {safe_preview(preview_text, max_len=max(256, max_chars - len(header) - len(visual_section) - 32))}" + visual_section
+                        if len(content) > max_chars:
+                            content = safe_preview(content, max_len=max_chars) + "... [Content truncated for length]"
                     return {
                         "success": True,
                         "title": extraction.get("source_name") or "Document",
@@ -1388,6 +1669,51 @@ async def fetch_web_content(url: str, max_chars: int = 8000, summarize_long: boo
             }
     except Exception as e:
         return {"success": False, "error": f"Connection Error: {str(e)}"}
+
+
+async def extract_document_with_docling(
+    url: str,
+    max_chars: int = 12000,
+    question: str = "",
+) -> dict:
+    """Route one remote document through Emery's dedicated Docling pipeline."""
+    result = await fetch_web_content(
+        url,
+        max_chars=max_chars,
+        summarize_long=False,
+        question=question,
+    )
+    content = str(result.get("content") or "").lstrip()
+
+    if not result.get("success"):
+        return result
+
+    if content.startswith("[Docling extracted document]"):
+        result["docling_pipeline"] = True
+        return result
+
+    if content.startswith("[Document fetch fallback]"):
+        return {
+            "success": False,
+            "title": result.get("title") or "Document",
+            "url": result.get("url") or url,
+            "content": result.get("content") or "",
+            "images": [],
+            "docling_pipeline": True,
+            "error": "Docling could not extract this document. See the returned Docling note for details.",
+        }
+
+    return {
+        "success": False,
+        "title": result.get("title") or "Document",
+        "url": result.get("url") or url,
+        "images": [],
+        "docling_pipeline": False,
+        "error": (
+            "The URL did not resolve to a supported PDF, DOCX, or PPTX document. "
+            "Use fetch_web_content for ordinary webpages."
+        ),
+    }
 
 async def use_research_image(
     image_id: str,
@@ -2723,29 +3049,51 @@ async def get_reolink_snapshot(
         # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
         logging.debug("👁️ VISION [1/2]: Running threat analysis...")
         security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
-            Analyze this image and report ONLY the following active elements if present:
-            - People (assess sex, race/ethnicity, hair color, exact clothing details, and if they are holding or carrying any objects)
-            - Vehicles (type, color, position)
-            - Packages, deliveries, or parcels (especially near entryways like the front door)
+            Your output is consumed by a notification filter. Use the exact three-line format below and do not add headings, markdown, or extra lines:
+            ALERT_DECISION: CLEAR | ACTIVITY | UNCERTAIN
+            SUMMARY: <one concise sentence>
+            CONFIDENCE: <integer from 0 to 100> - <short visual reason>
 
-        STRICT SECURITY FILTER RULES:
-            1. Do NOT describe static background objects, stationary items, or daily environmental features (e.g., grills, bicycles, stairs, chairs, tables, lawn furniture, toys, structures, siding, or fences).
-            2. Do NOT describe domestic pets or local animals unless they represent an active safety/security issue.
-            3. Be highly descriptive when analyzing people: detail their physical characteristics, apparel, and actions.
-            4. If any people are detected in the image, you MUST append a confidence score and a brief explanation of the visual conditions affecting that confidence on a new line (e.g., "Confidence in assessment: 67%. Poor lighting and face partially obscured from view.").
-            5. Keep the description very concise (1 or 2 sentences of description + 1 sentence on a new line for the confidence score and rationale).
-            6. If there are no people, vehicles, or packages in the image, respond EXACTLY with: "No active activity detected." """
+        DECISION RULES:
+            - CLEAR means no relevant person, vehicle, package, delivery, or suspicious activity is visible. Static background and ordinary domestic pets do not count.
+            - ACTIVITY means at least one relevant person, vehicle, package, delivery, or suspicious action is actually visible, even if it may be routine. Describe it briefly.
+            - UNCERTAIN means lighting, blur, distance, obstruction, or contradictory evidence prevents a reliable decision. Never guess.
+            - Never write CLEAR or say there is no activity when a relevant person, vehicle, package, delivery, or suspicious action is visible.
+            - Do not describe static background objects, stationary items, or daily environmental features such as grills, bicycles, stairs, chairs, tables, lawn furniture, toys, structures, siding, or fences.
+            - Do not describe domestic pets or local animals unless they represent an active safety/security issue.
+            - For ACTIVITY, describe people with clothing, apparent action, and carried objects; describe vehicles by type, color, and position; describe packages or deliveries and whether they are near an entryway.
+            - Keep SUMMARY to one sentence. Do not include race or ethnicity guesses.
+            - If the image is empty of relevant activity, use exactly: "ALERT_DECISION: CLEAR\\nSUMMARY: No relevant people, vehicles, packages, deliveries, or suspicious activity are visible.\\nCONFIDENCE: 100 - The view is clear and unobstructed."""
             
-        concise_report = await get_image_description(b64_image, security_prompt)
+        concise_report = await get_image_description(
+            b64_image,
+            security_prompt,
+            priority="background",
+        )
         logging.debug(f"👁️ VISION [1/2]: Completed ({len(concise_report or '')} chars)")
         
         if not concise_report or not concise_report.strip():
             concise_report = "No active activity detected."
         
-        if target_chat_id:
-            telegram_caption = (
-                f"📸 <b>Live: {telegram_escape(matched_camera_name.upper())}</b>\n\n"
-                f"🛡️ <i>{telegram_escape(concise_report)}</i>"
+        readable_report = _readable_reolink_alert_report(concise_report)
+        camera_decision = _reolink_alert_decision(concise_report)
+        camera_alert_suppressed = bool(
+            target_chat_id
+            and update_thread_tracker
+            and camera_decision == "CLEAR"
+        )
+        logging.info(
+            "🛡️ SECURITY: camera=%s decision=%s suppress=%s",
+            matched_camera_name,
+            camera_decision,
+            camera_alert_suppressed,
+        )
+
+        sent_photo_msg = None
+        if target_chat_id and not camera_alert_suppressed:
+            telegram_caption = _build_reolink_alert_caption(
+                matched_camera_name,
+                readable_report,
             )
             sent_photo_msg = await _send_reolink_alert_photo(
                 chat_id=target_chat_id,
@@ -2756,7 +3104,7 @@ async def get_reolink_snapshot(
                 message_thread_id=actual_thread_id,
                 disable_notification=silent_alerts
             )
-            
+
             if update_thread_tracker and sent_photo_msg:
                 cam_key = matched_camera_name.lower().strip()
                 if reply_to_message_id is None:
@@ -2764,7 +3112,14 @@ async def get_reolink_snapshot(
                         "message_id": sent_photo_msg.message_id,
                         "timestamp": datetime.now(USER_TIMEZONE)
                     }
-            
+
+        if target_chat_id:
+            if camera_alert_suppressed:
+                logging.info(
+                    "🔕 SECURITY: Suppressed clear camera alert for '%s'; camera log will still be updated.",
+                    matched_camera_name,
+                )
+
             # --- STAGE 3: Broad Scene Description (For LLM Memory Context) ---
             logging.debug("👁️ VISION [2/2]: Generating scene context...")
             context_prompt = (
@@ -2772,12 +3127,22 @@ async def get_reolink_snapshot(
                 "Concisely describe the layout, stationary structures, background, "
                 "and visible inanimate objects in the frame."
             )
-            scene_context = await get_image_description(b64_image, context_prompt)
+            scene_context = await get_image_description(
+                b64_image,
+                context_prompt,
+                priority="background",
+            )
             logging.debug(f"👁️ VISION [2/2]: Completed ({len(scene_context or '')} chars)")
             
             # Write to out-of-context log
             from emery.memory import append_camera_log
-            await append_camera_log(matched_camera_name, concise_report, scene_context)
+            await append_camera_log(matched_camera_name, readable_report, scene_context)
+
+            if camera_alert_suppressed:
+                return (
+                    f"SUCCESS: Clear camera alert suppressed ({matched_camera_name}); "
+                    f"security log updated ({matched_camera_name}, {now_str})."
+                )
             
             return (
                 f"SUCCESS: Photo sent. Security log updated ({matched_camera_name}, {now_str}). "
@@ -2863,6 +3228,13 @@ async def trigger_webhook_alert(camera_name: str):
             alert_chat_id,
             security_topic_id,
             result,
+        )
+        return
+
+    if result.startswith("SUCCESS: Clear camera alert suppressed"):
+        logging.info(
+            "🔕 SECURITY: Clear alert suppressed for '%s'; no Telegram notification or chat-history event created.",
+            camera_name,
         )
         return
 

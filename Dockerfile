@@ -10,13 +10,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg chromium \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the script and requirements
-COPY main.py .
-COPY emery/ ./emery/
+# Copy dependency manifests before application code so prompt/code edits can
+# reuse the expensive Python dependency layers.
 COPY requirements.txt .
 
 # Install runtime dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application after dependencies for faster iteration.
+COPY main.py .
+COPY emery/ ./emery/
 
 # Keep the gateway and supervised Chromium process non-root. Compose supplies
 # the same numeric identity so host bind mounts remain writable by hudson.

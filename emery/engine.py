@@ -71,6 +71,7 @@ from emery.telegram_utils import normalize_message_thread_id
 
 AVAILABLE_TOOLS = tool_registry.AVAILABLE_TOOLS
 tools_schema = tool_registry.tools_schema
+_DOCUMENT_FETCH_TOOLS = {"fetch_web_content", "extract_document_with_docling"}
 
 def _strip_id_prefix(text: str) -> str:
     return re.sub(r'^\s*\[ID:\s*\d+[^\]]*\]\s*', '', text or '', flags=re.IGNORECASE)
@@ -94,12 +95,12 @@ def _format_thinking_turn(loop_count: int, phase: str, thought: str) -> str:
     return thought
 
 
-def _combine_reasoning_summaries(summaries: list[str]) -> str:
-    """Return the completed, user-safe reasoning summaries for this turn."""
+def _combine_turn_summary(entries: list[str]) -> str:
+    """Return the complete safe reasoning-and-tool timeline for this turn."""
     return "\n\n".join(
-        str(summary).strip()
-        for summary in summaries
-        if str(summary or "").strip()
+        str(entry).strip()
+        for entry in entries
+        if str(entry or "").strip()
     )
 
 
@@ -437,6 +438,37 @@ def _stream_choice_delta(payload: dict) -> tuple[dict, dict]:
     return choice, choice.get("delta") or choice.get("message") or {}
 
 
+def _prompt_progress_event(progress: dict, *, loop_count: int) -> dict | None:
+    """Translate llama.cpp's prompt-progress payload into a UI-safe event."""
+    if not isinstance(progress, dict):
+        return None
+
+    try:
+        total = int(progress.get("total", 0))
+        processed = int(progress.get("processed", 0))
+        cache = int(progress.get("cache", 0))
+        time_ms = int(progress.get("time_ms", 0))
+    except (TypeError, ValueError):
+        return None
+
+    if total <= 0:
+        return None
+
+    processed = max(0, min(processed, total))
+    cache = max(0, min(cache, total))
+    percent = int((processed * 100) / total)
+    return {
+        "type": "prefill_progress",
+        "percent": percent,
+        "total": total,
+        "processed": processed,
+        "cache": cache,
+        "time_ms": max(0, time_ms),
+        "loop": loop_count,
+        "source": "llama.cpp",
+    }
+
+
 async def _stream_main_model_response(
     url: str,
     payload: dict,
@@ -461,6 +493,7 @@ async def _stream_main_model_response(
     control_task = None
     reasoning_started = False
     reasoning_summary_task = None
+    last_prefill_percent = None
 
     if steering_state is not None:
         steering_state.completion_id = None
@@ -522,6 +555,17 @@ async def _stream_main_model_response(
                 if not isinstance(chunk, dict):
                     continue
                 events_seen = True
+                progress_event = _prompt_progress_event(
+                    chunk.get("prompt_progress"),
+                    loop_count=loop_count,
+                )
+                if progress_event is not None:
+                    # llama.cpp may send several updates inside one displayed
+                    # percentage. Avoid needless Telegram edits while keeping
+                    # every visible percentage live.
+                    if progress_event["percent"] != last_prefill_percent:
+                        last_prefill_percent = progress_event["percent"]
+                        await _emit_engine_event(on_event, progress_event)
                 completion_id = chunk.get("id")
                 if steering_state is not None and completion_id and not steering_state.completion_id:
                     steering_state.completion_id = str(completion_id)
@@ -881,8 +925,10 @@ async def _format_tool_status_message(fn: str, args: dict) -> str:
             return f"{MODEL_NAME} is searching for {telegram_escape(summary)}..."
         return TOOL_STATUS_MESSAGES[fn]
 
-    if fn == "fetch_web_content":
+    if fn in _DOCUMENT_FETCH_TOOLS:
         website = _website_name_from_url(args.get("url", ""))
+        if fn == "extract_document_with_docling":
+            return f"{MODEL_NAME} is sending the document through Docling..."
         if website:
             return f"{MODEL_NAME} is fetching {telegram_escape(website)}..."
         return TOOL_STATUS_MESSAGES[fn]
@@ -1599,7 +1645,7 @@ def _tool_budget_error(
         if key and key in seen_searches:
             return "This web search duplicates a search already made in this turn. Do not repeat it."
 
-    if fn == "fetch_web_content":
+    if fn in _DOCUMENT_FETCH_TOOLS:
         fetch_limit = max(0, int(MAX_WEB_FETCHES_PER_LOOP))
         if fetch_calls >= fetch_limit:
             return (
@@ -1732,6 +1778,11 @@ TOOL_STATUS_MESSAGES = {
     "jot_down_note": f"{MODEL_NAME} is jotting down a working note...",
     "read_scratchpad": f"{MODEL_NAME} is checking the scratchpad...",
     "clear_scratchpad": f"{MODEL_NAME} is clearing the scratchpad...",
+    "skill_search": f"{MODEL_NAME} is searching learned procedures...",
+    "skill_read": f"{MODEL_NAME} is reading a learned procedure...",
+    "skill_save": f"{MODEL_NAME} is saving a learned procedure...",
+    "skill_list": f"{MODEL_NAME} is checking learned procedures...",
+    "skill_set_status": f"{MODEL_NAME} is updating a learned procedure...",
     "web_search": f"{MODEL_NAME} is surfing the web...",
     "get_youtube_transcript": f"{MODEL_NAME} is reading the video transcript...",
     "get_calendar_events": f"{MODEL_NAME} is checking your calendar...",
@@ -1832,7 +1883,6 @@ async def emery_engine(
         
     voice_sent_via_tool = False
     thinking_timeline = []
-    completed_reasoning_summaries = []
     # Preserve explicit runtime/test registry overrides. The optional
     # Tool Search hook resolves the canonical registry, so a caller that
     # intentionally supplies a replacement mapping/schema must bypass it.
@@ -1977,7 +2027,6 @@ async def emery_engine(
                     loop_count=loop_count,
                 )
                 if reasoning_summary:
-                    completed_reasoning_summaries.append(reasoning_summary)
                     thinking_timeline.append(
                         _format_thinking_turn(loop_count, "Summary", reasoning_summary)
                     )
@@ -2041,6 +2090,15 @@ async def emery_engine(
                         result = {"success": False, "error": budget_error}
                         tool_started_at = time.perf_counter()
                         friendly_name = fn
+                        if (
+                            fn in _DOCUMENT_FETCH_TOOLS
+                            and "already fetched in this turn" in budget_error
+                        ):
+                            # The document result is already in the tool
+                            # history. Repeatedly asking for the same source
+                            # cannot add evidence and can trap the model in
+                            # tool-call loops; force one final text completion.
+                            forced_text_only = True
                         if tool_calls_used >= max(0, int(MAX_TOOL_CALLS_PER_TURN)):
                             # Only exhaustion of the full-turn budget requires a
                             # final text-only completion. Loop, search, fetch, and
@@ -2054,7 +2112,7 @@ async def emery_engine(
                             search_key = _web_search_budget_key(args)
                             if search_key:
                                 seen_web_searches.add(search_key)
-                        elif fn == "fetch_web_content":
+                        elif fn in _DOCUMENT_FETCH_TOOLS:
                             web_fetches_used += 1
                             fetch_key = _web_fetch_budget_key(args)
                             if fetch_key:
@@ -2141,10 +2199,8 @@ async def emery_engine(
             thinking_char_count = sum(len(entry) for entry in thinking_timeline if entry)
             logging.info(f"🤖 ENGINE: Response ready — {len(content)} chars" + (f", {thinking_char_count} chars reasoning" if thinking_char_count else ""))
 
-            full_turn_reasoning_summary = _combine_reasoning_summaries(
-                completed_reasoning_summaries
-            )
-            if full_turn_reasoning_summary:
+            full_turn_summary = _combine_turn_summary(thinking_timeline)
+            if full_turn_summary:
                 # This is the final coprocessor result for the entire turn.
                 # Await the callback so Telegram edits the existing reasoning
                 # message before the caller sends the final response.
@@ -2152,14 +2208,14 @@ async def emery_engine(
                     on_event,
                     {
                         "type": "reasoning_summary",
-                        "text": full_turn_reasoning_summary,
+                        "text": full_turn_summary,
                         "source": "coprocessor",
                         "final": True,
                         "full_turn": True,
                     },
                 )
 
-            thinking_payload = "\n\n".join(entry for entry in thinking_timeline if entry)
+            thinking_payload = full_turn_summary
             if thinking_payload:
                 start_think_tag = "<" + "think" + ">"
                 end_think_tag = "</" + "think" + ">"

@@ -289,7 +289,8 @@ class PersistentStatusStack:
 
     The reasoning message is created for every live turn. The tool and
     browser/terminal messages are created lazily only when that state exists.
-    All active messages are deleted together after the final response.
+    Transient messages are deleted after the final response; the finalized
+    reasoning message can be preserved as a collapsed summary.
     """
 
     SLOT_ORDER = ("reasoning", "tool", "environment")
@@ -398,6 +399,7 @@ class PersistentStatusStack:
         value: str | None,
         *,
         reply_markup=_UNSET,
+        rendered_html: str | None = None,
         force: bool = True,
         mode: str | None = None,
     ) -> None:
@@ -430,6 +432,7 @@ class PersistentStatusStack:
                     self._render_slot(slot),
                     force=force,
                     reply_markup=self._reply_markup_for(slot),
+                    rendered_html=rendered_html,
                 )
 
     async def clear_slot(self, slot: str) -> None:
@@ -500,10 +503,13 @@ class PersistentStatusStack:
                 for slot in self.SLOT_ORDER:
                     await self.messages[slot].refresh_in_place()
 
-    async def close(self) -> None:
-        """Delete all three messages when retiring a broken stack."""
+    async def close(self, *, preserve_slots: set[str] | None = None) -> None:
+        """Delete transient messages, optionally preserving finalized slots."""
+        preserve_slots = set(preserve_slots or ())
         async with self._lock:
-            for message in self.messages.values():
+            for slot, message in self.messages.items():
+                if slot in preserve_slots:
+                    continue
                 await message.close()
 
 

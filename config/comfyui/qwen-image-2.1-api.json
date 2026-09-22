@@ -1,0 +1,68 @@
+{
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "qwen-image-2.1-Q4_K_M.gguf"
+    }
+  },
+  "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    }
+  },
+  "3": {
+    "class_type": "RemoteQwenImage21TextEncode",
+    "inputs": {
+      "prompt": "",
+      "negative_prompt": "low resolution, low quality, blurry, out of focus, distorted anatomy, malformed anatomy, unnatural proportions, deformed hands, extra fingers, missing fingers, fused fingers, extra limbs, phantom limbs, duplicated body parts, asymmetrical eyes, malformed facial features, waxy skin, plastic skin, over-smoothed skin, airbrushed skin, oversaturated colors, harsh HDR, unnatural lighting, artificial AI look, watermark, logo, text artifacts",
+      "server_url": "http://127.0.0.1:8086",
+      "auth_token": "",
+      "timeout_seconds": 300
+    }
+  },
+  "4": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": ["1", 0],
+      "shift": 3.1
+    }
+  },
+  "5": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 768,
+      "height": 768,
+      "batch_size": 1
+    }
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["4", 0],
+      "seed": 0,
+      "steps": 12,
+      "cfg": 4.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["3", 0],
+      "negative": ["3", 1],
+      "latent_image": ["5", 0],
+      "denoise": 1.0
+    }
+  },
+  "7": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["6", 0],
+      "vae": ["2", 0]
+    }
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "EmeryChat",
+      "images": ["7", 0]
+    }
+  }
+}

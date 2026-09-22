@@ -254,6 +254,19 @@ async def get_turn_context(
         if memories:
             sections.append(f"\n# Long-Term Persistent Memory\n{memories}")
 
+    # Skills are procedural memory, not user facts.  Retrieve only the small
+    # set relevant to this turn so the stable prompt prefix remains cacheable.
+    if not is_temporary_mode(session.chat_id, session.thread_id):
+        from emery.skills import format_relevant_skills, retrieve_relevant_skills
+        skills = format_relevant_skills(retrieve_relevant_skills(
+            str(user_query or ""),
+            user_id=None if session.is_group else user_id,
+            chat_id=session.chat_id,
+            include_content=False,
+        ))
+        if skills:
+            sections.append(f"\n{skills}")
+
     # Scratchpad contents are intentionally tool-only.  A recent-use reminder
     # preserves discoverability without copying working notes into every prompt.
     if not is_temporary_mode(session.chat_id, session.thread_id):

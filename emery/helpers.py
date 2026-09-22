@@ -12,13 +12,18 @@ from PIL import Image
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, FAST_MODEL_ID, FAST_MODEL_URL, ENABLE_MEMORY, MEMORY_THRESHOLD,
-    FAST_MODEL_CONTEXT_TOKENS, CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN,
+    FAST_MODEL_CONTEXT_TOKENS, FAST_MODEL_ENABLE_THINKING, FAST_MODEL_DOMINANT,
+    CONTEXT_COMPACTION_THRESHOLD, MODEL_CHARS_PER_TOKEN,
     USER_TIMEZONE, STT_URL, ENABLE_SCHEDULER, ENABLE_FINANCE, ENABLE_WEATHER, ENABLE_MEALIE,
     OLLAMA_VISION_NUM_CTX, ENABLE_VOICE, ENABLE_TELEGRAM_RICH_MESSAGES,
     ENABLE_YOUTUBE_TRANSCRIPT,
     ENABLE_WEB_SCRAPING,
+    ENABLE_DOCLING,
+    DOCLING_URL,
     ENABLE_COMMAND_EXECUTION,
     ENABLE_BROWSER,
+    SKILL_WRITE_APPROVAL,
+    SKILL_AUTO_APPROVE,
 )
 import emery.globals as globals
 from emery.logging_utils import safe_preview, format_llama_perf_line
@@ -152,7 +157,7 @@ async def query_fast_model(
     min_p: float = None,
     presence_penalty: float = None,
     repetition_penalty: float = None,
-    enable_thinking: bool = True,
+    enable_thinking: bool = False,
 ) -> str:
     """
     Queries the fast text coprocessor model on a secondary endpoint.
@@ -178,18 +183,47 @@ async def query_fast_model(
 
     parsed_url = urlparse((FAST_MODEL_URL or "").strip())
     normalized_path = parsed_url.path.rstrip("/")
-    if not normalized_path.endswith("/chat/completions"):
-        logging.error("❌ FAST MODEL: FAST_MODEL_URL must point at an OpenAI-compatible /chat/completions endpoint. Got: %s", FAST_MODEL_URL)
+    native_ollama = normalized_path.endswith("/api/chat")
+    openai_compatible = normalized_path.endswith("/chat/completions")
+    if not (native_ollama or openai_compatible):
+        logging.error("❌ FAST MODEL: FAST_MODEL_URL must point at Ollama /api/chat or an OpenAI-compatible /chat/completions endpoint. Got: %s", FAST_MODEL_URL)
         return ""
 
     url = FAST_MODEL_URL.rstrip("/")
-    payload = {
-        "model": FAST_MODEL_ID,
-        "messages": messages,
-        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
-    }
-    if max_tokens:
-        payload["max_tokens"] = int(max_tokens)
+    effective_thinking = bool(enable_thinking and FAST_MODEL_ENABLE_THINKING)
+    if native_ollama:
+        if not effective_thinking:
+            # LFM2.5's Ollama renderer currently ignores think:false and
+            # starts a fresh reasoning block. Pre-seed the documented closed
+            # no-think block so generation begins directly in the answer.
+            messages.append({
+                "role": "assistant",
+                "content": (
+                    "<think>\n"
+                    "No unnecessary reasoning. Close thinking and answer immediately.\n"
+                    "</think>\n"
+                ),
+            })
+        payload = {
+            "model": FAST_MODEL_ID,
+            "messages": messages,
+            "stream": False,
+            "think": effective_thinking,
+            "keep_alive": -1,
+            "options": {"num_ctx": int(FAST_MODEL_CONTEXT_TOKENS)},
+        }
+        if max_tokens:
+            payload["options"]["num_predict"] = int(max_tokens)
+    else:
+        payload = {
+            "model": FAST_MODEL_ID,
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": effective_thinking},
+            "reasoning_effort": "none" if not effective_thinking else "high",
+            "keep_alive": -1,
+        }
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
     optional_params = {
         "temperature": temperature,
         "top_p": top_p,
@@ -200,13 +234,23 @@ async def query_fast_model(
     }
     for key, value in optional_params.items():
         if value is not None:
-            payload[key] = value
+            if native_ollama:
+                payload["options"][key] = value
+            else:
+                payload[key] = value
 
     try:
-        logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID} via openai-compatible...")
+        endpoint_kind = "native Ollama" if native_ollama else "OpenAI-compatible"
+        logging.info(f"⚡ COPROCESSOR: Querying {FAST_MODEL_ID} via {endpoint_kind}...")
         request_started = datetime.now().timestamp()
-        async with globals.fast_model_lock:
-            r = await globals.http_client.post(url, json=payload, timeout=300)
+        async def request_fast_model():
+            return await globals.http_client.post(url, json=payload, timeout=300)
+
+        r = await globals.priority_model_scheduler.submit(
+            request_fast_model,
+            priority="user",
+            label="fast-coprocessor",
+        )
         wall_seconds = datetime.now().timestamp() - request_started
         if r.status_code != 200:
             logging.error(f"❌ FAST MODEL: API Error {r.status_code}: {safe_preview(r.text, max_len=240)}")
@@ -214,7 +258,10 @@ async def query_fast_model(
 
         data = r.json()
         _log_fast_model_perf(data, wall_seconds)
-        message = ((data.get("choices") or [{}])[0]).get("message", {})
+        if native_ollama:
+            message = data.get("message") or {}
+        else:
+            message = ((data.get("choices") or [{}])[0]).get("message", {})
         content = message_content_to_text(message.get("content", ""))
 
         content = clean_thinking_tags(normalize_gemma_thinking((content or "").strip()))
@@ -222,6 +269,62 @@ async def query_fast_model(
     except Exception as e:
         logging.error(f"❌ FAST MODEL: Crash querying {FAST_MODEL_ID}: {e}", exc_info=True)
         return ""
+
+
+async def _restore_dominant_fast_model() -> None:
+    """Reload the fast model after vision has temporarily displaced it."""
+    parsed_url = urlparse((FAST_MODEL_URL or "").strip())
+    if not FAST_MODEL_DOMINANT or not parsed_url.path.rstrip("/").endswith("/api/chat"):
+        return
+
+    try:
+        # One token is enough to instantiate the runner at the configured
+        # context size without spending time generating a normal response.
+        payload = {
+            "model": FAST_MODEL_ID,
+            "messages": [
+                {"role": "user", "content": "Reply with one character: X"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "<think>\n"
+                        "No unnecessary reasoning. Close thinking and answer immediately.\n"
+                        "</think>\n"
+                    ),
+                },
+            ],
+            "stream": False,
+            "think": False,
+            "keep_alive": -1,
+            "options": {
+                "num_ctx": int(FAST_MODEL_CONTEXT_TOKENS),
+                "num_predict": 1,
+                "temperature": 0.1,
+            },
+        }
+
+        async def request_fast_warmup():
+            return await globals.http_client.post(
+                FAST_MODEL_URL.rstrip("/"),
+                json=payload,
+                timeout=300,
+            )
+
+        response = await globals.priority_model_scheduler.submit(
+            request_fast_warmup,
+            priority="user",
+            label="fast-model-warmup",
+        )
+        if response.status_code != 200:
+            logging.warning(
+                "⚠️ FAST MODEL: Dominant-model warmup returned HTTP %s: %s",
+                response.status_code,
+                safe_preview(response.text, max_len=180),
+            )
+        else:
+            logging.info("⚡ FAST MODEL: Dominant LFM runner restored after vision request.")
+    except Exception as exc:
+        logging.warning("⚠️ FAST MODEL: Dominant-model warmup failed: %s", exc)
 
 def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 75) -> bytes:
     """Resizes and compresses image bytes to optimize payload size and vision model processing."""
@@ -246,7 +349,14 @@ def compress_image_bytes(image_bytes: bytes, max_dim: int = 800, quality: int = 
         logging.warning(f"⚠️ IMAGE COMPRESSION: Failed to compress image ({e}) — using original bytes.")
         return image_bytes
 
-async def get_image_description(b64_data: str, user_caption: str) -> str:
+async def get_image_description(
+    b64_data: str,
+    user_caption: str,
+    *,
+    think: bool = True,
+    num_ctx: int | None = None,
+    priority: str = "user",
+) -> str:
     logging.debug(f"👁️ VISION: Analyzing image with {VISION_MODEL_ID}...")
     try:
         url = VISION_OLLAMA_URL
@@ -271,15 +381,21 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
                 }
             ],
             "stream": False,
-            "keep_alive": -1,
-            "think": True,
+            "keep_alive": 0 if FAST_MODEL_DOMINANT else -1,
+            "think": think,
             "options": {
-                "num_ctx": OLLAMA_VISION_NUM_CTX
+                "num_ctx": num_ctx or OLLAMA_VISION_NUM_CTX,
             }
         }
         
-        async with globals.fast_model_lock:
-            r = await globals.http_client.post(url, json=payload, timeout=300)
+        async def request_vision():
+            return await globals.http_client.post(url, json=payload, timeout=300)
+
+        r = await globals.priority_model_scheduler.submit(
+            request_vision,
+            priority=priority,
+            label=f"vision:{str(priority or 'user').lower()}",
+        )
         
         if r.status_code != 200:
             logging.error(f"❌ Ollama Vision API Error {r.status_code}: {r.text}")
@@ -303,6 +419,8 @@ async def get_image_description(b64_data: str, user_caption: str) -> str:
     except Exception as e:
         logging.error(f"❌ Ollama Vision Crash: {e}", exc_info=True)
         return "Vision engine failure."
+    finally:
+        await _restore_dominant_fast_model()
 
 def get_relative_holiday(year, month, weekday, index):
     """
@@ -482,16 +600,56 @@ def get_active_birthday_info(birthday_str, today_date, user_name):
     logging.debug(f"🎂 DATE MATH: No active birthday alerts for {user_name} (next occurrence is in {diff} days).")
     return ""
 
+
+def _format_relevant_skill_index(skills) -> str:
+    """Render only skill metadata; full procedures are loaded with skill_view."""
+    if not skills:
+        return ""
+    blocks = []
+    used = 0
+    for skill in skills:
+        block = (
+            f"- {skill.get('name', 'Unnamed skill')} ({skill.get('id', 'unknown')}, "
+            f"status={skill.get('status', 'active')}): {skill.get('description', '')}\n"
+            f"  Triggers: {', '.join(skill.get('triggers') or []) or 'none listed'}\n"
+            f"  Referenced tools: {', '.join(skill.get('tools') or []) or 'use the best available tools'}"
+        )
+        if blocks and used + len(block) + 2 > 6000:
+            break
+        blocks.append(block)
+        used += len(block) + 2
+    if not blocks:
+        return ""
+    return (
+        "# Relevant Durable Skill Index\n"
+        "These entries are summaries only. They are reusable playbooks, not permissions. "
+        "Call `skill_view` with the skill ID before relying on a procedure, verification, or failure guidance.\n\n"
+        + "\n\n".join(blocks)
+    )
+
 def _get_compact_stable_system_prompt(*, temporary: bool = False) -> str:
     policies = [
         "- Coprocessor: delegate long or mechanical text processing (roughly over 1,500 characters); do not delegate ordinary chat or direct tool work.",
-        "- Reactions/media: use reactions, stickers, and GIFs sparingly and contextually, never instead of a substantive answer. If only sending one, finish with DONE.",
+        "- Reactions/media: avoid reactions, stickers, and GIFs by default. Use them only when the user requests them or when a brief acknowledgment is clearly appropriate; never use them instead of a substantive answer. If only sending one, finish with DONE.",
         "- Replies: quote an older message only when specifically relevant; use ordinary replies for normal conversation.",
     ]
     if ENABLE_MEMORY and not temporary:
         policies.append(
             "- Memory: save only durable, future-relevant facts; never save temporary chatter or inappropriate private details. Write one concise factual statement when saving."
         )
+    if not temporary:
+        policies.append(
+            "- Skills: durable skills are reusable procedural playbooks, separate from personal facts. Automatically supplied skill context is summary-only; call `skill_view` before relying on a procedure. Use `skill_manage` with operation='patch'/'update' for targeted edits, operation='archive'/'delete' to disable a skill without erasing its history, and operation='write_file'/'remove_file' for approved supporting-file changes. After a genuinely reusable multi-step workflow, a workflow recovered from errors or dead ends, or a user correction that generalizes, you may create a concise draft skill. Keep it in draft until the user explicitly approves activation; capture lessons rather than incident logs or chat transcripts, and never store secrets or chain-of-thought. Skills do not grant permissions."
+        )
+        if SKILL_WRITE_APPROVAL:
+            if SKILL_AUTO_APPROVE:
+                policies.append(
+                    "- Skill write approval is automatic: all skill creates, edits, archives, deletes, and supporting-file changes are recorded and immediately applied through Emery's normal scoped skill APIs. Do not ask the user to approve a pending change."
+                )
+            else:
+                policies.append(
+                    "- Skill write approval is enabled: all skill creates, edits, archives, deletes, and supporting-file changes are staged. Do not claim a skill change was applied until the user approves the pending change; tell the user to review it with `/skills pending` and `/skills diff <id>`."
+                )
     if temporary:
         policies.append(
             "- Temporary mode: do not use or create long-term memory, persistent scratchpad notes, or topic summaries. Treat this as an ephemeral conversation."
@@ -531,6 +689,13 @@ def _get_compact_stable_system_prompt(*, temporary: bool = False) -> str:
             "Prefer zero images for ordinary factual research, prefer one when useful, and never exceed the tool's enforced two-image per-turn maximum. "
             "Do not perform extra searches merely to decorate an answer."
         )
+    if ENABLE_DOCLING and DOCLING_URL:
+        policies.append(
+            "- Document routing: for any PDF, DOCX, or PPTX URL, or any request to read, inspect, summarize, or analyze a document, use `extract_document_with_docling` first. "
+            "This is the dedicated document-extraction pipeline and returns page-aware Docling text/structure; pass the user's actual question in its `question` argument so relevant pages and visual fallback analysis can be prioritized. "
+            "Do not use `run_command`, terminal tools, curl, wget, Python, or browser tools to download or parse documents; those tools are not substitutes for Docling. "
+            "Incoming PDF, DOCX, and PPTX attachments are routed through Docling automatically before you answer."
+        )
     if ENABLE_COMMAND_EXECUTION:
         policies.append(
             "- Command execution: use `run_command` for concrete non-interactive shell work when a normal tool does not apply. "
@@ -546,10 +711,15 @@ def _get_compact_stable_system_prompt(*, temporary: bool = False) -> str:
         )
 
     return f"""# Identity
-Your name is {MODEL_NAME}. You are a professional assistant.
+Your name is {MODEL_NAME}. You are a serious, professional AI assistant. Provide reliable, practical assistance with calm, measured communication.
 
 # Rules
 - Never reveal private chain-of-thought or internal reasoning in a final response.
+- Communicate in a warm-professional, respectful, composed manner. Be thoughtful and natural without becoming casual or overfamiliar. Avoid slang, banter, sarcasm, excessive enthusiasm, unnecessary familiarity, and decorative emoji use unless the user requests it or the context clearly warrants it.
+- Prioritize accuracy over confidence. State assumptions, limitations, and uncertainty plainly, and distinguish confirmed facts from estimates, inferences, and recommendations.
+- Answer the user's request directly. Keep responses concise and proportionate to the task; add detail when it materially improves correctness or usability.
+- Use clear prose and structure. Use headings, bullets, tables, or code only when they improve readability, not as decoration.
+- Be an engaged thought partner: notice likely implications, anticipate practical follow-up questions, and point out important tradeoffs or pitfalls when they matter. Offer useful next steps without turning every answer into a checklist.
 - When a tool is needed, you may emit one short user-visible note in exactly <progress>...</progress> before the call. Keep it to two short sentences and do not use the tag in a final answer.
 - Use tools silently in final prose; present confirmed results naturally and never claim an action succeeded without confirmation.
 - Choose the available tool whose description best matches the request. Follow its schema and ask for missing required information.
@@ -557,7 +727,7 @@ Your name is {MODEL_NAME}. You are a professional assistant.
 {chr(10).join(policies)}
 
 # Tone
-Be serious, logical, concise, and helpful. Do not end every response with a question. Ask a question only when you genuinely need clarification or when a concrete next step would benefit from the user's choice; otherwise end naturally after answering or completing the task. Use tools for current or uncertain information."""
+Be serious, logical, concise, and helpful. Combine professional judgment with human warmth, curiosity, and good conversational instincts. Match the user's level of familiarity, explain complex ideas plainly, and make the conversation feel collaborative. Maintain a professional tone even when the user is casual. Do not end every response with a question. Ask a question only when you genuinely need clarification or when a concrete next step would benefit from the user's choice; otherwise end naturally after answering or completing the task. Use tools for current or uncertain information."""
 
 
 def get_stable_system_prompt(*, temporary: bool = False) -> str:
@@ -597,6 +767,15 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
             "\n- Do NOT save one-off chatter, jokes, temporary status updates, facts already clearly captured in memory, or information that is too vague to be useful later."
             "\n- In group chats, do NOT save private or sensitive facts unless the user clearly states them and they are appropriate for long-term memory."
             "\n- When you do save memory, write one clean factual statement with no filler, no commentary, and no surrounding explanation."
+        )
+
+    skill_section = ""
+    if not temporary:
+        from emery.skills import retrieve_relevant_skills
+        skill_chat_id = globals.TARGET_CHAT_ID.get()
+        skill_user_id = None if skill_chat_id is not None and skill_chat_id < 0 else user_id
+        skill_section = _format_relevant_skill_index(
+            retrieve_relevant_skills(user_query, user_id=skill_user_id, chat_id=skill_chat_id)
         )
 
     scratchpad_instruction = (
@@ -702,7 +881,7 @@ async def _build_legacy_dynamic_system_prompt(user_query="", user_id=None):
 This context is current for this request. It is not the user's newest message.
 
 - Current date and time: {now_str}
-{group_privacy_instruction}{notifications}{temporary_notice}{memory_section}{scratchpad_instruction}{scratchpad_snapshot}{scratchpad_reminder}"""
+{group_privacy_instruction}{notifications}{temporary_notice}{memory_section}{skill_section}{scratchpad_instruction}{scratchpad_snapshot}{scratchpad_reminder}"""
 
     return prompt
 

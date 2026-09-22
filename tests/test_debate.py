@@ -123,6 +123,24 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
         debate.DEBATE_COMMIT_LOCKS.clear()
         globals.active_foreground_loops.clear()
 
+    def test_model_values_are_normalized_to_plain_text(self):
+        self.assertEqual(
+            debate._model_value_to_text({"opening_thesis": {"text": "A plain thesis."}}),
+            "A plain thesis.",
+        )
+        self.assertEqual(
+            debate._model_value_to_text({"question": "What matters?"}),
+            "What matters?",
+        )
+        self.assertEqual(
+            debate._model_value_to_text(["first", {"text": "second"}]),
+            "first\nsecond",
+        )
+        self.assertEqual(
+            debate._extract_query_list([{"query": "precise search terms"}]),
+            ["precise search terms"],
+        )
+
     async def test_debate_command_requires_topic(self):
         update = FakeUpdate(text="/debate")
         await debate.handle_debate_command(update, FakeContext(args=[]))
@@ -520,27 +538,18 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             message_thread_id=None,
             user_id=456,
         )
-        original_query = debate._query_clerk_model
-
-        async def fake_query(*args, **kwargs):
-            return '["irs tax incidence study", "Tax Foundation flat tax analysis"]'
-
-        try:
-            debate._query_clerk_model = fake_query
-            queries = await debate._plan_clerk_queries(
-                session,
-                "pro",
-                "round_1",
-                "Who bears the burden?",
-                2,
-                seed_queries=["tax incidence distribution"],
-            )
-        finally:
-            debate._query_clerk_model = original_query
+        queries = await debate._plan_clerk_queries(
+            session,
+            "pro",
+            "round_1",
+            "Who bears the burden?",
+            2,
+            seed_queries=["tax incidence distribution"],
+        )
 
         self.assertEqual(
             queries,
-            ["tax incidence distribution", "irs tax incidence study"],
+            ["tax incidence distribution"],
         )
 
     async def test_refine_side_search_queries_accepts_top_level_json_list(self):
@@ -552,13 +561,13 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
             user_id=456,
             positions={"pro": "Support progressive taxation"},
         )
-        original_query = debate._query_main_model
+        original_query = debate._query_clerk_model
 
         async def fake_query(*args, **kwargs):
             return '["progressive tax revenue effects", "CBO tax distribution report"]'
 
         try:
-            debate._query_main_model = fake_query
+            debate._query_clerk_model = fake_query
             queries = await debate._refine_side_search_queries(
                 session,
                 "pro",
@@ -567,7 +576,7 @@ class TestDebateMode(unittest.IsolatedAsyncioTestCase):
                 2,
             )
         finally:
-            debate._query_main_model = original_query
+            debate._query_clerk_model = original_query
 
         self.assertEqual(
             queries,

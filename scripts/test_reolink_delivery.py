@@ -17,6 +17,16 @@ class _RecordingBot:
 
 
 class ReolinkDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_alert_caption_is_bounded_and_html_safe(self):
+        caption = tools._build_reolink_alert_caption(
+            "frontdoor",
+            "<person> & " + ("very detailed report " * 200),
+        )
+
+        self.assertLessEqual(len(caption), tools.REOLINK_TELEGRAM_CAPTION_LIMIT)
+        self.assertIn("&lt;person&gt; &amp;", caption)
+        self.assertTrue(caption.endswith("…</i>"))
+
     async def test_alert_photo_uses_media_timeouts_and_preserves_arguments(self):
         original_bot = globals.application_bot
         bot = _RecordingBot()

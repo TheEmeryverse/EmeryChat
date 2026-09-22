@@ -1,7 +1,10 @@
 from collections import deque
 import contextvars
 import asyncio
+import heapq
+import itertools
 import logging
+import time
 
 import httpx
 
@@ -34,6 +37,7 @@ chat_reply_targets = {}       # Tracks custom reply message ID per chat: chat_id
 current_user_id = contextvars.ContextVar("current_user_id", default=None)
 chat_debounce_tasks = {}  # Tracks active debounce timers: chat_id -> asyncio.Task
 active_turns = {}  # Tracks active normal chat turns: (chat_id, thread_id) -> ActiveTurnState
+background_image_tasks = set()
 active_foreground_loops = {}  # Tracks foreground agent loops: loop_id -> metadata
 # One ordered three-message status stack per chat/thread while a turn runs.
 # Its messages are edited in place and deleted after the final response.
@@ -47,6 +51,70 @@ persistent_status_controllers = {}
 main_model_lock = asyncio.Semaphore(1)
 fast_model_lock = asyncio.Semaphore(1)
 reolink_snapshot_lock = asyncio.Lock()
+
+
+class PriorityModelScheduler:
+    """Serialize local-model work while letting foreground requests jump ahead."""
+
+    _PRIORITIES = {"user": 0, "background": 10}
+
+    def __init__(self):
+        self._condition = asyncio.Condition()
+        self._queue = []
+        self._sequence = itertools.count()
+        self._worker = None
+
+    async def submit(self, operation, *, priority: str = "user", label: str = "model"):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        enqueued_at = time.perf_counter()
+        priority_value = self._PRIORITIES.get(str(priority or "user").lower(), 0)
+        async with self._condition:
+            heapq.heappush(
+                self._queue,
+                (priority_value, next(self._sequence), future, operation, label, enqueued_at),
+            )
+            if self._worker is None or self._worker.done():
+                self._worker = asyncio.create_task(self._drain())
+        try:
+            return await future
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+
+    async def _drain(self):
+        while True:
+            async with self._condition:
+                item = None
+                while self._queue:
+                    candidate = heapq.heappop(self._queue)
+                    if not candidate[2].cancelled():
+                        item = candidate
+                        break
+                if item is None:
+                    self._worker = None
+                    return
+
+            _, _, future, operation, label, enqueued_at = item
+            queue_wait = time.perf_counter() - enqueued_at
+            logging.info(
+                "🧠 MODEL QUEUE: starting label=%s queue_wait=%.2fs priority=%s pending=%s",
+                label,
+                queue_wait,
+                "user" if item[0] == 0 else "background",
+                len(self._queue),
+            )
+            try:
+                result = await operation()
+            except Exception as exc:
+                if not future.cancelled():
+                    future.set_exception(exc)
+            else:
+                if not future.cancelled():
+                    future.set_result(result)
+
+
+priority_model_scheduler = PriorityModelScheduler()
 
 learned_stickers = {}  # Tracks learned sticker file IDs: emoji -> file_id
 

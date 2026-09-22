@@ -3,6 +3,7 @@ httpx
 requests
 beautifulsoup4
 Pillow
+PyMuPDF>=1.24,<2
 feedparser
 psutil
 pytz
