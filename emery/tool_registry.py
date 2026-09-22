@@ -1161,7 +1161,7 @@ if is_enabled("ENABLE_IMAGEGEN"):
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "Create a new image from the user's visual request. Use only when the user asks to create, draw, generate, illustrate, or design an image. Do not use for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
+            "description": "This is the ONLY tool for generating, creating, drawing, illustrating, or designing a new image. When the user asks for a new image, use this tool and do not use terminal, browser, web-search, research-image, or any other tool instead. Do not use it for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
             "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}}, "required": ["prompt"]}
         }
     })
@@ -1791,6 +1791,36 @@ tools_schema.append({
         }
     }
 })
+
+# Apply one explicit routing boundary to every terminal schema, including
+# specialized session/job helpers whose individual descriptions focus on their
+# mechanics rather than when they are appropriate.
+_TERMINAL_TOOL_NAMES = {
+    "run_command",
+    "terminal_exec",
+    "terminal_session_start",
+    "terminal_session_write",
+    "terminal_session_read",
+    "terminal_session_close",
+    "terminal_job_start",
+    "terminal_job_status",
+    "terminal_job_read",
+    "terminal_job_wait",
+    "terminal_job_cancel",
+    "terminal_list_sessions",
+    "terminal_list_jobs",
+}
+_TERMINAL_ROUTING = (
+    "TERMINAL ROUTING: Use this tool only when the user is asking for programming "
+    "or development work, inspecting or editing local files, or a task that "
+    "genuinely requires shell/OS access. Do not use terminal tools for general "
+    "questions, ordinary conversation, web research, calculations, image "
+    "generation, document extraction, or work handled by a dedicated tool. "
+)
+for _schema in tools_schema:
+    _function = _schema.get("function") if isinstance(_schema, dict) else None
+    if isinstance(_function, dict) and _function.get("name") in _TERMINAL_TOOL_NAMES:
+        _function["description"] = _TERMINAL_ROUTING + str(_function.get("description") or "")
 
 # Canonical discovery metadata is layered over (and never replaces) the full
 # internal registry above.  Importing this at the end avoids a circular import

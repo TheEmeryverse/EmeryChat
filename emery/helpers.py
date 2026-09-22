@@ -698,7 +698,7 @@ def _get_compact_stable_system_prompt(*, temporary: bool = False) -> str:
         )
     if ENABLE_COMMAND_EXECUTION:
         policies.append(
-            "- Command execution: use `run_command` for concrete non-interactive shell work when a normal tool does not apply. "
+            "- Terminal routing: use `run_command` or another terminal tool only when the user is asking for programming/development, inspecting or editing local files, or a task that genuinely requires shell/OS access. Do not use terminal tools for general questions, ordinary conversation, web research, calculations, image generation, document extraction, or work handled by a dedicated tool. "
             "In production, commands use the configured host runner and execute as the host service user, not as the Emery container user. "
             "Give it the exact command, use a specific working directory when needed, respect its timeout, and for commands that may be dangerous include a short honest sentence in `justification` explaining why the command is needed. "
             "Treat blocked/destructive commands as not executed. "
