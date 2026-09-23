@@ -111,12 +111,10 @@ def _prepare_workflow(
             inputs["height"] = profile.height
             if input_image_size:
                 source_width, source_height = input_image_size
-                ratio = source_width / source_height
-                total_pixels_side = 1024
-                width = round((total_pixels_side**2 * ratio) ** 0.5 / 32) * 32
-                height = round((total_pixels_side**2 / ratio) ** 0.5 / 32) * 32
-                inputs["width"] = max(32, width)
-                inputs["height"] = max(32, height)
+                orientation = "landscape" if source_width >= source_height else "portrait"
+                edit_profile = get_image_profile("ultra", orientation=orientation)
+                inputs["width"] = edit_profile.width
+                inputs["height"] = edit_profile.height
         if class_type == "KSampler":
             inputs["steps"] = profile.steps
         if "filename_prefix" in inputs:
@@ -212,6 +210,7 @@ async def generate_comfyui_images(
         seed,
     )
     prompt_id = None
+    runtime_touched = False
     images: list[tuple[bytes, str]] = []
     try:
         input_image_filename = None
@@ -222,6 +221,7 @@ async def generate_comfyui_images(
             with Image.open(io.BytesIO(input_image_bytes)) as source_image:
                 input_image_size = source_image.size
             filename = f"EmeryEdit_{uuid.uuid4().hex}.jpg"
+            runtime_touched = True
             response = await globals.http_client.post(
                 f"{base_url}/upload/image",
                 headers=_headers(),
@@ -229,6 +229,10 @@ async def generate_comfyui_images(
                 files={"image": (filename, input_image_bytes, "image/jpeg")},
                 timeout=COMFYUI_TIMEOUT_SECONDS + 60,
             )
+            if response.status_code >= 400:
+                # In particular, a 503 means another request owns the broker.
+                # Do not release its ComfyUI process as cleanup for our rejection.
+                runtime_touched = False
             uploaded = await _json_response(response, "input image upload")
             input_image_filename = uploaded.get("name")
             if not input_image_filename:
@@ -251,12 +255,17 @@ async def generate_comfyui_images(
                 batch_size,
                 current_seed,
             )
+            runtime_touched = True
             response = await globals.http_client.post(
                 f"{base_url}/prompt",
                 headers=_headers(),
                 json={"prompt": workflow, "client_id": client_id},
                 timeout=30,
             )
+            if response.status_code >= 400:
+                # The broker already tears down backend prompt errors; a 503
+                # can instead mean another client's prompt is active.
+                runtime_touched = False
             submitted = await _json_response(response, "prompt submission")
             prompt_id = submitted.get("prompt_id")
             if not prompt_id:
@@ -374,7 +383,8 @@ async def generate_comfyui_images(
         )
         return images
     except Exception:
-        await _release_runtime(base_url)
+        if runtime_touched:
+            await _release_runtime(base_url)
         log.exception(
             "IMAGE: Qwen batch failed endpoint=%s prompt_id=%s completed=%d/%d elapsed_seconds=%.3f",
             endpoint,

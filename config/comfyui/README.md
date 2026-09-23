@@ -19,7 +19,9 @@ adds a `LoadImage` node, and connects it to `RemoteQwenImage21TextEncode`. The
 custom node must support its optional `image` and `vae` inputs, and the Qwen
 VAE must be connected so the node can attach the reference latent to its
 conditioning. The runtime removes the temporary uploaded source image after
-the edit finishes or fails.
+the edit finishes or fails. Edit outputs use 1920x1080 for landscape sources
+and 1080x1920 for portrait sources; the reference is resized to roughly the
+same pixel area while preserving its original aspect ratio for conditioning.
 
 EmeryChat consumes this file inside the container at:
 
