@@ -17,6 +17,7 @@ from emery.bot import (
     handle_wipe_command,
     handle_temporary_command,
     handle_image_command,
+    handle_image_edit_command,
     handle_message,
     handle_reaction,
     bot_post_init,
@@ -94,6 +95,14 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("wipe", handle_wipe_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("temporary", handle_temporary_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("image", handle_image_command, filters=HUMAN_SENDER))
+    application.add_handler(
+        MessageHandler(
+            filters.PHOTO
+            & filters.CaptionRegex(r"(?i)^/image-edit(?:@\w+)?(?:\s|$)")
+            & HUMAN_SENDER,
+            handle_image_edit_command,
+        )
+    )
     application.add_handler(CommandHandler("approve", handle_command_approval_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("deny", handle_command_approval_command, filters=HUMAN_SENDER))
     application.add_handler(CommandHandler("expert", handle_expert_command, filters=HUMAN_SENDER))

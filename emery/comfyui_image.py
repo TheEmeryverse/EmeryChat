@@ -1,8 +1,8 @@
 """HTTP client for ComfyUI API-format image workflows.
 
 The workflow is supplied by configuration so model-specific sampler/VAE
-settings stay on the Mac. For the distributed Qwen setup it must contain the
-RemoteQwenImage21TextEncode node.
+settings stay with the B580 ComfyUI runtime. For the Qwen setup it must
+contain the RemoteQwenImage21TextEncode node.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import logging
 import random
 import time
 import uuid
+import io
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -78,9 +79,18 @@ def _prepare_workflow(
     seed: int | None = None,
     quality_profile: str = DEFAULT_IMAGE_PROFILE,
     orientation: str | None = None,
+    input_image_filename: str | None = None,
+    input_image_size: tuple[int, int] | None = None,
 ) -> dict[str, dict[str, Any]]:
     workflow = _load_workflow()
     profile = get_image_profile(quality_profile, orientation=orientation)
+    image_node_id = str(max((int(key) for key in workflow if str(key).isdigit()), default=0) + 1)
+    vae_node_id = next(
+        (key for key, node in workflow.items() if node.get("class_type") == "VAELoader"),
+        None,
+    )
+    if input_image_filename and vae_node_id is None:
+        raise RuntimeError("ComfyUI image-edit workflow must contain a VAELoader node")
     remote_nodes = []
     generated_seed = seed if seed is not None else random.SystemRandom().randrange(2**63)
 
@@ -93,9 +103,20 @@ def _prepare_workflow(
             inputs.setdefault("negative_prompt", "")
             if QWEN_ENCODER_URL:
                 inputs["server_url"] = QWEN_ENCODER_URL
+            if input_image_filename:
+                inputs["image"] = [image_node_id, 0]
+                inputs["vae"] = [vae_node_id, 0]
         if class_type == "EmptySD3LatentImage":
             inputs["width"] = profile.width
             inputs["height"] = profile.height
+            if input_image_size:
+                source_width, source_height = input_image_size
+                ratio = source_width / source_height
+                total_pixels_side = 1024
+                width = round((total_pixels_side**2 * ratio) ** 0.5 / 32) * 32
+                height = round((total_pixels_side**2 / ratio) ** 0.5 / 32) * 32
+                inputs["width"] = max(32, width)
+                inputs["height"] = max(32, height)
         if class_type == "KSampler":
             inputs["steps"] = profile.steps
         if "filename_prefix" in inputs:
@@ -110,6 +131,11 @@ def _prepare_workflow(
             "ComfyUI workflow must contain RemoteQwenImage21TextEncode; "
             "a local Qwen text encoder would violate the distributed setup"
         )
+    if input_image_filename:
+        workflow[image_node_id] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": input_image_filename},
+        }
     return workflow
 
 
@@ -159,6 +185,7 @@ async def generate_comfyui_images(
     keep_runtime_alive: bool = False,
     quality_profile: str = DEFAULT_IMAGE_PROFILE,
     orientation: str | None = None,
+    input_image_bytes: bytes | None = None,
 ) -> list[tuple[bytes, str]]:
     """Generate several images in one broker lifecycle and return all images.
 
@@ -187,6 +214,26 @@ async def generate_comfyui_images(
     prompt_id = None
     images: list[tuple[bytes, str]] = []
     try:
+        input_image_filename = None
+        input_image_size = None
+        if input_image_bytes is not None:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(input_image_bytes)) as source_image:
+                input_image_size = source_image.size
+            filename = f"EmeryEdit_{uuid.uuid4().hex}.jpg"
+            response = await globals.http_client.post(
+                f"{base_url}/upload/image",
+                headers=_headers(),
+                data={"type": "input", "overwrite": "true"},
+                files={"image": (filename, input_image_bytes, "image/jpeg")},
+                timeout=COMFYUI_TIMEOUT_SECONDS + 60,
+            )
+            uploaded = await _json_response(response, "input image upload")
+            input_image_filename = uploaded.get("name")
+            if not input_image_filename:
+                raise RuntimeError(f"ComfyUI did not return an uploaded image name: {uploaded}")
+
         for image_index in range(batch_size):
             current_seed = None if seed is None else seed + image_index
             workflow = _prepare_workflow(
@@ -194,6 +241,8 @@ async def generate_comfyui_images(
                 seed=current_seed,
                 quality_profile=profile.name,
                 orientation=orientation,
+                input_image_filename=input_image_filename,
+                input_image_size=input_image_size,
             )
             prompt_id = None
             log.info(

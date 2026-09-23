@@ -445,6 +445,7 @@ def _help_text() -> str:
         "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
         "/image ultra &lt;portrait|landscape&gt; &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
+        "/image-edit &lt;instructions&gt; - Attach a photo to the same Telegram message and put the command plus edit instructions in its caption.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -631,6 +632,59 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as exc:
         logging.error("❌ DIRECT IMAGE: generation failed for chat_id=%s: %s", chat_id, exc, exc_info=True)
         await update.message.reply_text(f"Direct image generation failed: {safe_preview(str(exc), max_len=500)}")
+
+
+async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit a Telegram photo with /image-edit instructions in its caption."""
+    if not is_user_allowed(update) or not update.message:
+        return
+
+    message = update.message
+    command_text = message.caption or ""
+    match = re.match(r"^\s*/image-edit(?:@\w+)?(?:\s+([\s\S]*))?\s*$", command_text, flags=re.IGNORECASE)
+    if not match:
+        return
+    prompt = (match.group(1) or "").strip()
+    if not message.photo:
+        await message.reply_text("Attach a photo to the same message as /image-edit and its instructions.")
+        return
+    if not prompt:
+        await message.reply_text("Add edit instructions after /image-edit.")
+        return
+
+    try:
+        photo_file = await message.photo[-1].get_file()
+        photo_bytes = bytes(await photo_file.download_as_bytearray())
+        chat_id = update.effective_chat.id
+        thread_id = normalize_message_thread_id(
+            chat_id,
+            message.message_thread_id,
+        )
+        await context.bot.send_chat_action(
+            chat_id=chat_id,
+            action="upload_photo",
+            message_thread_id=thread_id,
+        )
+        queue_image_generation(
+            prompt,
+            chat_id,
+            thread_id,
+            batch_size=1,
+            quality_profile=DIRECT_IMAGE_DEFAULT_PROFILE,
+            input_image_bytes=photo_bytes,
+            bot=context.bot,
+            reply_to_message_id=message.message_id,
+            caption_prefix="Edited image\n",
+        )
+        await message.reply_text("Image edit queued with Qwen Image.")
+        logging.info(
+            "🖼️ IMAGE EDIT: queued for chat_id=%s source_message_id=%s.",
+            chat_id,
+            message.message_id,
+        )
+    except Exception as exc:
+        logging.error("❌ IMAGE EDIT: request failed for chat_id=%s: %s", update.effective_chat.id, exc, exc_info=True)
+        await message.reply_text(f"Image edit could not be queued: {safe_preview(str(exc), max_len=400)}")
 
 
 async def handle_clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

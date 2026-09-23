@@ -528,6 +528,7 @@ async def _generate_image_bytes(
     keep_runtime_alive: bool = False,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     orientation: str | None = None,
+    input_image_bytes: bytes | None = None,
 ) -> list[bytes]:
     """Generate image bytes without tying up Emery's foreground turn."""
     if IMAGE_GENERATION_BACKEND == "comfyui":
@@ -539,8 +540,12 @@ async def _generate_image_bytes(
             keep_runtime_alive=keep_runtime_alive,
             quality_profile=quality_profile,
             orientation=orientation,
+            input_image_bytes=input_image_bytes,
         )
         return [image_bytes for image_bytes, _mime_type in generated]
+
+    if input_image_bytes is not None:
+        raise RuntimeError("Image editing requires the ComfyUI Qwen Image backend.")
 
     images = []
     for _ in range(batch_size):
@@ -579,6 +584,7 @@ async def _generate_and_deliver_image(
     batch_size: int = 1,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     orientation: str | None = None,
+    input_image_bytes: bytes | None = None,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
@@ -634,6 +640,7 @@ async def _generate_and_deliver_image(
             keep_runtime_alive=keep_runtime_alive,
             quality_profile=quality_profile,
             orientation=orientation,
+            input_image_bytes=input_image_bytes,
         )
         # Keep a fallback for callers that use this worker without a callback.
         if not sent_messages:
@@ -700,6 +707,7 @@ async def _run_image_queue(state) -> None:
                     batch_size=job.batch_size,
                     quality_profile=job.quality_profile,
                     orientation=job.orientation,
+                    input_image_bytes=job.input_image_bytes,
                     image_state=state,
                     bot=job.bot,
                     reply_to_message_id=job.reply_to_message_id,
@@ -727,6 +735,7 @@ def queue_image_generation(
     batch_size: int = 1,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     orientation: str | None = None,
+    input_image_bytes: bytes | None = None,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
@@ -735,6 +744,8 @@ def queue_image_generation(
     if not isinstance(batch_size, int) or isinstance(batch_size, bool):
         raise ValueError("batch_size must be an integer")
     profile = get_image_profile(quality_profile, orientation=orientation)
+    if input_image_bytes is not None and IMAGE_GENERATION_BACKEND != "comfyui":
+        raise ValueError("Image editing requires the ComfyUI Qwen Image backend")
     batch_limit = image_profile_batch_limit(profile.name, IMAGE_MAX_BATCH_SIZE)
     if not 1 <= batch_size <= batch_limit:
         raise ValueError(f"batch_size must be between 1 and {batch_limit} for the {profile.name} profile")
@@ -756,6 +767,7 @@ def queue_image_generation(
             bot=bot,
             quality_profile=profile.name,
             orientation=orientation,
+            input_image_bytes=input_image_bytes,
             reply_to_message_id=reply_to_message_id,
             caption_prefix=caption_prefix,
         )

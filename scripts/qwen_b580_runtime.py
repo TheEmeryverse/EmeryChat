@@ -8,7 +8,7 @@ fails/idles), ComfyUI is stopped and Ornith is restored before the broker
 returns to its idle state.
 
 The broker intentionally supports only the small ComfyUI API surface used by
-EmeryChat: /prompt, /history/<id>, /view, /system_stats, and /health.
+EmeryChat: /upload/image, /prompt, /history/<id>, /view, /system_stats, and /health.
 """
 
 from __future__ import annotations
@@ -82,10 +82,16 @@ def _ornith_active() -> bool:
     return result.returncode == 0
 
 
-def _urlopen(method: str, url: str, body: bytes | None = None, timeout: float = HTTP_TIMEOUT_SECONDS):
+def _urlopen(
+    method: str,
+    url: str,
+    body: bytes | None = None,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
+    content_type: str | None = None,
+):
     request = Request(url, data=body, method=method)
     if body is not None:
-        request.add_header("Content-Type", "application/json")
+        request.add_header("Content-Type", content_type or "application/json")
     return urlopen(request, timeout=timeout)
 
 
@@ -259,6 +265,7 @@ class Runtime:
         self.stopping = False
         self.progress_watcher: _ProgressWatcher | None = None
         self.progress: dict[str, Any] = {}
+        self.uploaded_image: dict[str, str] | None = None
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -506,6 +513,7 @@ class Runtime:
                 reason,
                 f"{elapsed:.3f}" if elapsed is not None else "unknown",
             )
+            self._cleanup_uploaded_image_locked()
             self._stop_comfy_locked()
             self._restore_ornith_locked()
         finally:
@@ -516,12 +524,91 @@ class Runtime:
             self.last_activity = time.monotonic()
             self.stopping = False
 
-    def _proxy(self, method: str, path: str, body: bytes | None = None):
+    def _cleanup_uploaded_image_locked(self) -> None:
+        uploaded = self.uploaded_image
+        self.uploaded_image = None
+        if not uploaded:
+            return
+
+        asset_id = uploaded.get("asset_id")
+        if asset_id and self.process is not None and self.process.poll() is None:
+            status, _, _ = self._proxy("DELETE", f"/api/assets/{asset_id}")
+            if status >= 400 and status != HTTPStatus.NOT_FOUND:
+                log.warning("Unable to remove temporary Qwen edit asset reference (HTTP %d)", status)
+
+        input_root = (BASE_DIR / "input").resolve()
+        candidate = (input_root / uploaded.get("subfolder", "") / uploaded["name"]).resolve()
+        if input_root not in candidate.parents:
+            log.warning("Refusing to remove Qwen edit input outside ComfyUI input directory")
+            return
         try:
-            with _urlopen(method, f"{BACKEND_URL}{path}", body=body) as response:
+            candidate.unlink(missing_ok=True)
+            log.info("Removed temporary Qwen edit input after generation")
+        except OSError:
+            log.warning("Could not remove temporary Qwen edit input", exc_info=True)
+
+    def _proxy(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        content_type: str | None = None,
+    ):
+        try:
+            with _urlopen(
+                method,
+                f"{BACKEND_URL}{path}",
+                body=body,
+                content_type=content_type,
+            ) as response:
                 return response.status, dict(response.headers), response.read()
         except HTTPError as exc:
             return exc.code, dict(exc.headers), exc.read()
+
+    def upload_image(self, body: bytes, content_type: str):
+        with self.lock:
+            if self.active_prompt_id is not None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, {}, b'{"error":"image runtime is busy"}'
+            if not content_type.lower().startswith("multipart/form-data;"):
+                return HTTPStatus.BAD_REQUEST, {}, b'{"error":"multipart image upload required"}'
+            if self.request_started_mono is None:
+                self.request_started_mono = time.monotonic()
+            try:
+                self._start_locked()
+                status, headers, response_body = self._proxy(
+                    "POST", "/upload/image", body, content_type=content_type
+                )
+                if status >= 400:
+                    self._teardown_locked(f"backend image upload HTTP {status}")
+                    return status, headers, response_body
+                try:
+                    upload_result = json.loads(response_body)
+                    name = upload_result.get("name")
+                    subfolder = upload_result.get("subfolder", "")
+                    if not isinstance(name, str) or Path(name).name != name:
+                        raise ValueError("ComfyUI returned an invalid uploaded image name")
+                    if not isinstance(subfolder, str) or Path(subfolder).is_absolute() or ".." in Path(subfolder).parts:
+                        raise ValueError("ComfyUI returned an invalid uploaded image subfolder")
+                    asset = upload_result.get("asset")
+                    asset_id = asset.get("id") if isinstance(asset, dict) else None
+                    self.uploaded_image = {
+                        "name": name,
+                        "subfolder": subfolder,
+                        "asset_id": str(asset_id) if asset_id else "",
+                    }
+                except (TypeError, ValueError) as exc:
+                    self._teardown_locked(f"invalid image upload response: {exc}")
+                    return HTTPStatus.BAD_GATEWAY, {}, json.dumps({"error": str(exc)}).encode()
+                self.last_activity = time.monotonic()
+                log.info("Accepted ComfyUI source-image upload (%d bytes)", len(body))
+                return status, headers, response_body
+            except Exception as exc:
+                log.exception("Unable to start ComfyUI or upload source image")
+                try:
+                    self._teardown_locked(f"image upload exception: {exc}")
+                except Exception:
+                    log.exception("Failed while restoring Ornith after image upload failure")
+                return HTTPStatus.BAD_GATEWAY, {}, json.dumps({"error": str(exc)}).encode()
 
     def prompt(self, body: bytes):
         with self.lock:
@@ -612,6 +699,7 @@ class Runtime:
 
     def finish_view(self, keep_alive: bool = False) -> None:
         with self.lock:
+            self._cleanup_uploaded_image_locked()
             if keep_alive:
                 log.info("Keeping B580 ComfyUI active for the next batch item")
                 self.active_prompt_id = None
@@ -697,6 +785,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/release":
             RUNTIME.release()
             self._send(HTTPStatus.OK, {}, b'{"status":"released"}')
+            return
+        if path == "/upload/image":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 20 * 1024 * 1024:
+                    raise ValueError("invalid image upload length")
+                body = self.rfile.read(length)
+                content_type = self.headers.get("Content-Type", "")
+                status, headers, response_body = RUNTIME.upload_image(body, content_type)
+            except Exception as exc:
+                log.exception("Invalid source-image upload request")
+                status, headers, response_body = HTTPStatus.BAD_REQUEST, {}, json.dumps({"error": str(exc)}).encode()
+            self._send(status, headers, response_body)
             return
         if path != "/prompt":
             self._send(HTTPStatus.NOT_FOUND, {}, b'{"error":"not found"}')
