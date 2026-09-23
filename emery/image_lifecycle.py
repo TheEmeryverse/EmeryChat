@@ -51,6 +51,7 @@ class ImageGenerationState:
     progress_status: str = "starting"
     progress_node: str | None = None
     pipeline_waiting: bool = False
+    main_model_restored: bool = False
     image_jobs: deque[ImageGenerationJob] = field(default_factory=deque)
     queued_image_requests: int = 0
     accepting_jobs: bool = True
@@ -85,7 +86,7 @@ def _elapsed_text(state: ImageGenerationState) -> str:
 
 def _progress_text(state: ImageGenerationState, *, complete: bool = False, error: BaseException | None = None) -> str:
     if error is not None:
-        headline = "⚠️ Image generation failed; Emery is available again."
+        headline = "⚠️ Image generation failed."
     elif complete:
         headline = "✅ Image generation complete."
     else:
@@ -111,8 +112,6 @@ def _progress_text(state: ImageGenerationState, *, complete: bool = False, error
                 lines.append(f"{item_label}: running node {state.progress_node}…")
             else:
                 lines.append(f"{item_label}: running ComfyUI…")
-    elif complete and error is None:
-        lines.append("🟢 Emery is back online and warmed up.")
     if state.queued_count:
         lines.append(f"Queued chat messages: {state.queued_count}")
     if state.queued_image_requests:
@@ -363,6 +362,16 @@ async def finish_image_generation(state: ImageGenerationState, error: BaseExcept
     if state.heartbeat_task is not None:
         state.heartbeat_task.cancel()
     await state.notifier.update(text, force=True)
+
+    if state.main_model_restored:
+        try:
+            await state.bot.send_message(
+                chat_id=state.chat_id,
+                text="Emery is back up.",
+                message_thread_id=state.thread_id,
+            )
+        except Exception:
+            log.exception("IMAGE LIFECYCLE: unable to send model-restored notice chat_id=%s", state.chat_id)
 
     if has_deferred_chat and not has_active_turn:
         asyncio.create_task(_resume_deferred_chat(state))

@@ -675,7 +675,8 @@ async def _run_image_queue(state) -> None:
                         # after releasing the runtime so it is not lost; it will
                         # simply start a fresh broker lifecycle if necessary.
                         if IMAGE_GENERATION_BACKEND == "comfyui":
-                            if not await release_comfyui_runtime():
+                            state.main_model_restored = await release_comfyui_runtime()
+                            if not state.main_model_restored:
                                 queue_error = RuntimeError(
                                     "ComfyUI broker did not confirm B580/Ornith restoration"
                                 )
@@ -685,6 +686,9 @@ async def _run_image_queue(state) -> None:
                     else:
                         continue
 
+                # A newly queued request may arrive during broker teardown, so
+                # each actual job invalidates any restoration from that release.
+                state.main_model_restored = False
                 job_error = await _generate_and_deliver_image(
                     job.prompt,
                     state.chat_id,
