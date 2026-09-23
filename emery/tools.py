@@ -24,7 +24,7 @@ from googleapiclient.discovery import build
 from emery.config import (
     MODEL_NAME, OPEN_WEBUI_KEY, MODEL_ID, VISION_MODEL_ID,
     VISION_OLLAMA_URL, SEARXNG_URL, NASA_API_KEY, GEMINI_API_KEY,
-    IMAGE_MODEL, IMAGE_GENERATION_BACKEND, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
+    IMAGE_MODEL, IMAGE_GENERATION_BACKEND, IMAGE_MAX_BATCH_SIZE, NOAA_LAT, NOAA_LONG, NOAA_EMAIL, WEATHER_LOCATIONS_FILE_PATH,
     calendar_ids, TELEGRAM_TOKEN, OVERSEER_URL, OVERSEER_KEY,
     OVERSEER_USER_ID, TTS_URL, TTS_VOICE, NEWS_FEEDS, USER_TIMEZONE, USER_NAME,
     ENABLE_PORTAINER, PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_SSL_VERIFY,
@@ -45,7 +45,25 @@ from emery.docling import (
     build_extracted_text_preview,
 )
 import emery.globals as globals
-from emery.comfyui_image import generate_comfyui_image
+from emery.comfyui_image import generate_comfyui_images, release_comfyui_runtime
+from emery.image_lifecycle import (
+    ImageGenerationJob,
+    close_image_queue_if_empty,
+    finish_image_generation,
+    get_active_image_generation,
+    image_item_ready,
+    image_generation_progress,
+    next_image_job,
+    note_image_request_queued,
+    set_image_pipeline_waiting,
+    start_image_generation,
+)
+from emery.image_profiles import (
+    DEFAULT_IMAGE_PROFILE,
+    DIRECT_IMAGE_DEFAULT_PROFILE,
+    get_image_profile,
+    image_profile_batch_limit,
+)
 from emery.helpers import compress_image_bytes, get_image_description, query_fast_model, telegram_escape
 from emery.telegram_delivery import send_rich_or_split_html_message
 from emery.media import (
@@ -502,31 +520,53 @@ def _track_background_image_task(task: asyncio.Task) -> asyncio.Task:
     return task
 
 
-async def _generate_image_bytes(prompt: str) -> bytes:
+async def _generate_image_bytes(
+    prompt: str,
+    batch_size: int = 1,
+    on_image=None,
+    on_progress=None,
+    keep_runtime_alive: bool = False,
+    quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
+) -> list[bytes]:
     """Generate image bytes without tying up Emery's foreground turn."""
     if IMAGE_GENERATION_BACKEND == "comfyui":
-        image_bytes, _mime_type = await generate_comfyui_image(prompt)
-        return image_bytes
+        generated = await generate_comfyui_images(
+            prompt,
+            batch_size=batch_size,
+            on_image=on_image,
+            on_progress=on_progress,
+            keep_runtime_alive=keep_runtime_alive,
+            quality_profile=quality_profile,
+        )
+        return [image_bytes for image_bytes, _mime_type in generated]
 
-    URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{
-            "parts": [{
-                "text": prompt,
+    images = []
+    for _ in range(batch_size):
+        URL = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": prompt,
+                }]
             }]
-        }]
-    }
-    r = await globals.http_client.post(URL, json=payload, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Image API HTTP {r.status_code}: {r.text[:500]}")
-    data = r.json()
-    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    for part in parts:
-        if "inlineData" in part:
-            image_b64 = part["inlineData"].get("data")
-            if image_b64:
-                return base64.b64decode(image_b64)
-    raise RuntimeError("No image data found in response parts.")
+        }
+        r = await globals.http_client.post(URL, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"Image API HTTP {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        for part in parts:
+            if "inlineData" in part:
+                image_b64 = part["inlineData"].get("data")
+                if image_b64:
+                    image_bytes = base64.b64decode(image_b64)
+                    images.append(image_bytes)
+                    if on_image is not None:
+                        await on_image(image_bytes, "image/png", len(images), batch_size)
+                    break
+        else:
+            raise RuntimeError("No image data found in response parts.")
+    return images
 
 
 async def _generate_and_deliver_image(
@@ -534,14 +574,20 @@ async def _generate_and_deliver_image(
     chat_id: int,
     thread_id: int | None,
     *,
+    batch_size: int = 1,
+    quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
-) -> None:
+    image_state=None,
+    keep_runtime_alive: bool = False,
+    finish_state: bool = True,
+) -> BaseException | None:
     """Generate and deliver an image after the foreground model turn returns."""
     bot = bot or globals.application_bot
+    sent_messages = []
+    error = None
     try:
-        image_bytes = await _generate_image_bytes(prompt)
         if not bot:
             raise RuntimeError("Telegram bot is not available for image delivery.")
 
@@ -554,20 +600,48 @@ async def _generate_and_deliver_image(
                 allow_sending_without_reply=True,
             )
 
-        caption = (
-            f"{caption_prefix}{prompt[:1000]}"
-            if caption_prefix is not None
-            else None
+        async def deliver_image(image_bytes, _mime_type, index, total):
+            batch_label = f"Image {index}/{total}\n" if total > 1 else ""
+            caption = (
+                f"{batch_label}{caption_prefix}{prompt[:1000]}"
+                if caption_prefix is not None
+                else (batch_label.rstrip() or None)
+            )
+            sent_msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=image_bytes,
+                caption=caption,
+                reply_parameters=reply_parameters if index == 1 else None,
+                message_thread_id=thread_id,
+            )
+            if sent_msg:
+                sent_messages.append(sent_msg)
+            if image_state is not None:
+                await image_item_ready(image_state, index, total)
+
+        async def report_progress(progress):
+            if image_state is not None:
+                await image_generation_progress(image_state, progress)
+
+        image_bytes_list = await _generate_image_bytes(
+            prompt,
+            batch_size=batch_size,
+            on_image=deliver_image,
+            on_progress=report_progress,
+            keep_runtime_alive=keep_runtime_alive,
+            quality_profile=quality_profile,
         )
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=image_bytes,
-            caption=caption,
-            reply_parameters=reply_parameters,
-            message_thread_id=thread_id,
+        # Keep a fallback for callers that use this worker without a callback.
+        if not sent_messages:
+            for index, image_bytes in enumerate(image_bytes_list, start=1):
+                await deliver_image(image_bytes, "image/png", index, len(image_bytes_list))
+        logging.info(
+            "🖼️ IMAGE: Background images delivered for chat_id=%s count=%d.",
+            chat_id,
+            len(sent_messages),
         )
-        logging.info("🖼️ IMAGE: Background image delivered for chat_id=%s.", chat_id)
     except Exception as exc:
+        error = exc
         logging.error("❌ IMAGE: Background generation/delivery failed: %s", exc, exc_info=True)
         if bot:
             try:
@@ -580,6 +654,60 @@ async def _generate_and_deliver_image(
                 )
             except Exception:
                 logging.error("❌ IMAGE: Could not send background failure notice.", exc_info=True)
+    finally:
+        if image_state is not None and finish_state:
+            await finish_image_generation(image_state, error=error)
+    return error
+
+
+async def _run_image_queue(state) -> None:
+    """Run successive /image/tool requests in order on one runtime lifecycle."""
+    queue_error = None
+    try:
+        await set_image_pipeline_waiting(state, True)
+        async with globals.image_generation_pipeline_lock:
+            await set_image_pipeline_waiting(state, False)
+            while True:
+                job = await next_image_job(state)
+                if job is None:
+                    if await close_image_queue_if_empty(state):
+                        # A request may arrive during broker teardown. Check once
+                        # after releasing the runtime so it is not lost; it will
+                        # simply start a fresh broker lifecycle if necessary.
+                        if IMAGE_GENERATION_BACKEND == "comfyui":
+                            if not await release_comfyui_runtime():
+                                queue_error = RuntimeError(
+                                    "ComfyUI broker did not confirm B580/Ornith restoration"
+                                )
+                        job = await next_image_job(state)
+                        if job is None:
+                            break
+                    else:
+                        continue
+
+                job_error = await _generate_and_deliver_image(
+                    job.prompt,
+                    state.chat_id,
+                    state.thread_id,
+                    batch_size=job.batch_size,
+                    quality_profile=job.quality_profile,
+                    image_state=state,
+                    bot=job.bot,
+                    reply_to_message_id=job.reply_to_message_id,
+                    caption_prefix=job.caption_prefix,
+                    # Keep ComfyUI resident while another queued image request can
+                    # be submitted; the broker is released when this FIFO drains.
+                    keep_runtime_alive=True,
+                    finish_state=False,
+                )
+                if job_error is not None:
+                    queue_error = job_error
+
+    except Exception as exc:
+        queue_error = exc
+        logging.error("❌ IMAGE: queued image worker failed: %s", exc, exc_info=True)
+    finally:
+        await finish_image_generation(state, error=queue_error)
 
 
 def queue_image_generation(
@@ -587,34 +715,76 @@ def queue_image_generation(
     chat_id: int,
     thread_id: int | None,
     *,
+    batch_size: int = 1,
+    quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
 ) -> asyncio.Task:
     """Start image generation in the background and return its task handle."""
-    task = asyncio.create_task(
-        _generate_and_deliver_image(
-            prompt,
-            chat_id,
-            thread_id,
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        raise ValueError("batch_size must be an integer")
+    profile = get_image_profile(quality_profile)
+    batch_limit = image_profile_batch_limit(profile.name, IMAGE_MAX_BATCH_SIZE)
+    if not 1 <= batch_size <= batch_limit:
+        raise ValueError(f"batch_size must be between 1 and {batch_limit} for the {profile.name} profile")
+
+    bot = bot or globals.application_bot
+    image_state = get_active_image_generation(chat_id, thread_id)
+    new_state = image_state is None
+    if new_state:
+        image_state = start_image_generation(bot, chat_id, thread_id, batch_size)
+    elif not image_state.accepting_jobs:
+        # The worker is in the short broker-release window. Let it see this
+        # request in its post-release queue check instead of dropping it.
+        image_state.accepting_jobs = True
+
+    image_state.image_jobs.append(
+        ImageGenerationJob(
+            prompt=prompt,
+            batch_size=batch_size,
             bot=bot,
+            quality_profile=profile.name,
             reply_to_message_id=reply_to_message_id,
             caption_prefix=caption_prefix,
         )
     )
-    return _track_background_image_task(task)
+    image_state.queued_image_requests += 1
+    if not new_state:
+        asyncio.create_task(note_image_request_queued(image_state))
+
+    if image_state.worker_task is None or image_state.worker_task.done():
+        image_state.worker_task = asyncio.create_task(_run_image_queue(image_state))
+        return _track_background_image_task(image_state.worker_task)
+    return image_state.worker_task
 
 
-async def generate_image(prompt):  # Generates an image without blocking Emery's reply
+async def generate_image(prompt, batch_size=1):  # Generates images without blocking Emery's reply
     chat_id = globals.TARGET_CHAT_ID.get()
     if not chat_id:
         return "Chat context lost; the image could not be queued for delivery."
 
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        return "The image batch size must be a whole number."
+    batch_limit = image_profile_batch_limit(DEFAULT_IMAGE_PROFILE, IMAGE_MAX_BATCH_SIZE)
+    if not 1 <= batch_size <= batch_limit:
+        return f"The image batch size must be between 1 and {batch_limit} for the medium profile."
+
     thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
-    queue_image_generation(prompt, chat_id, thread_id)
+    try:
+        queue_image_generation(
+            prompt,
+            chat_id,
+            thread_id,
+            batch_size=batch_size,
+            quality_profile=DEFAULT_IMAGE_PROFILE,
+        )
+    except RuntimeError as exc:
+        return f"Image generation could not be queued: {safe_preview(str(exc), max_len=300)}"
+    count_text = f"{batch_size} images" if batch_size != 1 else "1 image"
     return (
-        "Image generation started in the background. You can continue chatting; "
-        "the image will be delivered here when it is ready.\n\n"
+        f"Image generation queued in the background for {count_text}. You can continue chatting; "
+        "the image(s) will be delivered here when ready.\n\n"
         "FINAL RESPONSE REQUIREMENT: Include the exact prompt sent to the image "
         "model under a clearly labeled `Image prompt:` section. Do not paraphrase it.\n"
         f"Image prompt:\n{prompt}"

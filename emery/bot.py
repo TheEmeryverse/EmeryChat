@@ -20,6 +20,7 @@ from emery.config import (
     ALLOW_UNRESTRICTED_TELEGRAM_ACCESS, ENABLE_LIVE_PROGRESS,
     ENABLE_LIVE_STEERING,
     LIVE_STEERING_MAX_PENDING,
+    IMAGE_MAX_BATCH_SIZE,
 )
 import emery.globals as globals
 from emery.helpers import (
@@ -52,6 +53,8 @@ from emery.docling import (
     build_document_context_text,
 )
 from emery.tools import get_noaa_weather_alerts, get_voice_audio, queue_image_generation
+from emery.image_lifecycle import defer_active_chat_message
+from emery.image_profiles import DIRECT_IMAGE_DEFAULT_PROFILE, get_image_profile, image_profile_batch_limit
 from emery.telegram_utils import normalize_message_thread_id
 
 
@@ -437,17 +440,28 @@ def _help_text() -> str:
         "",
         "<b>General</b>",
         "/help - Show this command list.",
-        "/clear - Clear this chat's active context history.",
-        "/temporary on|off - Use an ephemeral raw-model conversation with no prompt, tools, or memory.",
-        "/image &lt;prompt&gt; - Generate and send an image directly, bypassing Emery and conversation history.",
+        "/clear - Clear this chat/thread's active context and session approvals.",
+        "/temporary &lt;on|off&gt; - Toggle an ephemeral raw-model conversation without tools or memory.",
+        "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
-        "/wipe - Wipe your persistent memory and reinitialize the baseline template.",
-        "/bridge &lt;message&gt; - Send an authenticated request to Hermes.",
-        "/skills - List, search, inspect, archive, and review durable procedural skills.",
+        "/wipe - Wipe your persistent memory and restore its baseline template.",
+        "/bridge &lt;message&gt; - Send an authenticated request to the connected bot.",
+        "/approve &lt;approval-id&gt; - Approve a pending command once.",
+        "/deny &lt;approval-id&gt; - Deny a pending command.",
+        "/skills help - Show skill command usage.",
+        "/skills list|pending - List visible skills or pending changes.",
+        "/skills search &lt;query&gt; - Search visible skills.",
+        "/skills show &lt;id-or-name&gt; - Show a skill and its procedure.",
+        "/skills status &lt;id-or-name&gt; - Show a skill's lifecycle status.",
+        "/skills diff &lt;id&gt; - Review a pending skill change.",
+        "/skills approve|reject &lt;id&gt; - Approve or reject a pending skill change.",
+        "/skills archive &lt;id-or-name&gt; - Archive a visible skill.",
         "",
         "<b>Expert research</b>",
         "/expert &lt;topic&gt; - Start a foreground deep research session.",
+        "/expert help - Show expert command help.",
+        "/expert notes - Show the active research scratchpad.",
         "/expert list - Show archived expert sessions with inline actions.",
         "/expert status - Show the active expert session status for this chat/thread.",
         "/expert resume &lt;id&gt; - Load an archived expert session without auto-continuing research.",
@@ -461,6 +475,7 @@ def _help_text() -> str:
         "",
         "<b>Debate mode</b>",
         "/debate &lt;topic&gt; - Start a four-role debate with Moderator, two named sides, and Clerk.",
+        "/debate help - Show debate command help.",
         "/debate status - Show the active debate status for this chat/thread.",
         "/debate list - Show archived debates.",
         "/debate open &lt;id&gt; - Send an archived debate memo.",
@@ -479,14 +494,80 @@ async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(_help_text(), parse_mode="HTML")
 
 
+def _image_command_help(error: str | None = None) -> str:
+    lines = [
+        "<b>Image command</b>",
+        "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
+        "Omit the profile for Low. Omit the batch option to generate one image.",
+        "",
+        "<b>Profiles</b>",
+        "Low: 512x512, 10 steps, up to 10 images.",
+        "Medium: 768x768, 12 steps, up to 5 images.",
+        "High: 1024x1024, 20 steps, up to 2 images.",
+        "",
+        "Examples:",
+        "<code>/image a red fox in a snowy forest</code>",
+        "<code>/image medium a red fox in a snowy forest</code>",
+        "<code>/image high #inbatch 2 a red fox in a snowy forest</code>",
+    ]
+    if error:
+        lines.insert(0, f"⚠️ {error}\n")
+    return "\n".join(lines)
+
+
 async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Queue one image directly without invoking Emery or writing chat history."""
+    """Queue one or more images directly without invoking Emery or writing chat history."""
     if not is_user_allowed(update):
         return
 
-    prompt = " ".join(context.args or []).strip()
+    args = list(context.args or [])
+    if not args or args[0].lower() == "help":
+        await update.message.reply_text(_image_command_help(), parse_mode="HTML")
+        return
+
+    quality_profile = DIRECT_IMAGE_DEFAULT_PROFILE
+    batch_size = 1
+    if args and args[0].lower() in {"low", "medium", "high"}:
+        quality_profile = args.pop(0).lower()
+    elif args and re.fullmatch(r"\d+", args[0]):
+        batch_size = int(args.pop(0))
+
+    batch_limit = image_profile_batch_limit(quality_profile, IMAGE_MAX_BATCH_SIZE)
+    if args and args[0].lower() == "#inbatch":
+        args.pop(0)
+        if not args or not re.fullmatch(r"\d+", args[0]):
+            await update.message.reply_text(
+                _image_command_help("#inbatch must be followed by an image count."),
+                parse_mode="HTML",
+            )
+            return
+        batch_size = int(args.pop(0))
+    elif args and re.fullmatch(r"#inbatch=(\d+)", args[0], flags=re.IGNORECASE):
+        batch_size = int(re.fullmatch(r"#inbatch=(\d+)", args.pop(0), flags=re.IGNORECASE).group(1))
+    elif quality_profile != DIRECT_IMAGE_DEFAULT_PROFILE and args and re.fullmatch(r"\d+", args[0]):
+        batch_size = int(args.pop(0))
+    elif args and args[0].lower().startswith("#inbatch"):
+        await update.message.reply_text(
+            _image_command_help("Invalid batch option."),
+            parse_mode="HTML",
+        )
+        return
+
+    if not 1 <= batch_size <= batch_limit:
+        await update.message.reply_text(
+            _image_command_help(
+                f"The {quality_profile} profile allows 1-{batch_limit} images."
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    prompt = " ".join(args).strip()
     if not prompt:
-        await update.message.reply_text("Usage: /image <description of the image to generate>")
+        await update.message.reply_text(
+            _image_command_help("A description is required."),
+            parse_mode="HTML",
+        )
         return
 
     chat_id = update.effective_chat.id
@@ -504,11 +585,23 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
             prompt,
             chat_id,
             thread_id,
+            batch_size=batch_size,
+            quality_profile=quality_profile,
             bot=context.bot,
             reply_to_message_id=update.message.message_id,
         )
-        await update.message.reply_text("Image generation started; I’ll send it here when ready.")
-        logging.info("🖼️ DIRECT IMAGE: queued for chat_id=%s without Emery context.", chat_id)
+        profile = get_image_profile(quality_profile)
+        count_text = f"{batch_size} images" if batch_size != 1 else "1 image"
+        await update.message.reply_text(
+            f"Image generation queued: {count_text}, {profile.name} profile "
+            f"({profile.width}x{profile.height}, {profile.steps} steps)."
+        )
+        logging.info(
+            "🖼️ DIRECT IMAGE: queued for chat_id=%s profile=%s count=%d without Emery context.",
+            chat_id,
+            quality_profile,
+            batch_size,
+        )
     except Exception as exc:
         logging.error("❌ DIRECT IMAGE: generation failed for chat_id=%s: %s", chat_id, exc, exc_info=True)
         await update.message.reply_text(f"Direct image generation failed: {safe_preview(str(exc), max_len=500)}")
@@ -809,6 +902,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not should_reply:
         logging.debug(f"🤫 SILENT LISTEN: Recorded group message from {sender_name} (chat {chat_id}) for context, but not replying.")
+        return
+
+    if await defer_active_chat_message(update, context, user_history_entry):
         return
 
     turn_key = (

@@ -1957,6 +1957,11 @@ async def emery_engine(
  
         try:
             logging.info(f"🤖 ENGINE: Thinking... (loop {loop_count+1}/{TOOL_LOOP})")
+            from emery.image_lifecycle import wait_for_active_image_generation
+            await wait_for_active_image_generation(
+                globals.TARGET_CHAT_ID.get(),
+                globals.CURRENT_THREAD_ID.get(),
+            )
             async with globals.main_model_lock:
                 request_started = time.perf_counter()
                 streamed = bool(payload.get("stream"))

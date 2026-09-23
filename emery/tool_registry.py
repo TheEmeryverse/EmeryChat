@@ -1,4 +1,5 @@
-from emery.config import ENABLE_DOCLING, ENABLE_MEMORY, REOLINK_CAMERAS, SKILL_WRITE_APPROVAL
+from emery.config import ENABLE_DOCLING, ENABLE_MEMORY, IMAGE_MAX_BATCH_SIZE, REOLINK_CAMERAS, SKILL_WRITE_APPROVAL
+from emery.image_profiles import DEFAULT_IMAGE_PROFILE, image_profile_batch_limit
 from emery.memory import save_user_memory, get_camera_security_log
 from emery.scratchpad import clear_scratchpad, jot_down_note, read_scratchpad
 from emery.skills import (
@@ -1157,12 +1158,13 @@ if is_enabled("ENABLE_SEARCH"):
 
 if is_enabled("ENABLE_IMAGEGEN"):
     AVAILABLE_TOOLS["generate_image"] = generate_image
+    medium_batch_limit = image_profile_batch_limit(DEFAULT_IMAGE_PROFILE, IMAGE_MAX_BATCH_SIZE)
     tools_schema.append({
         "type": "function", 
         "function": {
             "name": "generate_image", 
-            "description": "This is the ONLY tool for generating, creating, drawing, illustrating, or designing a new image. When the user asks for a new image, use this tool and do not use terminal, browser, web-search, research-image, or any other tool instead. Do not use it for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
-            "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}}, "required": ["prompt"]}
+            "description": "This is the ONLY tool for generating, creating, drawing, illustrating, or designing a new image. When the user asks for a new image, use this tool and do not use terminal, browser, web-search, research-image, or any other tool instead. Do not use it for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. This tool always uses the Medium quality profile (768x768, 12 steps); the user may choose Low, Medium, or High only through a direct /image command. Set batch_size only when the user explicitly asks for more than one image; otherwise omit it or use 1. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
+            "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}, "batch_size": {"type": "integer", "minimum": 1, "maximum": medium_batch_limit, "default": 1, "description": f"Number of images to generate using Medium quality. Set this only when the user explicitly requests more than one image; maximum {medium_batch_limit}."}}, "required": ["prompt"]}
         }
     })
 

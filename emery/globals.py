@@ -51,6 +51,7 @@ persistent_status_controllers = {}
 main_model_lock = asyncio.Semaphore(1)
 fast_model_lock = asyncio.Semaphore(1)
 reolink_snapshot_lock = asyncio.Lock()
+image_generation_pipeline_lock = asyncio.Lock()
 
 
 class PriorityModelScheduler:
