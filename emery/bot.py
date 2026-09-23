@@ -60,7 +60,7 @@ from emery.tools import (
     queue_image_generation,
     resume_image_queue,
 )
-from emery.image_lifecycle import defer_active_chat_message
+from emery.image_lifecycle import defer_active_chat_message, get_active_image_generation
 from emery.image_profiles import DIRECT_IMAGE_DEFAULT_PROFILE, get_image_profile, image_profile_batch_limit
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -532,6 +532,12 @@ def _image_command_help(error: str | None = None) -> str:
     if error:
         lines.insert(0, f"⚠️ {error}\n")
     return "\n".join(lines)
+
+
+async def _reanchor_paused_image_status(chat_id: int, thread_id: int | None) -> None:
+    state = get_active_image_generation(chat_id, thread_id)
+    if state is not None and state.paused and state.pause_ready_event.is_set():
+        await state.notifier.repost_at_bottom()
 
 
 async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1412,6 +1418,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             "timestamp": datetime.now(USER_TIMEZONE)
         })
         clear_media_turn()
+        await _reanchor_paused_image_status(chat_id, current_thread_id)
         return
 
     temporary_banner = "🕶️ Temporary mode — no long-term memory."
@@ -1495,6 +1502,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             break
     if not temporary_response_mode:
         asyncio.create_task(summarize_topics_background(chat_id, last_user_id))
+    await _reanchor_paused_image_status(chat_id, current_thread_id)
 
 async def send_safe_large_message(update: Update, text: str, reply_to_message_id: int = None):
     """
