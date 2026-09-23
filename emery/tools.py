@@ -95,49 +95,15 @@ async def _send_reolink_alert_photo(**send_kwargs):
 
 
 def _readable_reolink_alert_report(report):
-    """Strip the classifier protocol from a camera report for humans."""
+    """Return a concise camera description suitable for people and the log."""
     report_text = str(report or "").strip()
-    if not report_text:
-        return "No active activity detected."
-
-    decision_match = re.search(
-        r"(?im)^\s*ALERT_DECISION\s*:\s*(CLEAR|ACTIVITY|UNCERTAIN)\s*$",
-        report_text,
-    )
-    decision = decision_match.group(1).upper() if decision_match else ""
-    summary_match = re.search(r"(?im)^\s*SUMMARY\s*:\s*(.+?)\s*$", report_text)
-    if summary_match:
-        readable = summary_match.group(1).strip().strip('"')
-    else:
-        # Preserve compatibility with older free-form vision responses while
-        # removing any protocol labels a partially compliant model emitted.
-        readable = re.sub(
-            r"(?im)^\s*(?:ALERT_DECISION|SUMMARY|CONFIDENCE)\s*:\s*",
-            "",
-            report_text,
-        )
-        readable = re.sub(r"\s+", " ", readable).strip().strip('"')
-
-    if not readable:
-        readable = "No active activity detected."
-    if decision == "UNCERTAIN" and not readable.lower().startswith("uncertain:"):
-        readable = f"Uncertain: {readable}"
-    return readable
-
-
-def _reolink_alert_decision(report):
-    """Return the vision model's explicit decision, failing safe."""
-    match = re.search(
-        r"(?im)^\s*ALERT_DECISION\s*:\s*(CLEAR|ACTIVITY|UNCERTAIN)\s*$",
-        str(report or ""),
-    )
-    return match.group(1).upper() if match else "UNCERTAIN"
+    return re.sub(r"\s+", " ", report_text).strip().strip('"')
 
 
 def _build_reolink_alert_caption(camera_name, report):
     """Build a Telegram-safe alert caption without splitting HTML entities."""
     camera_label = str(camera_name or "").upper()
-    report_text = str(report or "No active activity detected.")
+    report_text = str(report or "")
 
     def build_caption(text):
         return (
@@ -3187,24 +3153,12 @@ async def get_reolink_snapshot(
             "Note that at night, the camera feed automatically switches to black and white night vision."
         )
         
-        # --- STAGE 1: Threat Analysis (For Telegram Caption) ---
-        logging.debug("👁️ VISION [1/2]: Running threat analysis...")
-        security_prompt = f"""You are a professional home security monitoring system checking the live '{matched_camera_name}' camera feed{desc_context}.{time_context}
-            Your output is consumed by a notification filter. Use the exact three-line format below and do not add headings, markdown, or extra lines:
-            ALERT_DECISION: CLEAR | ACTIVITY | UNCERTAIN
-            SUMMARY: <one concise sentence>
-            CONFIDENCE: <integer from 0 to 100> - <short visual reason>
-
-        DECISION RULES:
-            - CLEAR means no relevant person, vehicle, package, delivery, or suspicious activity is visible. Static background and ordinary domestic pets do not count.
-            - ACTIVITY means at least one relevant person, vehicle, package, delivery, or suspicious action is actually visible, even if it may be routine. Describe it briefly.
-            - UNCERTAIN means lighting, blur, distance, obstruction, or contradictory evidence prevents a reliable decision. Never guess.
-            - Never write CLEAR or say there is no activity when a relevant person, vehicle, package, delivery, or suspicious action is visible.
-            - Do not describe static background objects, stationary items, or daily environmental features such as grills, bicycles, stairs, chairs, tables, lawn furniture, toys, structures, siding, or fences.
-            - Do not describe domestic pets or local animals unless they represent an active safety/security issue.
-            - For ACTIVITY, describe people with clothing, apparent action, and carried objects; describe vehicles by type, color, and position; describe packages or deliveries and whether they are near an entryway.
-            - Keep SUMMARY to one sentence. Do not include race or ethnicity guesses.
-            - If the image is empty of relevant activity, use exactly: "ALERT_DECISION: CLEAR\\nSUMMARY: No relevant people, vehicles, packages, deliveries, or suspicious activity are visible.\\nCONFIDENCE: 100 - The view is clear and unobstructed."""
+        # --- STAGE 1: Concise event description for a possible notification ---
+        logging.debug("👁️ VISION [1/2]: Describing notable camera activity...")
+        security_prompt = f"""You are describing a live home security camera image from '{matched_camera_name}'{desc_context}.{time_context}
+Write a simple, factual description in one or two sentences only when something notable is happening in the image. Focus on visible people, vehicles, packages, deliveries, or other notable activity. Do not guess identities, intent, or details that are not visible. Ignore static background and ordinary domestic pets.
+If there is nothing notable to report, reply with exactly: DONE
+Do not classify the image, express confidence, or add labels or formatting."""
             
         concise_report = await get_image_description(
             b64_image,
@@ -3214,19 +3168,19 @@ async def get_reolink_snapshot(
         logging.debug(f"👁️ VISION [1/2]: Completed ({len(concise_report or '')} chars)")
         
         if not concise_report or not concise_report.strip():
-            concise_report = "No active activity detected."
+            concise_report = "DONE"
         
         readable_report = _readable_reolink_alert_report(concise_report)
-        camera_decision = _reolink_alert_decision(concise_report)
+        no_notable_activity = readable_report.upper() == "DONE"
         camera_alert_suppressed = bool(
             target_chat_id
             and update_thread_tracker
-            and camera_decision == "CLEAR"
+            and no_notable_activity
         )
         logging.info(
-            "🛡️ SECURITY: camera=%s decision=%s suppress=%s",
+            "🛡️ SECURITY: camera=%s notable=%s suppress=%s",
             matched_camera_name,
-            camera_decision,
+            not no_notable_activity,
             camera_alert_suppressed,
         )
 
@@ -3234,7 +3188,7 @@ async def get_reolink_snapshot(
         if target_chat_id and not camera_alert_suppressed:
             telegram_caption = _build_reolink_alert_caption(
                 matched_camera_name,
-                readable_report,
+                "No notable activity." if no_notable_activity else readable_report,
             )
             sent_photo_msg = await _send_reolink_alert_photo(
                 chat_id=target_chat_id,
@@ -3257,7 +3211,7 @@ async def get_reolink_snapshot(
         if target_chat_id:
             if camera_alert_suppressed:
                 logging.info(
-                    "🔕 SECURITY: Suppressed clear camera alert for '%s'; camera log will still be updated.",
+                    "🔕 SECURITY: Suppressed camera alert with no notable activity for '%s'; camera log will still be updated.",
                     matched_camera_name,
                 )
 
@@ -3277,12 +3231,12 @@ async def get_reolink_snapshot(
             
             # Write to out-of-context log
             from emery.memory import append_camera_log
-            await append_camera_log(matched_camera_name, readable_report, scene_context)
+            log_report = "No notable activity." if no_notable_activity else readable_report
+            await append_camera_log(matched_camera_name, log_report, scene_context)
 
             if camera_alert_suppressed:
                 return (
-                    f"SUCCESS: Clear camera alert suppressed ({matched_camera_name}); "
-                    f"security log updated ({matched_camera_name}, {now_str})."
+                    "DONE"
                 )
             
             return (
@@ -3362,6 +3316,13 @@ async def trigger_webhook_alert(camera_name: str):
         message_thread_id=security_topic_id,
         update_thread_tracker=True
     )
+    if result == "DONE":
+        logging.info(
+            "🔕 SECURITY: No-notable-activity alert suppressed for '%s'; no Telegram notification or chat-history event created.",
+            camera_name,
+        )
+        return
+
     if not isinstance(result, str) or not result.startswith("SUCCESS:"):
         logging.warning(
             "⚠️ SECURITY: Alert delivery failed for '%s' (chat_id=%s thread_id=%s): %s",
@@ -3369,13 +3330,6 @@ async def trigger_webhook_alert(camera_name: str):
             alert_chat_id,
             security_topic_id,
             result,
-        )
-        return
-
-    if result.startswith("SUCCESS: Clear camera alert suppressed"):
-        logging.info(
-            "🔕 SECURITY: Clear alert suppressed for '%s'; no Telegram notification or chat-history event created.",
-            camera_name,
         )
         return
 
