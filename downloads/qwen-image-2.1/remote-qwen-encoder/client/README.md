@@ -8,4 +8,4 @@ Configure:
 * `auth_token`: the same value as Linux `REMOTE_QWEN_TOKEN`
 * `prompt` and `negative_prompt`: the Qwen Image prompts
 
-Connect `positive` and `negative` to the Qwen Image sampler. Do not also load another Qwen text encoder. For edits, connect `LoadImage` to the node's optional `image` input and the Qwen VAE to its optional `vae` input. EmeryChat resizes the reference image to roughly 1024x1024 pixels of area while preserving its aspect ratio for GTX 1070 conditioning, and uses a 1920x1080 landscape or 1080x1920 portrait output latent based on the source orientation.
+Connect `positive` and `negative` to the Qwen Image sampler. Do not also load another Qwen text encoder. For edits, connect `LoadImage` to the node's optional `image` input and the Qwen VAE to its optional `vae` input. EmeryChat caps source photos to the matching 1920x1080 or 1080x1920 bounding box before upload, resizes reference conditioning to roughly 1024x1024 pixels of area for the GTX 1070, and crops the generated output to the exact orientation-based dimensions.

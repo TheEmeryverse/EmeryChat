@@ -35,6 +35,72 @@ REMOTE_ENCODER_NODE = "RemoteQwenImage21TextEncode"
 log = logging.getLogger(__name__)
 
 
+def _edit_dimensions(image_size: tuple[int, int]) -> tuple[int, int]:
+    """Return target landscape or portrait dimensions for a source photo."""
+    source_width, source_height = image_size
+    profile = get_image_profile(
+        "ultra",
+        orientation="landscape" if source_width >= source_height else "portrait",
+    )
+    return profile.width, profile.height
+
+
+def _prepare_edit_source(image_bytes: bytes) -> tuple[bytes, tuple[int, int]]:
+    """Cap large source photos to a 1080p orientation box before ComfyUI upload."""
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            source_size = image.size
+            max_size = _edit_dimensions(source_size)
+            if image.width <= max_size[0] and image.height <= max_size[1]:
+                return image_bytes, source_size
+
+            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.convert("RGB").save(output, format="JPEG", quality=95, optimize=True)
+            resized_bytes = output.getvalue()
+            log.info(
+                "IMAGE: resized edit source from %dx%d to %dx%d before upload",
+                source_size[0],
+                source_size[1],
+                image.width,
+                image.height,
+            )
+            return resized_bytes, image.size
+    except Exception as exc:
+        raise RuntimeError(f"Unable to read Telegram edit photo: {exc}") from exc
+
+
+def _fit_edit_output(image_bytes: bytes, mime_type: str, source_size: tuple[int, int]) -> bytes:
+    """Crop ComfyUI's block-rounded output to the exact requested edit dimensions."""
+    from PIL import Image, ImageOps
+
+    target_size = _edit_dimensions(source_size)
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            if source.size == target_size:
+                return image_bytes
+            fitted = ImageOps.fit(
+                source,
+                target_size,
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            output = io.BytesIO()
+            output_format = "JPEG" if mime_type.lower() in {"image/jpeg", "image/jpg"} else "PNG"
+            if output_format == "JPEG":
+                fitted.convert("RGB").save(output, format=output_format, quality=95)
+            else:
+                fitted.save(output, format=output_format)
+            return output.getvalue()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to crop edited image to {target_size[0]}x{target_size[1]}: {exc}"
+        ) from exc
+
+
 def _endpoint_label(url: str) -> str:
     """Return a log-safe endpoint label without query strings or credentials."""
     parsed = urlsplit(url)
@@ -110,11 +176,7 @@ def _prepare_workflow(
             inputs["width"] = profile.width
             inputs["height"] = profile.height
             if input_image_size:
-                source_width, source_height = input_image_size
-                orientation = "landscape" if source_width >= source_height else "portrait"
-                edit_profile = get_image_profile("ultra", orientation=orientation)
-                inputs["width"] = edit_profile.width
-                inputs["height"] = edit_profile.height
+                inputs["width"], inputs["height"] = _edit_dimensions(input_image_size)
         if class_type == "KSampler":
             inputs["steps"] = profile.steps
         if "filename_prefix" in inputs:
@@ -216,10 +278,7 @@ async def generate_comfyui_images(
         input_image_filename = None
         input_image_size = None
         if input_image_bytes is not None:
-            from PIL import Image
-
-            with Image.open(io.BytesIO(input_image_bytes)) as source_image:
-                input_image_size = source_image.size
+            input_image_bytes, input_image_size = _prepare_edit_source(input_image_bytes)
             filename = f"EmeryEdit_{uuid.uuid4().hex}.jpg"
             runtime_touched = True
             response = await globals.http_client.post(
@@ -363,6 +422,8 @@ async def generate_comfyui_images(
                 )
             mime_type = response.headers.get("content-type", "image/png").split(";", 1)[0]
             image_bytes = bytes(response.content)
+            if input_image_size:
+                image_bytes = _fit_edit_output(image_bytes, mime_type, input_image_size)
             images.append((image_bytes, mime_type))
             if on_image is not None:
                 await on_image(image_bytes, mime_type, image_index + 1, batch_size)

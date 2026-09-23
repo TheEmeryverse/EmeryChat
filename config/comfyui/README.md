@@ -20,9 +20,9 @@ custom node must support its optional `image` and `vae` inputs, and the Qwen
 VAE must be connected so the node can attach the reference latent to its
 conditioning. The runtime removes the temporary uploaded source image after
 the edit finishes or fails. Edit outputs use 1920x1080 for landscape sources
-and 1080x1920 for portrait sources; the reference is resized to roughly the
-same 1024x1024-pixel area while preserving its original aspect ratio for
-conditioning on the GTX 1070 encoder.
+and 1080x1920 for portrait sources. Larger source photos are resized to fit
+that 1080p bounding box before upload. The GTX 1070 reference conditioning is
+then resized to roughly 1024x1024 pixels of area while preserving aspect ratio.
 
 EmeryChat consumes this file inside the container at:
 
