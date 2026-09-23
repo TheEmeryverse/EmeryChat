@@ -454,7 +454,7 @@ def _help_text() -> str:
         "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image pause|resume|cancel - Pause and resume queued batches, or cancel image work in this chat/thread.",
         "/image-edit [low|medium|high] &lt;instructions&gt; - Edit the attached photo with one image, preserving its aspect ratio.",
-        "/image-edit ultra &lt;portrait|landscape&gt; &lt;instructions&gt; - Edit at 30 steps, preserving the photo's aspect ratio.",
+        "/image-edit ultra &lt;instructions&gt; - Edit at 30 steps, matching the attached photo's aspect ratio.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -697,8 +697,8 @@ async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAUL
     if prompt.lower() == "help":
         await message.reply_text(
             "Attach one photo and use /image-edit [low|medium|high] edit instructions. "
-            "For Ultra, use /image-edit ultra portrait or /image-edit ultra landscape, "
-            "then the instructions. Edits preserve the original aspect ratio; batching is unavailable."
+            "For Ultra, use /image-edit ultra followed by the edit instructions. "
+            "Edits match the original aspect ratio; batching is unavailable."
         )
         return
     if not message.photo:
@@ -717,22 +717,11 @@ async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAUL
         await message.reply_text("Image editing makes one image at a time; ultrabatch is not available.")
         return
     if quality_profile == "ultra":
-        if not args or args[0].lower() not in {"portrait", "landscape"}:
-            await message.reply_text(
-                "Use /image-edit ultra portrait or /image-edit ultra landscape, followed by the edit instructions."
-            )
-            return
-        orientation = args.pop(0).lower()
-        source_orientation = (
+        orientation = (
             "landscape"
             if message.photo[-1].width >= message.photo[-1].height
             else "portrait"
         )
-        if orientation != source_orientation:
-            await message.reply_text(
-                f"This photo is {source_orientation}; choose that orientation to preserve its aspect ratio."
-            )
-            return
     prompt = " ".join(args).strip()
     if not prompt:
         await message.reply_text("Add edit instructions after the profile, if supplied.")
