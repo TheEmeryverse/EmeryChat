@@ -121,12 +121,11 @@ def _progress_text(
     lines = [headline]
     if state.paused:
         if state.current_job_active:
-            lines.append("The active image is stopping; completed images are kept and the batch continues with <code>/image resume</code>.")
+            lines.append("The active image is stopping; completed images are kept and the batch continues with /image resume.")
         else:
-            lines.append("Queued batches will start after <code>/image resume</code>.")
+            lines.append("Queued batches will start after /image resume.")
         if state.queued_image_requests:
             lines.append(f"Queued image batches: {state.queued_image_requests}")
-        lines.append(f"Elapsed: {_elapsed_text(state)}")
         return "\n".join(lines)
     if state.cancel_requested and not complete:
         lines.append("Cancelling the current batch and removing queued batches…")
