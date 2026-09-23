@@ -3282,8 +3282,9 @@ async def get_reolink_snapshot(
         
         # --- STAGE 1: Concise event description for a possible notification ---
         logging.debug("👁️ VISION [1/2]: Describing notable camera activity...")
-        security_prompt = f"""You are describing a live home security camera image from '{matched_camera_name}'{desc_context}.{time_context}
+        security_prompt = f"""You are describing a live home security camera image from '{matched_camera_name}'{desc_context}.
 Write a simple, factual description in one or two sentences only when something notable is happening in the image. Focus on visible people, vehicles, packages, deliveries, or other notable activity. Do not guess identities, intent, or details that are not visible. Ignore static background and ordinary domestic pets.
+Do not mention the capture date, clock time, or day.
 If there is nothing notable to report, reply with exactly: DONE
 Do not classify the image, express confidence, or add labels or formatting."""
             
