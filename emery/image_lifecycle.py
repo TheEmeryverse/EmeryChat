@@ -26,6 +26,7 @@ class ImageGenerationJob:
     batch_size: int
     bot: Any
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE
+    orientation: str | None = None
     reply_to_message_id: int | None = None
     caption_prefix: str | None = None
 

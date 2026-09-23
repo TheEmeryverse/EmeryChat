@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -18,18 +18,35 @@ IMAGE_PROFILES = {
     "low": ImageProfile("low", width=512, height=512, steps=10, max_batch_size=10),
     "medium": ImageProfile("medium", width=768, height=768, steps=12, max_batch_size=5),
     "high": ImageProfile("high", width=1024, height=1024, steps=20, max_batch_size=2),
+    "ultra": ImageProfile("ultra", width=1920, height=1080, steps=30, max_batch_size=1),
 }
 DEFAULT_IMAGE_PROFILE = "medium"
 DIRECT_IMAGE_DEFAULT_PROFILE = "low"
 
 
-def get_image_profile(name: str) -> ImageProfile:
+def get_image_profile(name: str, orientation: str | None = None) -> ImageProfile:
     try:
-        return IMAGE_PROFILES[str(name).strip().lower()]
+        profile = IMAGE_PROFILES[str(name).strip().lower()]
     except KeyError as exc:
         raise ValueError(f"Unknown image quality profile: {name}") from exc
 
+    if profile.name != "ultra":
+        if orientation is not None:
+            raise ValueError(f"The {profile.name} profile does not accept an orientation")
+        return profile
+    if orientation is None:
+        raise ValueError("The ultra profile requires portrait or landscape orientation")
+    orientation = str(orientation).strip().lower()
+    if orientation == "portrait":
+        return replace(profile, width=1080, height=1920)
+    if orientation == "landscape":
+        return profile
+    raise ValueError("The ultra orientation must be portrait or landscape")
+
 
 def image_profile_batch_limit(name: str, application_limit: int | None = None) -> int:
-    limit = get_image_profile(name).max_batch_size
+    try:
+        limit = IMAGE_PROFILES[str(name).strip().lower()].max_batch_size
+    except KeyError as exc:
+        raise ValueError(f"Unknown image quality profile: {name}") from exc
     return min(limit, application_limit) if application_limit is not None else limit

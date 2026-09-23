@@ -77,9 +77,10 @@ def _prepare_workflow(
     prompt: str,
     seed: int | None = None,
     quality_profile: str = DEFAULT_IMAGE_PROFILE,
+    orientation: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     workflow = _load_workflow()
-    profile = get_image_profile(quality_profile)
+    profile = get_image_profile(quality_profile, orientation=orientation)
     remote_nodes = []
     generated_seed = seed if seed is not None else random.SystemRandom().randrange(2**63)
 
@@ -157,6 +158,7 @@ async def generate_comfyui_images(
     on_progress=None,
     keep_runtime_alive: bool = False,
     quality_profile: str = DEFAULT_IMAGE_PROFILE,
+    orientation: str | None = None,
 ) -> list[tuple[bytes, str]]:
     """Generate several images in one broker lifecycle and return all images.
 
@@ -166,7 +168,7 @@ async def generate_comfyui_images(
     """
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
-    profile = get_image_profile(quality_profile)
+    profile = get_image_profile(quality_profile, orientation=orientation)
 
     request_started = time.monotonic()
     client_id = uuid.uuid4().hex
@@ -191,6 +193,7 @@ async def generate_comfyui_images(
                 prompt,
                 seed=current_seed,
                 quality_profile=profile.name,
+                orientation=orientation,
             )
             prompt_id = None
             log.info(

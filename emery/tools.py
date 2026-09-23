@@ -527,6 +527,7 @@ async def _generate_image_bytes(
     on_progress=None,
     keep_runtime_alive: bool = False,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
+    orientation: str | None = None,
 ) -> list[bytes]:
     """Generate image bytes without tying up Emery's foreground turn."""
     if IMAGE_GENERATION_BACKEND == "comfyui":
@@ -537,6 +538,7 @@ async def _generate_image_bytes(
             on_progress=on_progress,
             keep_runtime_alive=keep_runtime_alive,
             quality_profile=quality_profile,
+            orientation=orientation,
         )
         return [image_bytes for image_bytes, _mime_type in generated]
 
@@ -576,6 +578,7 @@ async def _generate_and_deliver_image(
     *,
     batch_size: int = 1,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
+    orientation: str | None = None,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
@@ -630,6 +633,7 @@ async def _generate_and_deliver_image(
             on_progress=report_progress,
             keep_runtime_alive=keep_runtime_alive,
             quality_profile=quality_profile,
+            orientation=orientation,
         )
         # Keep a fallback for callers that use this worker without a callback.
         if not sent_messages:
@@ -695,6 +699,7 @@ async def _run_image_queue(state) -> None:
                     state.thread_id,
                     batch_size=job.batch_size,
                     quality_profile=job.quality_profile,
+                    orientation=job.orientation,
                     image_state=state,
                     bot=job.bot,
                     reply_to_message_id=job.reply_to_message_id,
@@ -721,6 +726,7 @@ def queue_image_generation(
     *,
     batch_size: int = 1,
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
+    orientation: str | None = None,
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
@@ -728,7 +734,7 @@ def queue_image_generation(
     """Start image generation in the background and return its task handle."""
     if not isinstance(batch_size, int) or isinstance(batch_size, bool):
         raise ValueError("batch_size must be an integer")
-    profile = get_image_profile(quality_profile)
+    profile = get_image_profile(quality_profile, orientation=orientation)
     batch_limit = image_profile_batch_limit(profile.name, IMAGE_MAX_BATCH_SIZE)
     if not 1 <= batch_size <= batch_limit:
         raise ValueError(f"batch_size must be between 1 and {batch_limit} for the {profile.name} profile")
@@ -749,6 +755,7 @@ def queue_image_generation(
             batch_size=batch_size,
             bot=bot,
             quality_profile=profile.name,
+            orientation=orientation,
             reply_to_message_id=reply_to_message_id,
             caption_prefix=caption_prefix,
         )

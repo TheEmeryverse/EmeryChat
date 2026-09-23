@@ -443,6 +443,7 @@ def _help_text() -> str:
         "/clear - Clear this chat/thread's active context and session approvals.",
         "/temporary &lt;on|off&gt; - Toggle an ephemeral raw-model conversation without tools or memory.",
         "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
+        "/image ultra &lt;portrait|landscape&gt; # &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -498,17 +499,20 @@ def _image_command_help(error: str | None = None) -> str:
     lines = [
         "<b>Image command</b>",
         "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
+        "Ultra: <code>/image ultra &lt;portrait|landscape&gt; # &lt;description&gt;</code> (exactly one image).",
         "Omit the profile for Low. Omit the batch option to generate one image.",
         "",
         "<b>Profiles</b>",
         "Low: 512x512, 10 steps, up to 10 images.",
         "Medium: 768x768, 12 steps, up to 5 images.",
         "High: 1024x1024, 20 steps, up to 2 images.",
+        "Ultra: portrait 1080x1920 or landscape 1920x1080, 30 steps, one image.",
         "",
         "Examples:",
         "<code>/image a red fox in a snowy forest</code>",
         "<code>/image medium a red fox in a snowy forest</code>",
         "<code>/image high #inbatch 2 a red fox in a snowy forest</code>",
+        "<code>/image ultra portrait # a red fox in a snowy forest</code>",
     ]
     if error:
         lines.insert(0, f"⚠️ {error}\n")
@@ -526,14 +530,29 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     quality_profile = DIRECT_IMAGE_DEFAULT_PROFILE
+    orientation = None
     batch_size = 1
-    if args and args[0].lower() in {"low", "medium", "high"}:
+    if args and args[0].lower() in {"low", "medium", "high", "ultra"}:
         quality_profile = args.pop(0).lower()
+
+    if quality_profile == "ultra":
+        if (
+            len(args) < 3
+            or args[0].lower() not in {"portrait", "landscape"}
+            or args[1] != "#"
+        ):
+            await update.message.reply_text(
+                _image_command_help("Ultra requires: /image ultra portrait|landscape # <description>"),
+                parse_mode="HTML",
+            )
+            return
+        orientation = args.pop(0).lower()
+        args.pop(0)
     elif args and re.fullmatch(r"\d+", args[0]):
         batch_size = int(args.pop(0))
 
     batch_limit = image_profile_batch_limit(quality_profile, IMAGE_MAX_BATCH_SIZE)
-    if args and args[0].lower() == "#inbatch":
+    if quality_profile != "ultra" and args and args[0].lower() == "#inbatch":
         args.pop(0)
         if not args or not re.fullmatch(r"\d+", args[0]):
             await update.message.reply_text(
@@ -542,11 +561,11 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         batch_size = int(args.pop(0))
-    elif args and re.fullmatch(r"#inbatch=(\d+)", args[0], flags=re.IGNORECASE):
+    elif quality_profile != "ultra" and args and re.fullmatch(r"#inbatch=(\d+)", args[0], flags=re.IGNORECASE):
         batch_size = int(re.fullmatch(r"#inbatch=(\d+)", args.pop(0), flags=re.IGNORECASE).group(1))
-    elif quality_profile != DIRECT_IMAGE_DEFAULT_PROFILE and args and re.fullmatch(r"\d+", args[0]):
+    elif quality_profile != DIRECT_IMAGE_DEFAULT_PROFILE and quality_profile != "ultra" and args and re.fullmatch(r"\d+", args[0]):
         batch_size = int(args.pop(0))
-    elif args and args[0].lower().startswith("#inbatch"):
+    elif quality_profile != "ultra" and args and args[0].lower().startswith("#inbatch"):
         await update.message.reply_text(
             _image_command_help("Invalid batch option."),
             parse_mode="HTML",
@@ -587,10 +606,11 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
             thread_id,
             batch_size=batch_size,
             quality_profile=quality_profile,
+            orientation=orientation,
             bot=context.bot,
             reply_to_message_id=update.message.message_id,
         )
-        profile = get_image_profile(quality_profile)
+        profile = get_image_profile(quality_profile, orientation=orientation)
         count_text = f"{batch_size} images" if batch_size != 1 else "1 image"
         await update.message.reply_text(
             f"Image generation queued: {count_text}, {profile.name} profile "
