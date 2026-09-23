@@ -444,6 +444,7 @@ def _help_text() -> str:
         "/temporary &lt;on|off&gt; - Toggle an ephemeral raw-model conversation without tools or memory.",
         "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
         "/image ultra &lt;portrait|landscape&gt; &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
+        "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -500,6 +501,7 @@ def _image_command_help(error: str | None = None) -> str:
         "<b>Image command</b>",
         "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
         "Ultra: <code>/image ultra &lt;portrait|landscape&gt; &lt;description&gt;</code> (one image).",
+        "Ultrabatch: <code>/image ultrabatch &lt;portrait|landscape&gt; &lt;description&gt;</code> (15 images).",
         "Omit the profile for Low. Omit the batch option to generate one image.",
         "",
         "<b>Profiles</b>",
@@ -507,12 +509,14 @@ def _image_command_help(error: str | None = None) -> str:
         "Medium: 768x768, 12 steps, up to 5 images.",
         "High: 1024x1024, 20 steps, up to 2 images.",
         "Ultra: portrait 1080x1920 or landscape 1920x1080, 30 steps, one image.",
+        "Ultrabatch: portrait 1080x1920 or landscape 1920x1080, 30 steps, 15 images.",
         "",
         "Examples:",
         "<code>/image a red fox in a snowy forest</code>",
         "<code>/image medium a red fox in a snowy forest</code>",
         "<code>/image high #inbatch 2 a red fox in a snowy forest</code>",
         "<code>/image ultra portrait a red fox in a snowy forest</code>",
+        "<code>/image ultrabatch portrait a red fox in a snowy forest</code>",
     ]
     if error:
         lines.insert(0, f"⚠️ {error}\n")
@@ -532,27 +536,29 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
     quality_profile = DIRECT_IMAGE_DEFAULT_PROFILE
     orientation = None
     batch_size = 1
-    if args and args[0].lower() in {"low", "medium", "high", "ultra"}:
+    if args and args[0].lower() in {"low", "medium", "high", "ultra", "ultrabatch"}:
         quality_profile = args.pop(0).lower()
 
-    if quality_profile == "ultra":
+    if quality_profile in {"ultra", "ultrabatch"}:
         if (
             len(args) < 2
             or args[0].lower() not in {"portrait", "landscape"}
         ):
             await update.message.reply_text(
                 _image_command_help(
-                    "Ultra requires portrait or landscape, then a description."
+                    "Ultra and ultrabatch require portrait or landscape, then a description."
                 ),
                 parse_mode="HTML",
             )
             return
         orientation = args.pop(0).lower()
+        if quality_profile == "ultrabatch":
+            batch_size = 15
     elif args and re.fullmatch(r"\d+", args[0]):
         batch_size = int(args.pop(0))
 
     batch_limit = image_profile_batch_limit(quality_profile, IMAGE_MAX_BATCH_SIZE)
-    if quality_profile != "ultra" and args and args[0].lower() == "#inbatch":
+    if quality_profile not in {"ultra", "ultrabatch"} and args and args[0].lower() == "#inbatch":
         args.pop(0)
         if not args or not re.fullmatch(r"\d+", args[0]):
             await update.message.reply_text(
@@ -561,11 +567,11 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         batch_size = int(args.pop(0))
-    elif quality_profile != "ultra" and args and re.fullmatch(r"#inbatch=(\d+)", args[0], flags=re.IGNORECASE):
+    elif quality_profile not in {"ultra", "ultrabatch"} and args and re.fullmatch(r"#inbatch=(\d+)", args[0], flags=re.IGNORECASE):
         batch_size = int(re.fullmatch(r"#inbatch=(\d+)", args.pop(0), flags=re.IGNORECASE).group(1))
-    elif quality_profile != DIRECT_IMAGE_DEFAULT_PROFILE and quality_profile != "ultra" and args and re.fullmatch(r"\d+", args[0]):
+    elif quality_profile != DIRECT_IMAGE_DEFAULT_PROFILE and quality_profile not in {"ultra", "ultrabatch"} and args and re.fullmatch(r"\d+", args[0]):
         batch_size = int(args.pop(0))
-    elif quality_profile != "ultra" and args and args[0].lower().startswith("#inbatch"):
+    elif quality_profile not in {"ultra", "ultrabatch"} and args and args[0].lower().startswith("#inbatch"):
         await update.message.reply_text(
             _image_command_help("Invalid batch option."),
             parse_mode="HTML",
