@@ -443,7 +443,7 @@ def _help_text() -> str:
         "/clear - Clear this chat/thread's active context and session approvals.",
         "/temporary &lt;on|off&gt; - Toggle an ephemeral raw-model conversation without tools or memory.",
         "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
-        "/image ultra &lt;portrait|landscape&gt; # &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
+        "/image ultra &lt;portrait|landscape&gt; &lt;count&gt; &lt;prompt&gt; - One image maximum, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -499,7 +499,7 @@ def _image_command_help(error: str | None = None) -> str:
     lines = [
         "<b>Image command</b>",
         "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
-        "Ultra: <code>/image ultra &lt;portrait|landscape&gt; # &lt;description&gt;</code> (or use <code>1</code> instead of <code>#</code>; exactly one image).",
+        "Ultra: <code>/image ultra &lt;portrait|landscape&gt; &lt;count&gt; &lt;description&gt;</code> (maximum count: 1).",
         "Omit the profile for Low. Omit the batch option to generate one image.",
         "",
         "<b>Profiles</b>",
@@ -512,7 +512,6 @@ def _image_command_help(error: str | None = None) -> str:
         "<code>/image a red fox in a snowy forest</code>",
         "<code>/image medium a red fox in a snowy forest</code>",
         "<code>/image high #inbatch 2 a red fox in a snowy forest</code>",
-        "<code>/image ultra portrait # a red fox in a snowy forest</code>",
         "<code>/image ultra portrait 1 a red fox in a snowy forest</code>",
     ]
     if error:
@@ -540,11 +539,12 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         if (
             len(args) < 3
             or args[0].lower() not in {"portrait", "landscape"}
-            or args[1] not in {"#", "1"}
+            or not re.fullmatch(r"\d+", args[1])
+            or int(args[1]) != 1
         ):
             await update.message.reply_text(
                 _image_command_help(
-                    "Ultra requires portrait or landscape, then # or 1, then a description."
+                    "Ultra requires portrait or landscape, a count of 1, then a description."
                 ),
                 parse_mode="HTML",
             )
