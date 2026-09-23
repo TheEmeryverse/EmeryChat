@@ -499,7 +499,7 @@ def _image_command_help(error: str | None = None) -> str:
     lines = [
         "<b>Image command</b>",
         "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
-        "Ultra: <code>/image ultra &lt;portrait|landscape&gt; # &lt;description&gt;</code> (exactly one image).",
+        "Ultra: <code>/image ultra &lt;portrait|landscape&gt; # &lt;description&gt;</code> (or use <code>1</code> instead of <code>#</code>; exactly one image).",
         "Omit the profile for Low. Omit the batch option to generate one image.",
         "",
         "<b>Profiles</b>",
@@ -513,6 +513,7 @@ def _image_command_help(error: str | None = None) -> str:
         "<code>/image medium a red fox in a snowy forest</code>",
         "<code>/image high #inbatch 2 a red fox in a snowy forest</code>",
         "<code>/image ultra portrait # a red fox in a snowy forest</code>",
+        "<code>/image ultra portrait 1 a red fox in a snowy forest</code>",
     ]
     if error:
         lines.insert(0, f"⚠️ {error}\n")
@@ -539,10 +540,12 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         if (
             len(args) < 3
             or args[0].lower() not in {"portrait", "landscape"}
-            or args[1] != "#"
+            or args[1] not in {"#", "1"}
         ):
             await update.message.reply_text(
-                _image_command_help("Ultra requires: /image ultra portrait|landscape # <description>"),
+                _image_command_help(
+                    "Ultra requires portrait or landscape, then # or 1, then a description."
+                ),
                 parse_mode="HTML",
             )
             return
