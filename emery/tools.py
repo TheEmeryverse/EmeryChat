@@ -45,18 +45,28 @@ from emery.docling import (
     build_extracted_text_preview,
 )
 import emery.globals as globals
-from emery.comfyui_image import generate_comfyui_images, release_comfyui_runtime
+from emery.comfyui_image import (
+    ImageGenerationPaused,
+    cancel_comfyui_generation,
+    generate_comfyui_images,
+    release_comfyui_runtime,
+)
 from emery.image_lifecycle import (
     ImageGenerationJob,
     close_image_queue_if_empty,
+    cancel_image_generation,
     finish_image_generation,
     get_active_image_generation,
     image_item_ready,
     image_generation_progress,
     next_image_job,
     note_image_request_queued,
+    pause_image_generation,
+    resume_image_generation,
     set_image_pipeline_waiting,
+    set_current_image_job_active,
     start_image_generation,
+    wait_for_image_resume,
 )
 from emery.image_profiles import (
     DEFAULT_IMAGE_PROFILE,
@@ -495,6 +505,8 @@ async def _generate_image_bytes(
     quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE,
     orientation: str | None = None,
     input_image_bytes: bytes | None = None,
+    cancel_event: asyncio.Event | None = None,
+    pause_event: asyncio.Event | None = None,
 ) -> list[bytes]:
     """Generate image bytes without tying up Emery's foreground turn."""
     if IMAGE_GENERATION_BACKEND == "comfyui":
@@ -507,6 +519,8 @@ async def _generate_image_bytes(
             quality_profile=quality_profile,
             orientation=orientation,
             input_image_bytes=input_image_bytes,
+            cancel_event=cancel_event,
+            pause_event=pause_event,
         )
         return [image_bytes for image_bytes, _mime_type in generated]
 
@@ -554,6 +568,8 @@ async def _generate_and_deliver_image(
     bot=None,
     reply_to_message_id: int | None = None,
     caption_prefix: str | None = None,
+    item_offset: int = 0,
+    batch_total: int | None = None,
     image_state=None,
     keep_runtime_alive: bool = False,
     finish_state: bool = True,
@@ -562,6 +578,7 @@ async def _generate_and_deliver_image(
     bot = bot or globals.application_bot
     sent_messages = []
     error = None
+    total_images = batch_total or batch_size
     try:
         if not bot:
             raise RuntimeError("Telegram bot is not available for image delivery.")
@@ -576,7 +593,9 @@ async def _generate_and_deliver_image(
             )
 
         async def deliver_image(image_bytes, _mime_type, index, total):
-            batch_label = f"Image {index}/{total}\n" if total > 1 else ""
+            absolute_index = item_offset + index
+            absolute_total = batch_total or total
+            batch_label = f"Image {absolute_index}/{absolute_total}\n" if absolute_total > 1 else ""
             caption = (
                 f"{batch_label}{caption_prefix}{prompt[:1000]}"
                 if caption_prefix is not None
@@ -586,16 +605,19 @@ async def _generate_and_deliver_image(
                 chat_id=chat_id,
                 photo=image_bytes,
                 caption=caption,
-                reply_parameters=reply_parameters if index == 1 else None,
+                reply_parameters=reply_parameters if absolute_index == 1 else None,
                 message_thread_id=thread_id,
             )
             if sent_msg:
                 sent_messages.append(sent_msg)
             if image_state is not None:
-                await image_item_ready(image_state, index, total)
+                await image_item_ready(image_state, absolute_index, absolute_total)
 
         async def report_progress(progress):
             if image_state is not None:
+                progress = dict(progress)
+                progress["item_index"] = item_offset + int(progress.get("item_index") or 1)
+                progress["batch_size"] = batch_total or total_images
                 await image_generation_progress(image_state, progress)
 
         image_bytes_list = await _generate_image_bytes(
@@ -607,6 +629,8 @@ async def _generate_and_deliver_image(
             quality_profile=quality_profile,
             orientation=orientation,
             input_image_bytes=input_image_bytes,
+            cancel_event=image_state.cancel_event if image_state is not None else None,
+            pause_event=image_state.pause_event if image_state is not None else None,
         )
         # Keep a fallback for callers that use this worker without a callback.
         if not sent_messages:
@@ -619,8 +643,16 @@ async def _generate_and_deliver_image(
         )
     except Exception as exc:
         error = exc
-        logging.error("❌ IMAGE: Background generation/delivery failed: %s", exc, exc_info=True)
-        if bot:
+        if isinstance(exc, ImageGenerationPaused) and image_state and image_state.paused:
+            logging.info("IMAGE: paused chat_id=%s completed_this_segment=%d", chat_id, exc.completed_images)
+            error = None
+            return exc
+        cancelled = bool(image_state and image_state.cancel_requested)
+        if cancelled:
+            logging.info("IMAGE: queued generation cancelled for chat_id=%s", chat_id)
+        else:
+            logging.error("❌ IMAGE: Background generation/delivery failed: %s", exc, exc_info=True)
+        if bot and not cancelled:
             try:
                 await send_rich_or_split_html_message(
                     bot,
@@ -641,50 +673,106 @@ async def _run_image_queue(state) -> None:
     """Run successive /image/tool requests in order on one runtime lifecycle."""
     queue_error = None
     try:
-        await set_image_pipeline_waiting(state, True)
-        async with globals.image_generation_pipeline_lock:
-            await set_image_pipeline_waiting(state, False)
-            while True:
-                job = await next_image_job(state)
-                if job is None:
-                    if await close_image_queue_if_empty(state):
-                        # A request may arrive during broker teardown. Check once
-                        # after releasing the runtime so it is not lost; it will
-                        # simply start a fresh broker lifecycle if necessary.
-                        if IMAGE_GENERATION_BACKEND == "comfyui":
-                            state.main_model_restored = await release_comfyui_runtime()
-                            if not state.main_model_restored:
-                                queue_error = RuntimeError(
-                                    "ComfyUI broker did not confirm B580/Ornith restoration"
-                                )
-                        job = await next_image_job(state)
-                        if job is None:
-                            break
-                    else:
-                        continue
+        while True:
+            if not await wait_for_image_resume(state):
+                break
+            await set_image_pipeline_waiting(state, True)
+            paused = False
+            queue_drained = False
+            runtime_claimed = False
+            async with globals.image_generation_pipeline_lock:
+                await set_image_pipeline_waiting(state, False)
+                while True:
+                    if state.paused:
+                        paused = True
+                        break
+                    if state.cancel_requested:
+                        break
+                    job = await next_image_job(state)
+                    if job is None:
+                        if await close_image_queue_if_empty(state):
+                            # A request may arrive during broker teardown. Check
+                            # again after release so it is not lost.
+                            if IMAGE_GENERATION_BACKEND == "comfyui":
+                                restored = await release_comfyui_runtime()
+                                runtime_claimed = False
+                                if not restored:
+                                    queue_error = RuntimeError(
+                                        "ComfyUI broker did not confirm B580/Ornith restoration"
+                                    )
+                            job = await next_image_job(state)
+                            if job is None:
+                                queue_drained = True
+                                break
+                        else:
+                            continue
 
-                # A newly queued request may arrive during broker teardown, so
-                # each actual job invalidates any restoration from that release.
-                state.main_model_restored = False
-                job_error = await _generate_and_deliver_image(
-                    job.prompt,
-                    state.chat_id,
-                    state.thread_id,
-                    batch_size=job.batch_size,
-                    quality_profile=job.quality_profile,
-                    orientation=job.orientation,
-                    input_image_bytes=job.input_image_bytes,
-                    image_state=state,
-                    bot=job.bot,
-                    reply_to_message_id=job.reply_to_message_id,
-                    caption_prefix=job.caption_prefix,
-                    # Keep ComfyUI resident while another queued image request can
-                    # be submitted; the broker is released when this FIFO drains.
-                    keep_runtime_alive=True,
-                    finish_state=False,
-                )
-                if job_error is not None:
-                    queue_error = job_error
+                    state.main_model_restored = False
+                    runtime_claimed = True
+                    job_error = await _generate_and_deliver_image(
+                        job.prompt,
+                        state.chat_id,
+                        state.thread_id,
+                        batch_size=job.batch_size,
+                        quality_profile=job.quality_profile,
+                        orientation=job.orientation,
+                        input_image_bytes=job.input_image_bytes,
+                        image_state=state,
+                        bot=job.bot,
+                        reply_to_message_id=job.reply_to_message_id,
+                        caption_prefix=job.caption_prefix,
+                        item_offset=job.item_offset,
+                        batch_total=job.batch_total,
+                        keep_runtime_alive=True,
+                        finish_state=False,
+                    )
+                    await set_current_image_job_active(state, False)
+                    if isinstance(job_error, ImageGenerationPaused) and state.paused:
+                        completed_in_job = min(job.batch_size, job_error.completed_images)
+                        remaining = job.batch_size - completed_in_job
+                        if remaining:
+                            async with state.lock:
+                                state.image_jobs.appendleft(
+                                    ImageGenerationJob(
+                                        prompt=job.prompt,
+                                        batch_size=remaining,
+                                        bot=job.bot,
+                                        quality_profile=job.quality_profile,
+                                        orientation=job.orientation,
+                                        input_image_bytes=job.input_image_bytes,
+                                        reply_to_message_id=job.reply_to_message_id,
+                                        caption_prefix=job.caption_prefix,
+                                        item_offset=job.item_offset + completed_in_job,
+                                        batch_total=job.batch_total or job.batch_size,
+                                    )
+                                )
+                                state.queued_image_requests += 1
+                        paused = True
+                        break
+                    if job_error is not None:
+                        queue_error = job_error
+
+                if (paused or state.cancel_requested) and runtime_claimed:
+                    if IMAGE_GENERATION_BACKEND == "comfyui":
+                        state.main_model_restored = await release_comfyui_runtime()
+
+            if paused:
+                if state.main_model_restored:
+                    state.pause_ready_event.set()
+                    try:
+                        await state.bot.send_message(
+                            chat_id=state.chat_id,
+                            text="Emery is back up.",
+                            message_thread_id=state.thread_id,
+                        )
+                    except Exception:
+                        logging.exception("IMAGE: unable to send model-restored notice after pause")
+                    state.main_model_restored = False
+                elif IMAGE_GENERATION_BACKEND != "comfyui":
+                    state.pause_ready_event.set()
+                continue
+            if queue_drained or state.cancel_requested:
+                break
 
     except Exception as exc:
         queue_error = exc
@@ -721,6 +809,8 @@ def queue_image_generation(
     new_state = image_state is None
     if new_state:
         image_state = start_image_generation(bot, chat_id, thread_id, batch_size)
+    elif image_state.cancel_requested:
+        raise RuntimeError("Image jobs are being cancelled for this chat/thread.")
     elif not image_state.accepting_jobs:
         # The worker is in the short broker-release window. Let it see this
         # request in its post-release queue check instead of dropping it.
@@ -746,6 +836,43 @@ def queue_image_generation(
         image_state.worker_task = asyncio.create_task(_run_image_queue(image_state))
         return _track_background_image_task(image_state.worker_task)
     return image_state.worker_task
+
+
+async def pause_image_queue(bot, chat_id: int, thread_id: int | None):
+    """Pause this chat's image queue, interrupting its active ComfyUI image."""
+    state = get_active_image_generation(chat_id, thread_id)
+    if state is None:
+        state = start_image_generation(bot, chat_id, thread_id, 1)
+        await pause_image_generation(state)
+    else:
+        was_active = state.current_job_active and not state.pipeline_waiting
+        changed = await pause_image_generation(state)
+        if changed and was_active and IMAGE_GENERATION_BACKEND == "comfyui":
+            await cancel_comfyui_generation()
+    if state.worker_task is None or state.worker_task.done():
+        state.worker_task = asyncio.create_task(_run_image_queue(state))
+        _track_background_image_task(state.worker_task)
+    return state
+
+
+async def resume_image_queue(chat_id: int, thread_id: int | None):
+    state = get_active_image_generation(chat_id, thread_id)
+    if state is None:
+        return None, False
+    return state, await resume_image_generation(state)
+
+
+async def cancel_image_queue(chat_id: int, thread_id: int | None):
+    state = get_active_image_generation(chat_id, thread_id)
+    if state is None:
+        return None, False, 0
+    changed, queued, should_interrupt = await cancel_image_generation(state)
+    if changed and should_interrupt and IMAGE_GENERATION_BACKEND == "comfyui":
+        await cancel_comfyui_generation()
+    if state.worker_task is None or state.worker_task.done():
+        state.worker_task = asyncio.create_task(_run_image_queue(state))
+        _track_background_image_task(state.worker_task)
+    return state, changed, queued
 
 
 async def generate_image(prompt, batch_size=1):  # Generates images without blocking Emery's reply

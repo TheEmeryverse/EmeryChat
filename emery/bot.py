@@ -52,7 +52,14 @@ from emery.docling import (
     build_extracted_text_preview,
     build_document_context_text,
 )
-from emery.tools import get_noaa_weather_alerts, get_voice_audio, queue_image_generation
+from emery.tools import (
+    cancel_image_queue,
+    get_noaa_weather_alerts,
+    get_voice_audio,
+    pause_image_queue,
+    queue_image_generation,
+    resume_image_queue,
+)
 from emery.image_lifecycle import defer_active_chat_message
 from emery.image_profiles import DIRECT_IMAGE_DEFAULT_PROFILE, get_image_profile, image_profile_batch_limit
 from emery.telegram_utils import normalize_message_thread_id
@@ -445,6 +452,7 @@ def _help_text() -> str:
         "/image [low|medium|high] [#inbatch count] &lt;prompt&gt; - Low (default): 512x512, 10 steps, max 10; Medium: 768x768, 12 steps, max 5; High: 1024x1024, 20 steps, max 2.",
         "/image ultra &lt;portrait|landscape&gt; &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
+        "/image pause|resume|cancel - Pause and resume queued batches, or cancel image work in this chat/thread.",
         "/image-edit &lt;instructions&gt; - Attach a photo to the same Telegram message and put the command plus edit instructions in its caption.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
@@ -503,6 +511,8 @@ def _image_command_help(error: str | None = None) -> str:
         "Usage: <code>/image [low|medium|high] [#inbatch count] &lt;description&gt;</code>",
         "Ultra: <code>/image ultra &lt;portrait|landscape&gt; &lt;description&gt;</code> (one image).",
         "Ultrabatch: <code>/image ultrabatch &lt;portrait|landscape&gt; &lt;description&gt;</code> (15 images).",
+        "Controls: <code>/image pause</code>, <code>/image resume</code>, <code>/image cancel</code>.",
+        "Pause stops the active image and continues the batch with unfinished images after resume. New batches can queue while paused.",
         "Omit the profile for Low. Omit the batch option to generate one image.",
         "",
         "<b>Profiles</b>",
@@ -530,6 +540,38 @@ async def handle_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     args = list(context.args or [])
+    if args and args[0].lower() in {"pause", "resume", "cancel"}:
+        action = args[0].lower()
+        if not update.message:
+            return
+        if len(args) != 1 or not update.effective_chat:
+            await update.message.reply_text(_image_command_help("Use a control command by itself."), parse_mode="HTML")
+            return
+        chat_id = update.effective_chat.id
+        thread_id = normalize_message_thread_id(chat_id, update.message.message_thread_id)
+        if action == "pause":
+            state = await pause_image_queue(context.bot, chat_id, thread_id)
+            response = (
+                "Image jobs are paused. Emery is available again; completed images are kept, and the active batch resumes with unfinished images after <code>/image resume</code>."
+            )
+        elif action == "resume":
+            state, changed = await resume_image_queue(chat_id, thread_id)
+            response = (
+                "Image generation resumed; queued images will continue."
+                if changed
+                else "There are no paused image jobs in this chat/thread."
+            )
+        else:
+            state, changed, queued = await cancel_image_queue(chat_id, thread_id)
+            if not changed:
+                response = "There are no active or queued image jobs in this chat/thread."
+            else:
+                response = f"Cancellation requested. Removed {queued} queued image batch(es); the active image is stopping."
+        await update.message.reply_text(response, parse_mode="HTML")
+        if state is not None and state.active and state.paused:
+            await state.notifier.repost_at_bottom()
+        return
+
     if not args or args[0].lower() == "help":
         await update.message.reply_text(_image_command_help(), parse_mode="HTML")
         return

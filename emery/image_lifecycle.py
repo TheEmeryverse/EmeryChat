@@ -20,6 +20,12 @@ log = logging.getLogger(__name__)
 _ACTIVE: dict[tuple[int, int | None], "ImageGenerationState"] = {}
 
 
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class ImageGenerationJob:
     prompt: str
@@ -30,6 +36,8 @@ class ImageGenerationJob:
     input_image_bytes: bytes | None = None
     reply_to_message_id: int | None = None
     caption_prefix: str | None = None
+    item_offset: int = 0
+    batch_total: int | None = None
 
 
 @dataclass
@@ -47,6 +55,13 @@ class ImageGenerationState:
     latest_context: Any = None
     latest_user_id: int | None = None
     deferred_count: int = 0
+    paused: bool = False
+    cancel_requested: bool = False
+    current_job_active: bool = False
+    resume_event: asyncio.Event = field(default_factory=_set_event)
+    pause_event: asyncio.Event = field(default_factory=asyncio.Event)
+    pause_ready_event: asyncio.Event = field(default_factory=_set_event)
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     progress_item: int = 0
     progress_value: int | None = None
     progress_max: int | None = None
@@ -86,8 +101,17 @@ def _elapsed_text(state: ImageGenerationState) -> str:
     return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
 
 
-def _progress_text(state: ImageGenerationState, *, complete: bool = False, error: BaseException | None = None) -> str:
-    if error is not None:
+def _progress_text(
+    state: ImageGenerationState,
+    *,
+    complete: bool = False,
+    error: BaseException | None = None,
+) -> str:
+    if state.cancel_requested and complete:
+        headline = "🛑 Image jobs cancelled."
+    elif state.paused and error is None:
+        headline = "⏸️ Image jobs paused."
+    elif error is not None:
         headline = "⚠️ Image generation failed."
     elif complete:
         headline = "✅ Image generation complete."
@@ -95,6 +119,21 @@ def _progress_text(state: ImageGenerationState, *, complete: bool = False, error
         headline = f"🖼️ Image generation: {state.completed}/{state.total} ready."
 
     lines = [headline]
+    if state.paused:
+        if state.current_job_active:
+            lines.append("The active image is stopping; completed images are kept and the batch continues with <code>/image resume</code>.")
+        else:
+            lines.append("Queued batches will start after <code>/image resume</code>.")
+        if state.queued_image_requests:
+            lines.append(f"Queued image batches: {state.queued_image_requests}")
+        lines.append(f"Elapsed: {_elapsed_text(state)}")
+        return "\n".join(lines)
+    if state.cancel_requested and not complete:
+        lines.append("Cancelling the current batch and removing queued batches…")
+        if state.queued_image_requests:
+            lines.append(f"Queued image batches to cancel: {state.queued_image_requests}")
+        lines.append(f"Elapsed: {_elapsed_text(state)}")
+        return "\n".join(lines)
     if not complete and error is None:
         lines.append("Emery will respond to messages when the images are done.")
         if state.pipeline_waiting:
@@ -127,7 +166,11 @@ async def _heartbeat(state: ImageGenerationState) -> None:
         while state.active:
             await asyncio.sleep(max(5.0, float(LIVE_PROGRESS_HEARTBEAT_INTERVAL_SECONDS)))
             if state.active:
-                await state.notifier.update(_progress_text(state), force=True)
+                if state.paused:
+                    await state.notifier.update(_progress_text(state), force=True)
+                    await state.notifier.repost_at_bottom()
+                else:
+                    await state.notifier.update(_progress_text(state), force=True)
     except asyncio.CancelledError:
         return
     except Exception:
@@ -167,6 +210,52 @@ def start_image_generation(bot, chat_id: int, thread_id: int | None, total: int)
     return state
 
 
+async def pause_image_generation(state: ImageGenerationState) -> bool:
+    async with state.lock:
+        if not state.active or state.cancel_requested or state.paused:
+            return False
+        state.paused = True
+        state.resume_event.clear()
+        state.pause_event.set()
+        text = _progress_text(state)
+    await state.notifier.update(text, force=True)
+    await state.notifier.repost_at_bottom()
+    return True
+
+
+async def resume_image_generation(state: ImageGenerationState) -> bool:
+    async with state.lock:
+        if not state.active or state.cancel_requested or not state.paused:
+            return False
+        state.paused = False
+        state.resume_event.set()
+        state.pause_event.clear()
+        state.pause_ready_event.clear()
+        text = _progress_text(state)
+    await state.notifier.update(text, force=True)
+    await state.notifier.repost_at_bottom()
+    return True
+
+
+async def cancel_image_generation(state: ImageGenerationState) -> tuple[bool, int, bool]:
+    async with state.lock:
+        if not state.active or state.cancel_requested:
+            return False, 0, False
+        state.cancel_requested = True
+        state.paused = False
+        state.resume_event.set()
+        state.cancel_event.set()
+        queued = len(state.image_jobs)
+        state.image_jobs.clear()
+        state.queued_image_requests = 0
+        should_interrupt = state.current_job_active and not state.pipeline_waiting
+        state.pause_event.clear()
+        text = _progress_text(state)
+    await state.notifier.update(text, force=True)
+    await state.notifier.repost_at_bottom()
+    return True, queued, should_interrupt
+
+
 async def note_image_request_queued(state: ImageGenerationState) -> None:
     async with state.lock:
         if not state.active:
@@ -187,12 +276,14 @@ async def set_image_pipeline_waiting(state: ImageGenerationState, waiting: bool)
 
 async def next_image_job(state: ImageGenerationState) -> ImageGenerationJob | None:
     async with state.lock:
-        if not state.active or not state.image_jobs:
+        if not state.active or state.paused or state.cancel_requested or not state.image_jobs:
             return None
         job = state.image_jobs.popleft()
+        state.current_job_active = True
+        state.pause_ready_event.clear()
         state.queued_image_requests = max(0, state.queued_image_requests - 1)
-        state.total = max(1, int(job.batch_size))
-        state.completed = 0
+        state.total = max(1, int(job.batch_total or job.batch_size))
+        state.completed = max(0, int(job.item_offset))
         state.progress_item = 0
         state.progress_value = None
         state.progress_max = None
@@ -208,6 +299,8 @@ async def close_image_queue_if_empty(state: ImageGenerationState) -> bool:
     async with state.lock:
         if not state.active:
             return True
+        if state.paused:
+            return False
         if state.image_jobs:
             return False
         state.accepting_jobs = False
@@ -239,6 +332,26 @@ async def image_generation_progress(state: ImageGenerationState, progress: dict[
     await state.notifier.update(text, force=True)
 
 
+async def set_current_image_job_active(state: ImageGenerationState, active: bool) -> None:
+    async with state.lock:
+        if not state.active:
+            return
+        state.current_job_active = bool(active)
+        text = _progress_text(state)
+    await state.notifier.update(text, force=True)
+
+
+async def wait_for_image_resume(state: ImageGenerationState) -> bool:
+    while True:
+        async with state.lock:
+            if not state.active or state.cancel_requested:
+                return False
+            paused = state.paused
+        if not paused:
+            return True
+        await state.resume_event.wait()
+
+
 async def defer_chat_message(state: ImageGenerationState, update, context, entry: dict[str, Any]) -> bool:
     async with state.lock:
         if not state.active:
@@ -268,6 +381,18 @@ async def defer_active_chat_message(update, context, entry: dict[str, Any]) -> b
     state = get_active_image_generation(chat.id, thread_id)
     if state is None:
         return False
+    while True:
+        async with state.lock:
+            if not state.active:
+                return False
+            if not state.paused:
+                return True
+            pause_ready = state.pause_ready_event.is_set()
+            pause_ready_event = state.pause_ready_event
+        if pause_ready:
+            # The image runtime has yielded the GPU to the text model.
+            return False
+        await pause_ready_event.wait()
     return await defer_chat_message(state, update, context, entry)
 
 
@@ -355,9 +480,14 @@ async def finish_image_generation(state: ImageGenerationState, error: BaseExcept
         queued_count = _collapse_pending_history(state)
         state.deferred_count = queued_count
         state.done_event.set()
+        state.pause_ready_event.set()
         if _ACTIVE.get(state.key) is state:
             _ACTIVE.pop(state.key, None)
-        text = _progress_text(state, complete=error is None, error=error)
+        text = _progress_text(
+            state,
+            complete=error is None or state.cancel_requested,
+            error=None if state.cancel_requested else error,
+        )
         has_deferred_chat = queued_count > 0 and state.latest_update is not None and state.latest_context is not None
         has_active_turn = state.key in globals.active_turns
 

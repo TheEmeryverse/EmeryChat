@@ -8,7 +8,8 @@ fails/idles), ComfyUI is stopped and Ornith is restored before the broker
 returns to its idle state.
 
 The broker intentionally supports only the small ComfyUI API surface used by
-EmeryChat: /upload/image, /prompt, /history/<id>, /view, /system_stats, and /health.
+EmeryChat: /upload/image, /prompt, /cancel, /history/<id>, /view,
+/system_stats, and /health.
 """
 
 from __future__ import annotations
@@ -713,6 +714,22 @@ class Runtime:
             if self.process is not None:
                 self._teardown_locked(reason)
 
+    def cancel_active_prompt(self):
+        with self.lock:
+            prompt_id = self.active_prompt_id
+            if self.process is None or prompt_id is None:
+                return HTTPStatus.OK, {}, b'{"status":"no_active_prompt"}'
+        # Do not hold the runtime lock during the interrupt request. The image
+        # poller holds it while waiting on ComfyUI history, and pause must be
+        # able to interrupt that prompt before the poll timeout expires.
+        body = json.dumps({"prompt_id": prompt_id}, separators=(",", ":")).encode()
+        status, headers, response_body = self._proxy(
+            "POST", "/interrupt", body, content_type="application/json"
+        )
+        if status < 400:
+            log.info("Requested ComfyUI interruption for prompt_id=%s", prompt_id)
+        return status, headers, response_body
+
     def expire_idle(self) -> None:
         with self.lock:
             if self.process is not None and time.monotonic() - self.last_activity > IDLE_TIMEOUT_SECONDS:
@@ -785,6 +802,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/release":
             RUNTIME.release()
             self._send(HTTPStatus.OK, {}, b'{"status":"released"}')
+            return
+        if path == "/cancel":
+            status, headers, response_body = RUNTIME.cancel_active_prompt()
+            self._send(status, headers, response_body)
             return
         if path == "/upload/image":
             try:

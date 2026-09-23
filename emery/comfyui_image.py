@@ -35,6 +35,14 @@ REMOTE_ENCODER_NODE = "RemoteQwenImage21TextEncode"
 log = logging.getLogger(__name__)
 
 
+class ImageGenerationPaused(Exception):
+    """Raised when a user pauses a batch between or during image renders."""
+
+    def __init__(self, completed_images: int):
+        super().__init__("Image generation paused")
+        self.completed_images = max(0, int(completed_images))
+
+
 def _edit_dimensions(image_size: tuple[int, int]) -> tuple[int, int]:
     """Return target landscape or portrait dimensions for a source photo."""
     source_width, source_height = image_size
@@ -105,6 +113,46 @@ def _endpoint_label(url: str) -> str:
     """Return a log-safe endpoint label without query strings or credentials."""
     parsed = urlsplit(url)
     return f"{parsed.scheme}://{parsed.hostname or '<unknown>'}:{parsed.port or ''}{parsed.path}"
+
+
+async def cancel_comfyui_generation() -> bool:
+    """Interrupt the active request in the request-scoped ComfyUI broker."""
+    try:
+        response = await globals.http_client.post(
+            f"{COMFYUI_URL.rstrip('/')}/cancel",
+            headers=_headers(),
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            log.warning("IMAGE: broker cancel returned HTTP %s", response.status_code)
+            return False
+        return True
+    except Exception:
+        log.warning("IMAGE: unable to request ComfyUI interruption", exc_info=True)
+        return False
+
+
+async def _await_or_pause(awaitable, pause_event: asyncio.Event | None, completed: int):
+    """Stop waiting on a read request as soon as the user pauses a batch."""
+    if pause_event is None:
+        return await awaitable
+    if pause_event.is_set():
+        raise ImageGenerationPaused(completed)
+    request_task = asyncio.create_task(awaitable)
+    pause_task = asyncio.create_task(pause_event.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {request_task, pause_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if pause_task in done and pause_event.is_set():
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            raise ImageGenerationPaused(completed)
+        return await request_task
+    finally:
+        if not pause_task.done():
+            pause_task.cancel()
 
 
 def _headers() -> dict[str, str]:
@@ -246,6 +294,8 @@ async def generate_comfyui_images(
     quality_profile: str = DEFAULT_IMAGE_PROFILE,
     orientation: str | None = None,
     input_image_bytes: bytes | None = None,
+    cancel_event: asyncio.Event | None = None,
+    pause_event: asyncio.Event | None = None,
 ) -> list[tuple[bytes, str]]:
     """Generate several images in one broker lifecycle and return all images.
 
@@ -298,6 +348,10 @@ async def generate_comfyui_images(
                 raise RuntimeError(f"ComfyUI did not return an uploaded image name: {uploaded}")
 
         for image_index in range(batch_size):
+            if pause_event is not None and pause_event.is_set():
+                raise ImageGenerationPaused(len(images))
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Image generation cancelled")
             current_seed = None if seed is None else seed + image_index
             workflow = _prepare_workflow(
                 prompt,
@@ -342,28 +396,33 @@ async def generate_comfyui_images(
             history: dict[str, Any] | None = None
             history_poll_errors = 0
             while time.monotonic() < deadline:
+                if pause_event is not None and pause_event.is_set():
+                    await cancel_comfyui_generation()
+                    raise ImageGenerationPaused(len(images))
                 if on_progress is not None:
                     try:
-                        progress_response = await globals.http_client.get(
+                        progress_response = await _await_or_pause(globals.http_client.get(
                             f"{base_url}/progress/{prompt_id}",
                             headers=_headers(),
                             timeout=10,
-                        )
+                        ), pause_event, len(images))
                         if progress_response.status_code == 200:
                             progress = progress_response.json()
                             if isinstance(progress, dict):
                                 progress["item_index"] = image_index + 1
                                 progress["batch_size"] = batch_size
                                 await on_progress(progress)
+                    except ImageGenerationPaused:
+                        raise
                     except Exception:
                         # Progress is helpful but must never abort an image.
                         log.debug("IMAGE: live ComfyUI progress poll failed", exc_info=True)
                 try:
-                    response = await globals.http_client.get(
+                    response = await _await_or_pause(globals.http_client.get(
                         f"{base_url}/history/{prompt_id}",
                         headers=_headers(),
                         timeout=30,
-                    )
+                    ), pause_event, len(images))
                 except Exception as exc:
                     # A busy XPU backend can occasionally delay one HTTP
                     # response while the sampler continues. Do not tear down
@@ -443,6 +502,16 @@ async def generate_comfyui_images(
             time.monotonic() - request_started,
         )
         return images
+    except ImageGenerationPaused:
+        if runtime_touched:
+            await _release_runtime(base_url)
+        log.info(
+            "IMAGE: Qwen batch paused after %d/%d images elapsed_seconds=%.3f",
+            len(images),
+            batch_size,
+            time.monotonic() - request_started,
+        )
+        raise
     except Exception:
         if runtime_touched:
             await _release_runtime(base_url)
