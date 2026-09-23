@@ -453,7 +453,7 @@ def _help_text() -> str:
         "/image ultra &lt;portrait|landscape&gt; &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image pause|resume|cancel - Pause and resume queued batches, or cancel image work in this chat/thread.",
-        "/image-edit &lt;instructions&gt; - Attach a photo to the same Telegram message and put the command plus edit instructions in its caption.",
+        "/image-edit &lt;instructions&gt; - Edit an attached photo with Qwen Image at 30 steps.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -718,13 +718,18 @@ async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAUL
             chat_id,
             thread_id,
             batch_size=1,
-            quality_profile=DIRECT_IMAGE_DEFAULT_PROFILE,
+            quality_profile="ultra",
+            orientation=(
+                "landscape"
+                if message.photo[-1].width >= message.photo[-1].height
+                else "portrait"
+            ),
             input_image_bytes=photo_bytes,
             bot=context.bot,
             reply_to_message_id=message.message_id,
             caption_prefix="Edited image\n",
         )
-        await message.reply_text("Image edit queued with Qwen Image.")
+        await message.reply_text("Image edit queued with Qwen Image (30 steps).")
         logging.info(
             "🖼️ IMAGE EDIT: queued for chat_id=%s source_message_id=%s.",
             chat_id,
