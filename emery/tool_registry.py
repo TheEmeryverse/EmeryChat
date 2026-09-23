@@ -68,6 +68,7 @@ from emery.tools import (
     get_today_in_history,
     web_search,
     generate_image,
+    edit_image,
     speak_message,
     get_system_stats,
     fetch_web_content, extract_document_with_docling, use_research_image, get_youtube_transcript,
@@ -1166,6 +1167,38 @@ if is_enabled("ENABLE_IMAGEGEN"):
             "description": "This is the ONLY tool for generating, creating, drawing, illustrating, or designing a new image. When the user asks for a new image, use this tool and do not use terminal, browser, web-search, research-image, or any other tool instead. Do not use it for ordinary text descriptions, image analysis, or finding an existing image. Preserve the requested subject, style, composition, and constraints while making the prompt self-contained. This tool always uses the Medium quality profile (768x768, 12 steps); the user may choose Low, Medium, or High only through a direct /image command. Set batch_size only when the user explicitly asks for more than one image; otherwise omit it or use 1. After the tool returns, include its exact image prompt in the final response under an 'Image prompt:' label; do not paraphrase it.",
             "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Self-contained visual instructions including subject, setting, style, composition, aspect ratio if relevant, and constraints."}, "batch_size": {"type": "integer", "minimum": 1, "maximum": medium_batch_limit, "default": 1, "description": f"Number of images to generate using Medium quality. Set this only when the user explicitly requests more than one image; maximum {medium_batch_limit}."}}, "required": ["prompt"]}
         }
+    })
+    AVAILABLE_TOOLS["edit_image"] = edit_image
+    tools_schema.append({
+        "type": "function",
+        "function": {
+            "name": "edit_image",
+            "description": (
+                "Edit the photo attached to the current user's message when they ask to change, retouch, "
+                "or transform that photo. Use the attached source photo itself; do not call generate_image "
+                "for an edit. Pass concise, complete edit instructions in prompt. The image is read from the "
+                "current user's attached photo and is sent back to this chat when ready. This makes one image "
+                "and does not support batching. Profiles are Low (512 px, 10 steps), Medium (768 px, 12 steps), "
+                "High (1024 px, 20 steps), and Ultra (up to 1920x1080 or 1080x1920, 30 steps); output preserves "
+                "the source photo's aspect ratio. Default to Low unless the user requests a profile."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Edits to apply to the attached photo, including details to preserve.",
+                    },
+                    "quality_profile": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "ultra"],
+                        "default": "low",
+                        "description": "Image quality profile; choose the one requested by the user or low by default.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
     })
 
 if is_enabled("ENABLE_VOICE"):

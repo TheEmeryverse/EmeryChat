@@ -43,14 +43,39 @@ class ImageGenerationPaused(Exception):
         self.completed_images = max(0, int(completed_images))
 
 
-def _edit_dimensions(image_size: tuple[int, int]) -> tuple[int, int]:
-    """Return target landscape or portrait dimensions for a source photo."""
+def _edit_dimension_limit(image_size: tuple[int, int]) -> tuple[int, int]:
+    """Return the maximum 1080p box for the source photo orientation."""
     source_width, source_height = image_size
     profile = get_image_profile(
         "ultra",
         orientation="landscape" if source_width >= source_height else "portrait",
     )
     return profile.width, profile.height
+
+
+def _edit_output_dimensions(
+    image_size: tuple[int, int],
+    quality_profile: str,
+    orientation: str | None = None,
+) -> tuple[int, int]:
+    """Fit the selected profile inside its size box while preserving source aspect."""
+    source_width, source_height = image_size
+    profile = get_image_profile(quality_profile, orientation=orientation)
+    scale = min(profile.width / source_width, profile.height / source_height)
+    return max(1, round(source_width * scale)), max(1, round(source_height * scale))
+
+
+def _edit_latent_dimensions(
+    image_size: tuple[int, int],
+    quality_profile: str,
+    orientation: str | None = None,
+) -> tuple[int, int]:
+    """Align latent dimensions to 16 pixels; final output is cropped to source ratio."""
+    profile = get_image_profile(quality_profile, orientation=orientation)
+    width, height = _edit_output_dimensions(image_size, quality_profile, orientation)
+    width = min(profile.width, max(16, round(width / 16) * 16))
+    height = min(profile.height, max(16, round(height / 16) * 16))
+    return width, height
 
 
 def _prepare_edit_source(image_bytes: bytes) -> tuple[bytes, tuple[int, int]]:
@@ -61,7 +86,7 @@ def _prepare_edit_source(image_bytes: bytes) -> tuple[bytes, tuple[int, int]]:
         with Image.open(io.BytesIO(image_bytes)) as opened:
             image = ImageOps.exif_transpose(opened)
             source_size = image.size
-            max_size = _edit_dimensions(source_size)
+            max_size = _edit_dimension_limit(source_size)
             if image.width <= max_size[0] and image.height <= max_size[1]:
                 return image_bytes, source_size
 
@@ -81,11 +106,17 @@ def _prepare_edit_source(image_bytes: bytes) -> tuple[bytes, tuple[int, int]]:
         raise RuntimeError(f"Unable to read Telegram edit photo: {exc}") from exc
 
 
-def _fit_edit_output(image_bytes: bytes, mime_type: str, source_size: tuple[int, int]) -> bytes:
+def _fit_edit_output(
+    image_bytes: bytes,
+    mime_type: str,
+    source_size: tuple[int, int],
+    quality_profile: str,
+    orientation: str | None,
+) -> bytes:
     """Crop ComfyUI's block-rounded output to the exact requested edit dimensions."""
     from PIL import Image, ImageOps
 
-    target_size = _edit_dimensions(source_size)
+    target_size = _edit_output_dimensions(source_size, quality_profile, orientation)
     try:
         with Image.open(io.BytesIO(image_bytes)) as source:
             if source.size == target_size:
@@ -224,7 +255,11 @@ def _prepare_workflow(
             inputs["width"] = profile.width
             inputs["height"] = profile.height
             if input_image_size:
-                inputs["width"], inputs["height"] = _edit_dimensions(input_image_size)
+                inputs["width"], inputs["height"] = _edit_latent_dimensions(
+                    input_image_size,
+                    profile.name,
+                    orientation,
+                )
         if class_type == "KSampler":
             inputs["steps"] = profile.steps
         if "filename_prefix" in inputs:
@@ -482,7 +517,13 @@ async def generate_comfyui_images(
             mime_type = response.headers.get("content-type", "image/png").split(";", 1)[0]
             image_bytes = bytes(response.content)
             if input_image_size:
-                image_bytes = _fit_edit_output(image_bytes, mime_type, input_image_size)
+                image_bytes = _fit_edit_output(
+                    image_bytes,
+                    mime_type,
+                    input_image_size,
+                    profile.name,
+                    orientation,
+                )
             images.append((image_bytes, mime_type))
             if on_image is not None:
                 await on_image(image_bytes, mime_type, image_index + 1, batch_size)

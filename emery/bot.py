@@ -453,7 +453,8 @@ def _help_text() -> str:
         "/image ultra &lt;portrait|landscape&gt; &lt;prompt&gt; - One image, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image ultrabatch &lt;portrait|landscape&gt; &lt;prompt&gt; - 15 images, 30 steps, 1080x1920 portrait or 1920x1080 landscape.",
         "/image pause|resume|cancel - Pause and resume queued batches, or cancel image work in this chat/thread.",
-        "/image-edit &lt;instructions&gt; - Edit an attached photo with Qwen Image at 30 steps.",
+        "/image-edit [low|medium|high] &lt;instructions&gt; - Edit the attached photo with one image, preserving its aspect ratio.",
+        "/image-edit ultra &lt;portrait|landscape&gt; &lt;instructions&gt; - Edit at 30 steps, preserving the photo's aspect ratio.",
         "/notes - Show the current chat/thread scratchpad.",
         "/clear_notes - Clear the current chat/thread scratchpad.",
         "/wipe - Wipe your persistent memory and restore its baseline template.",
@@ -693,11 +694,48 @@ async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAUL
     if not match:
         return
     prompt = (match.group(1) or "").strip()
+    if prompt.lower() == "help":
+        await message.reply_text(
+            "Attach one photo and use /image-edit [low|medium|high] edit instructions. "
+            "For Ultra, use /image-edit ultra portrait or /image-edit ultra landscape, "
+            "then the instructions. Edits preserve the original aspect ratio; batching is unavailable."
+        )
+        return
     if not message.photo:
         await message.reply_text("Attach a photo to the same message as /image-edit and its instructions.")
         return
     if not prompt:
         await message.reply_text("Add edit instructions after /image-edit.")
+        return
+
+    args = prompt.split()
+    quality_profile = DIRECT_IMAGE_DEFAULT_PROFILE
+    orientation = None
+    if args and args[0].lower() in {"low", "medium", "high", "ultra"}:
+        quality_profile = args.pop(0).lower()
+    elif args and args[0].lower() == "ultrabatch":
+        await message.reply_text("Image editing makes one image at a time; ultrabatch is not available.")
+        return
+    if quality_profile == "ultra":
+        if not args or args[0].lower() not in {"portrait", "landscape"}:
+            await message.reply_text(
+                "Use /image-edit ultra portrait or /image-edit ultra landscape, followed by the edit instructions."
+            )
+            return
+        orientation = args.pop(0).lower()
+        source_orientation = (
+            "landscape"
+            if message.photo[-1].width >= message.photo[-1].height
+            else "portrait"
+        )
+        if orientation != source_orientation:
+            await message.reply_text(
+                f"This photo is {source_orientation}; choose that orientation to preserve its aspect ratio."
+            )
+            return
+    prompt = " ".join(args).strip()
+    if not prompt:
+        await message.reply_text("Add edit instructions after the profile, if supplied.")
         return
 
     try:
@@ -718,18 +756,17 @@ async def handle_image_edit_command(update: Update, context: ContextTypes.DEFAUL
             chat_id,
             thread_id,
             batch_size=1,
-            quality_profile="ultra",
-            orientation=(
-                "landscape"
-                if message.photo[-1].width >= message.photo[-1].height
-                else "portrait"
-            ),
+            quality_profile=quality_profile,
+            orientation=orientation,
             input_image_bytes=photo_bytes,
             bot=context.bot,
             reply_to_message_id=message.message_id,
             caption_prefix="Edited image\n",
         )
-        await message.reply_text("Image edit queued with Qwen Image (30 steps).")
+        profile = get_image_profile(quality_profile, orientation=orientation)
+        await message.reply_text(
+            f"Image edit queued with Qwen Image ({profile.name}, {profile.steps} steps)."
+        )
         logging.info(
             "🖼️ IMAGE EDIT: queued for chat_id=%s source_message_id=%s.",
             chat_id,
@@ -872,6 +909,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_input_voice = False
     model_to_use = MODEL_ID
+    image_artifact_id = None
+    edit_image_artifact_id = None
     
     now_str = datetime.now(USER_TIMEZONE).strftime("%A, %B %d, %Y at %I:%M %p")
     sender_name = update.effective_user.first_name or "User"
@@ -891,9 +930,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = update.message.caption or ""
         
         await update.message.reply_chat_action("typing")
-        image_artifact_id = None
+        from emery.media import store_artifact
+        try:
+            edit_image_artifact_id = store_artifact(
+                compress_image_bytes(photo_bytes, max_dim=1920, quality=90),
+                mime_type="image/jpeg",
+                label="editable user image",
+            )
+        except ValueError:
+            logging.warning("IMAGE EDIT: source photo exceeded artifact limit; using vision-sized copy")
+            edit_image_artifact_id = store_artifact(
+                bytes(compressed_bytes),
+                mime_type="image/jpeg",
+                label="editable user image",
+            )
         if MAIN_MODEL_VISION:
-            from emery.media import store_artifact
             image_artifact_id = store_artifact(
                 bytes(compressed_bytes),
                 mime_type="image/jpeg",
@@ -995,9 +1046,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "message_thread_id": update.message.message_thread_id if update.message else None,
         "timestamp": datetime.now(USER_TIMEZONE)
     }
-    if update.message.photo and MAIN_MODEL_VISION:
+    if update.message.photo and edit_image_artifact_id:
         user_history_entry["media_attachments"] = [{
-            "artifact_id": image_artifact_id,
+            "artifact_id": image_artifact_id or edit_image_artifact_id,
+            "edit_artifact_id": edit_image_artifact_id,
             "kind": "user_image",
         }]
     globals.chat_histories[chat_id].append(user_history_entry)

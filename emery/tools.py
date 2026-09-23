@@ -81,6 +81,7 @@ from emery.media import (
     can_use_research_image,
     download_research_image,
     extract_image_candidates,
+    get_artifact,
     get_research_candidate,
     queue_model_attachment,
     queue_outbound_media,
@@ -904,6 +905,69 @@ async def generate_image(prompt, batch_size=1):  # Generates images without bloc
         "FINAL RESPONSE REQUIREMENT: Include the exact prompt sent to the image "
         "model under a clearly labeled `Image prompt:` section. Do not paraphrase it.\n"
         f"Image prompt:\n{prompt}"
+    )
+
+
+async def edit_image(prompt: str, quality_profile: str = DIRECT_IMAGE_DEFAULT_PROFILE) -> str:
+    """Queue one edit of the photo attached to the current user's message."""
+    chat_id = globals.TARGET_CHAT_ID.get()
+    if not chat_id:
+        return "Chat context was lost; the image edit could not be queued."
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return "Describe the edits you want made to the attached image."
+
+    thread_id = normalize_message_thread_id(chat_id, globals.CURRENT_THREAD_ID.get())
+    user_id = globals.current_user_id.get()
+    attachment = None
+    for message in reversed(globals.chat_histories.get(chat_id, [])):
+        if message.get("role") != "user":
+            continue
+        if normalize_message_thread_id(chat_id, message.get("message_thread_id")) != thread_id:
+            continue
+        if user_id is not None and message.get("user_id") != user_id:
+            continue
+        attachments = message.get("media_attachments") or []
+        if attachments:
+            attachment = attachments[0]
+            break
+    if not isinstance(attachment, dict):
+        return "To edit an image, attach a photo to the message describing the edits."
+
+    artifact_id = attachment.get("edit_artifact_id") or attachment.get("artifact_id")
+    artifact = get_artifact(artifact_id)
+    if not artifact or not artifact.get("bytes"):
+        return "I can’t access the photo from the current message anymore. Please attach it again with the edit instructions."
+
+    quality_profile = str(quality_profile or DIRECT_IMAGE_DEFAULT_PROFILE).strip().lower()
+    orientation = None
+    if quality_profile == "ultra":
+        from PIL import Image, ImageOps
+        import io
+
+        try:
+            with Image.open(io.BytesIO(artifact["bytes"])) as source:
+                width, height = ImageOps.exif_transpose(source).size
+        except Exception as exc:
+            return f"I couldn’t read the attached photo for an Ultra edit: {safe_preview(str(exc), max_len=200)}"
+        orientation = "landscape" if width >= height else "portrait"
+
+    try:
+        profile = get_image_profile(quality_profile, orientation=orientation)
+        queue_image_generation(
+            prompt,
+            chat_id,
+            thread_id,
+            batch_size=1,
+            quality_profile=profile.name,
+            orientation=orientation,
+            input_image_bytes=artifact["bytes"],
+        )
+    except (RuntimeError, ValueError) as exc:
+        return f"Image edit could not be queued: {safe_preview(str(exc), max_len=300)}"
+    return (
+        f"Image edit queued with Qwen Image ({profile.name}, {profile.steps} steps). "
+        "It will be delivered in this chat when ready."
     )
 
 # --- NOAA WEATHER ---
