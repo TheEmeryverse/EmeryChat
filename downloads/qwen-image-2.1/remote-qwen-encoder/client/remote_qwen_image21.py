@@ -51,9 +51,9 @@ class RemoteQwenImage21TextEncode:
 
             samples = image[:1].movedim(-1, 1)
             ratio = samples.shape[3] / samples.shape[2]
-            target_pixel_area = 1920 * 1080
-            width = max(32, round((target_pixel_area * ratio) ** 0.5 / 32) * 32)
-            height = max(32, round((target_pixel_area / ratio) ** 0.5 / 32) * 32)
+            total_pixels_side = 1024
+            width = max(32, round((total_pixels_side**2 * ratio) ** 0.5 / 32) * 32)
+            height = max(32, round((total_pixels_side**2 / ratio) ** 0.5 / 32) * 32)
             resized = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled")
             pixels = (resized[0].movedim(0, -1)[:, :, :3].clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
             buffer = io.BytesIO()

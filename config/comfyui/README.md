@@ -21,7 +21,8 @@ VAE must be connected so the node can attach the reference latent to its
 conditioning. The runtime removes the temporary uploaded source image after
 the edit finishes or fails. Edit outputs use 1920x1080 for landscape sources
 and 1080x1920 for portrait sources; the reference is resized to roughly the
-same pixel area while preserving its original aspect ratio for conditioning.
+same 1024x1024-pixel area while preserving its original aspect ratio for
+conditioning on the GTX 1070 encoder.
 
 EmeryChat consumes this file inside the container at:
 
