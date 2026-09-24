@@ -108,6 +108,9 @@ async def _send_reolink_alert_photo(**send_kwargs):
 def _readable_reolink_alert_report(report):
     """Return a concise camera description suitable for people and the log."""
     report_text = str(report or "").strip()
+    if re.fullmatch(r"DONE", report_text, flags=re.IGNORECASE):
+        return "DONE"
+    report_text = re.sub(r"\s+DONE\s*$", "", report_text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", report_text).strip().strip('"')
 
 
@@ -3350,7 +3353,7 @@ async def get_reolink_snapshot(
         security_prompt = f"""You are describing a live home security camera image from '{matched_camera_name}'{desc_context}.
 Write a simple, factual description in one or two sentences only when something notable is happening in the image. Focus on visible people, vehicles, packages, deliveries, or other notable activity. Do not guess identities, intent, or details that are not visible. Ignore static background and ordinary domestic pets.
 Do not mention the capture date, clock time, or day.
-If there is nothing notable to report, reply with exactly: DONE
+Choose exactly one response: if nothing notable is happening, output exactly DONE and nothing else; if something notable is happening, output only its one- or two-sentence description. Never append DONE or any status label to a description.
 Do not classify the image, express confidence, or add labels or formatting."""
             
         concise_report = await get_image_description(
