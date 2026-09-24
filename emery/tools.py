@@ -697,6 +697,7 @@ async def _run_image_queue(state) -> None:
                             if IMAGE_GENERATION_BACKEND == "comfyui":
                                 restored = await release_comfyui_runtime()
                                 runtime_claimed = False
+                                state.main_model_restored = restored
                                 if not restored:
                                     queue_error = RuntimeError(
                                         "ComfyUI broker did not confirm B580/Ornith restoration"
