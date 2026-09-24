@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+  "url": "http://127.0.0.1:8081/v1/chat/completions",
+  "model": "local",
+  "created_at": "2026-09-20T02:39:16.398830+00:00",
+  "settings": {
+    "seed": 12345,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 512,
+    "thinking": true,
+    "repeats": 2
+  },
+  "records": [
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "list",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 19.597206,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 30.133642705398444,
+      "decode_tok_s": 26.380385961050365,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "list",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 19.562701,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 30.270695696263843,
+      "decode_tok_s": 26.302387690606093,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "list",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 19.474087,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 30.179340732301704,
+      "decode_tok_s": 26.423355309015708,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "json",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 16.571345,
+      "prompt_tokens": 49,
+      "completion_tokens": 394,
+      "prompt_tok_s": 39.63702194920313,
+      "decode_tok_s": 25.63142827905699,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "json",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 16.572571,
+      "prompt_tokens": 4,
+      "completion_tokens": 394,
+      "prompt_tok_s": 29.355212751904418,
+      "decode_tok_s": 24.04583907863687,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "json",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 15.100776,
+      "prompt_tokens": 4,
+      "completion_tokens": 394,
+      "prompt_tok_s": 30.63279700411245,
+      "decode_tok_s": 26.25621455536303,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "reasoning",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 17.71026,
+      "prompt_tokens": 52,
+      "completion_tokens": 434,
+      "prompt_tok_s": 42.20214013545264,
+      "decode_tok_s": 26.281031874643002,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes. Explanation: Each machine completes 1/12 of the job per minute; together they complete 1/6 per minute, so the job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 16.666568,
+      "prompt_tokens": 4,
+      "completion_tokens": 434,
+      "prompt_tok_s": 30.62482295024232,
+      "decode_tok_s": 26.32783172855166,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes. Explanation: Each machine completes 1/12 of the job per minute; together they complete 1/6 per minute, so the job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 16.574781,
+      "prompt_tokens": 4,
+      "completion_tokens": 434,
+      "prompt_tok_s": 30.439778702808827,
+      "decode_tok_s": 26.336557483490232,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes. Explanation: Each machine completes 1/12 of the job per minute; together they complete 1/6 per minute, so the job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "code",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 21.205092,
+      "prompt_tokens": 48,
+      "completion_tokens": 512,
+      "prompt_tok_s": 37.639619463447225,
+      "decode_tok_s": 25.643125574837576,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": true,
+        "has_value_error": false
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size"
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "code",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 20.922467,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 30.446497891580016,
+      "decode_tok_s": 24.687140019467574,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": true,
+        "has_value_error": false
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size"
+    },
+    {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_k_m-b580-ncpu40",
+      "case": "code",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 19.605885,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 30.65650914330385,
+      "decode_tok_s": 26.24129004852225,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": true,
+        "has_value_error": false
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size"
+    }
+  ],
+  "summary": {
+    "code": {
+      "runs": 2,
+      "wall_s_median": 20.264176,
+      "wall_s_mean": 20.264176,
+      "prompt_tok_s_median": 30.551503517441933,
+      "decode_tok_s_median": 25.46421503399491,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "has_function": true,
+        "has_value_error": false
+      }
+    },
+    "json": {
+      "runs": 2,
+      "wall_s_median": 15.8366735,
+      "wall_s_mean": 15.8366735,
+      "prompt_tok_s_median": 29.994004878008433,
+      "decode_tok_s_median": 25.151026816999952,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 394.0,
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      }
+    },
+    "list": {
+      "runs": 2,
+      "wall_s_median": 19.518394,
+      "wall_s_mean": 19.518394,
+      "prompt_tok_s_median": 30.225018214282773,
+      "decode_tok_s_median": 26.3628714998109,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      }
+    },
+    "reasoning": {
+      "runs": 2,
+      "wall_s_median": 16.6206745,
+      "wall_s_mean": 16.6206745,
+      "prompt_tok_s_median": 30.53230082652557,
+      "decode_tok_s_median": 26.33219460602095,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 434.0,
+      "quality": {
+        "contains_6_minutes": true
+      }
+    }
+  }
+}

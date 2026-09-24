@@ -1,0 +1,268 @@
+{
+  "schema": 1,
+  "label": "nemotron-mixed-2.47-b580",
+  "url": "http://127.0.0.1:8081/v1/chat/completions",
+  "model": "local",
+  "created_at": "2026-09-20T03:12:47.991332+00:00",
+  "settings": {
+    "seed": 12345,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 512,
+    "thinking": true,
+    "repeats": 2
+  },
+  "records": [
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "list",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 6.447089,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 50.46618135022268,
+      "decode_tok_s": 81.44699593673529,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "list",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 6.353996,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 54.09938056209256,
+      "decode_tok_s": 81.39589337806974,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "list",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 6.360705,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 54.048211004215766,
+      "decode_tok_s": 81.3079926074964,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "json",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 6.603914,
+      "prompt_tokens": 49,
+      "completion_tokens": 512,
+      "prompt_tok_s": 149.2687355110322,
+      "decode_tok_s": 81.45222786986007,
+      "finish_reason": "length",
+      "quality": {
+        "valid_json": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "json",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 6.43965,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 53.436644178745574,
+      "decode_tok_s": 81.40382894299597,
+      "finish_reason": "length",
+      "quality": {
+        "valid_json": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "json",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 6.352851,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 54.790017258855436,
+      "decode_tok_s": 81.39647682279126,
+      "finish_reason": "length",
+      "quality": {
+        "valid_json": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "reasoning",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 5.016248,
+      "prompt_tokens": 52,
+      "completion_tokens": 382,
+      "prompt_tok_s": 156.76674615544627,
+      "decode_tok_s": 81.36529686801268,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes\n\nWorking together, each machine completes 1⁄12 of the job per minute, so combined they finish 1⁄6 per minute, meaning the whole job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 4.956314,
+      "prompt_tokens": 4,
+      "completion_tokens": 382,
+      "prompt_tok_s": 53.44306976992758,
+      "decode_tok_s": 79.48332915402617,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes\n\nWorking together, each machine completes 1⁄12 of the job per minute, so combined they finish 1⁄6 per minute, meaning the whole job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 4.804915,
+      "prompt_tokens": 4,
+      "completion_tokens": 382,
+      "prompt_tok_s": 37.08923670350864,
+      "decode_tok_s": 81.17758203303609,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes\n\nWorking together, each machine completes 1⁄12 of the job per minute, so combined they finish 1⁄6 per minute, meaning the whole job takes 6 minutes."
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "code",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 6.59429,
+      "prompt_tokens": 48,
+      "completion_tokens": 512,
+      "prompt_tok_s": 143.5707235366255,
+      "decode_tok_s": 81.65532440653678,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": false,
+        "has_value_error": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "code",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 6.423158,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 53.01032376055236,
+      "decode_tok_s": 81.63020144927953,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": false,
+        "has_value_error": false
+      },
+      "response": ""
+    },
+    {
+      "label": "nemotron-mixed-2.47-b580",
+      "case": "code",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 6.331537,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 54.43213673352747,
+      "decode_tok_s": 81.67944446469114,
+      "finish_reason": "length",
+      "quality": {
+        "has_function": false,
+        "has_value_error": false
+      },
+      "response": ""
+    }
+  ],
+  "summary": {
+    "code": {
+      "runs": 2,
+      "wall_s_median": 6.3773475,
+      "wall_s_mean": 6.3773475,
+      "prompt_tok_s_median": 53.72123024703991,
+      "decode_tok_s_median": 81.65482295698533,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "has_function": false,
+        "has_value_error": false
+      }
+    },
+    "json": {
+      "runs": 2,
+      "wall_s_median": 6.396250500000001,
+      "wall_s_mean": 6.396250500000001,
+      "prompt_tok_s_median": 54.113330718800505,
+      "decode_tok_s_median": 81.40015288289362,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "valid_json": false
+      }
+    },
+    "list": {
+      "runs": 2,
+      "wall_s_median": 6.357350500000001,
+      "wall_s_mean": 6.357350500000001,
+      "prompt_tok_s_median": 54.07379578315417,
+      "decode_tok_s_median": 81.35194299278308,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      }
+    },
+    "reasoning": {
+      "runs": 2,
+      "wall_s_median": 4.8806145,
+      "wall_s_mean": 4.8806145,
+      "prompt_tok_s_median": 45.26615323671811,
+      "decode_tok_s_median": 80.33045559353113,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 382.0,
+      "quality": {
+        "contains_6_minutes": true
+      }
+    }
+  }
+}

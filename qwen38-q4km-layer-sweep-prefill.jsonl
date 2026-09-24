@@ -1,0 +1,200 @@
+Build with Macros:
+  GGML_SYCL_DNNL: yes
+  GGML_SYCL_F16: yes
+  GGML_SYCL_FORCE_MMQ: no
+  GGML_SYCL_GRAPH: yes
+  GGML_SYCL_SUPPORT_LEVEL_ZERO_API: yes
+  GGML_SYCL_SUPPORT_VMM: yes
+Running with Environment Variables:
+  GGML_SYCL_DEBUG: 0
+  GGML_SYCL_DEV_DEBUG: 0
+  GGML_SYCL_DEV2DEV_MEMCPY: 0 (SYCL API)
+  GGML_SYCL_GET_MEM_API: 0 (Level Zero API)
+  GGML_SYCL_ENABLE_DNN: 1
+  GGML_SYCL_FA_ONEDNN: 1
+  GGML_SYCL_FA_ONEDNN_MAX_KV: 0
+  GGML_SYCL_ENABLE_MKL_FA: 1
+  GGML_SYCL_MEMTRACE: 0
+  GGML_SYCL_MEMTRACE_STEP: 64
+  GGML_SYCL_ENABLE_FLASH_ATTN: 1
+  GGML_SYCL_ENABLE_GRAPH: 0
+  GGML_SYCL_ENABLE_OPT: 1
+  GGML_SYCL_ENABLE_VMM: 1
+  GGML_SYCL_ENABLE_FUSION: 1
+  GGML_SYCL_ENABLE_ESIMD: 1
+  GGML_SYCL_PRIORITIZE_DMMV: 0
+  GGML_SYCL_USE_ASYNC_MEM_OP: 1
+  GGML_SYCL_USE_LEVEL_ZERO_API: 1
+  GGML_SYCL_USM_SYSTEM: 0
+  GGML_SYCL_ENABLE_HOST_PINNED_MEM: 1
+  GGML_SYCL_HOST_PINNED_MEM_2G: 0
+Found 1 SYCL devices:
+|  |                   |                                       |       |Max    |        |Max  |Global |                     |
+|  |                   |                                       |       |compute|Max work|sub  |mem    |                     |
+|ID|        Device Type|                                   Name|Version|units  |group   |group|size   |       Driver version|
+|--|-------------------|---------------------------------------|-------|-------|--------|-----|-------|---------------------|
+| 0| [level_zero:gpu:0]|                Intel Arc B580 Graphics|   20.1|    160|    1024|   32| 12809M|         1.15.38308+4|
+SYCL Optimization Feature:
+|ID|        Device Type|Reorder|
+|--|-------------------|-------|
+| 0| [level_zero:gpu:0]|      Y|
+[
+  {
+    "build_commit": "9f31776c3",
+    "build_number": 10988,
+    "cpu_info": "AMD Ryzen 9 5950X 16-Core Processor",
+    "gpu_info": "Intel(R) Arc(TM) B580 Graphics",
+    "backends": "SYCL",
+    "model_filename": "/home/hudson/EmeryChat/models/qwen38-bartowski/Qwen3.8-27B-Q4_K_M.gguf",
+    "model_type": "qwen35 27B Q4_K - Medium",
+    "model_size": 17431404544,
+    "model_n_params": 27320697856,
+    "n_batch": 512,
+    "n_ubatch": 256,
+    "n_threads": 16,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "q4_0",
+    "type_v": "q4_0",
+    "n_gpu_layers": 8,
+    "n_cpu_moe": 0,
+    "split_mode": "none",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": -1,
+    "devices": "SYCL0",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "load_mode": "auto",
+    "lazy_mode": "auto",
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 512,
+    "n_gen": 0,
+    "n_depth": 0,
+    "test_time": "2026-09-20T16:20:31Z",
+    "avg_ns": 15929027764,
+    "stddev_ns": 231442161,
+    "avg_ts": 32.145970,
+    "stddev_ts": 0.467067,
+    "samples_ns": [ 16092682038, 15765373491 ],
+    "samples_ts": [ 31.8157, 32.4762 ]
+  },
+  {
+    "build_commit": "9f31776c3",
+    "build_number": 10988,
+    "cpu_info": "AMD Ryzen 9 5950X 16-Core Processor",
+    "gpu_info": "Intel(R) Arc(TM) B580 Graphics",
+    "backends": "SYCL",
+    "model_filename": "/home/hudson/EmeryChat/models/qwen38-bartowski/Qwen3.8-27B-Q4_K_M.gguf",
+    "model_type": "qwen35 27B Q4_K - Medium",
+    "model_size": 17431404544,
+    "model_n_params": 27320697856,
+    "n_batch": 512,
+    "n_ubatch": 256,
+    "n_threads": 16,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "q4_0",
+    "type_v": "q4_0",
+    "n_gpu_layers": 16,
+    "n_cpu_moe": 0,
+    "split_mode": "none",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": -1,
+    "devices": "SYCL0",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "load_mode": "auto",
+    "lazy_mode": "auto",
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 512,
+    "n_gen": 0,
+    "n_depth": 0,
+    "test_time": "2026-09-20T16:21:27Z",
+    "avg_ns": 14506423594,
+    "stddev_ns": 856951104,
+    "avg_ts": 35.356401,
+    "stddev_ts": 2.088641,
+    "samples_ns": [ 15112379531, 13900467657 ],
+    "samples_ts": [ 33.8795, 36.8333 ]
+  },
+  {
+    "build_commit": "9f31776c3",
+    "build_number": 10988,
+    "cpu_info": "AMD Ryzen 9 5950X 16-Core Processor",
+    "gpu_info": "Intel(R) Arc(TM) B580 Graphics",
+    "backends": "SYCL",
+    "model_filename": "/home/hudson/EmeryChat/models/qwen38-bartowski/Qwen3.8-27B-Q4_K_M.gguf",
+    "model_type": "qwen35 27B Q4_K - Medium",
+    "model_size": 17431404544,
+    "model_n_params": 27320697856,
+    "n_batch": 512,
+    "n_ubatch": 256,
+    "n_threads": 16,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "q4_0",
+    "type_v": "q4_0",
+    "n_gpu_layers": 24,
+    "n_cpu_moe": 0,
+    "split_mode": "none",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": -1,
+    "devices": "SYCL0",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "load_mode": "auto",
+    "lazy_mode": "auto",
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 512,
+    "n_gen": 0,
+    "n_depth": 0,
+    "test_time": "2026-09-20T16:22:16Z",
+    "avg_ns": 12183752950,
+    "stddev_ns": 195915888,
+    "avg_ts": 42.028610,
+    "stddev_ts": 0.675824,
+    "samples_ns": [ 12045219541, 12322286360 ],
+    "samples_ts": [ 42.5065, 41.5507 ]
+  }
+]
+	Command being timed: "timeout 900 /home/hudson/llama.cpp-build-qwen38-b580-control/bin/llama-bench -m /home/hudson/EmeryChat/models/qwen38-bartowski/Qwen3.8-27B-Q4_K_M.gguf -p 512 -n 0 -r 2 -b 512 -ub 256 -ctk q4_0 -ctv q4_0 -ngl 8,16,24 -sm none -mg 0 -dev SYCL0 -fa auto -t 16 -o json"
+	User time (seconds): 1571.40
+	System time (seconds): 202.43
+	Percent of CPU this job got: 1223%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:24.99
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 18683908
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 87
+	Minor (reclaiming a frame) page faults: 42519065
+	Voluntary context switches: 30986
+	Involuntary context switches: 57569
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

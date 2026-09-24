@@ -41,6 +41,7 @@ from emery.config import (
     FAST_MODEL_ID,
     FAST_MODEL_URL,
     MAIN_MODEL_URL,
+    MAIN_MODEL_HEADERS,
     MAIN_MODEL_REASONING_EFFORT,
     MODEL_ID,
     SEARXNG_URL,
@@ -293,7 +294,7 @@ async def _query_chat_model(
         payload["reasoning_effort"] = MAIN_MODEL_REASONING_EFFORT if enable_thinking else "none"
     try:
         async with lock:
-            response = await globals.http_client.post(url, json=payload, timeout=900)
+            response = await globals.http_client.post(url, json=payload, headers=MAIN_MODEL_HEADERS if url == MAIN_MODEL_URL else None, timeout=900)
         if response.status_code != 200:
             logging.error("DEBATE: %s endpoint returned HTTP %s: %s", endpoint_label, response.status_code, safe_preview(response.text))
             return ""

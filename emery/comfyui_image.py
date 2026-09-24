@@ -38,9 +38,10 @@ log = logging.getLogger(__name__)
 class ImageGenerationPaused(Exception):
     """Raised when a user pauses a batch between or during image renders."""
 
-    def __init__(self, completed_images: int):
+    def __init__(self, completed_images: int, *, priority_preemption: bool = False):
         super().__init__("Image generation paused")
         self.completed_images = max(0, int(completed_images))
+        self.priority_preemption = bool(priority_preemption)
 
 
 def _edit_dimension_limit(image_size: tuple[int, int]) -> tuple[int, int]:
@@ -284,6 +285,8 @@ def _prepare_workflow(
 
 async def _json_response(response, label: str) -> dict[str, Any]:
     if response.status_code >= 400:
+        if response.status_code == 409 and "image_preempted" in response.text:
+            raise ImageGenerationPaused(0, priority_preemption=True)
         raise RuntimeError(f"ComfyUI {label} HTTP {response.status_code}: {response.text[:1000]}")
     try:
         data = response.json()
@@ -472,6 +475,8 @@ async def generate_comfyui_images(
                         )
                     await asyncio.sleep(max(1.0, COMFYUI_POLL_INTERVAL_SECONDS))
                     continue
+                if response.status_code == 409 and "image_preempted" in response.text:
+                    raise ImageGenerationPaused(len(images), priority_preemption=True)
                 if response.status_code == 200:
                     data = await _json_response(response, "history")
                     candidate = data.get(str(prompt_id))
@@ -511,6 +516,8 @@ async def generate_comfyui_images(
                 timeout=60,
             )
             if response.status_code >= 400:
+                if response.status_code == 409 and "image_preempted" in response.text:
+                    raise ImageGenerationPaused(len(images), priority_preemption=True)
                 raise RuntimeError(
                     f"ComfyUI image download HTTP {response.status_code}: {response.text[:500]}"
                 )

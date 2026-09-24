@@ -92,7 +92,6 @@ DEFAULT_ENV = {
     "MAX_TOOL_CALLS_PER_TURN": "8",
     "MAX_WEB_SEARCHES_PER_TURN": "2",
     "MAX_WEB_FETCHES_PER_TURN": "4",
-    "CHAT_DEBOUNCE_DELAY": "4.0",
     "EXPERT_ARCHIVE_DIR": "data/expert",
     "EXPERT_INDEX_PATH": "config/expert_sessions.json",
     "EXPERT_MAIN_MAX_TOKENS": "32768",
@@ -664,7 +663,6 @@ def build_env_content(env_data):
         "MAX_TOOL_CALLS_PER_TURN=" + env_value(env_data["MAX_TOOL_CALLS_PER_TURN"]),
         "MAX_WEB_SEARCHES_PER_TURN=" + env_value(env_data["MAX_WEB_SEARCHES_PER_TURN"]),
         "MAX_WEB_FETCHES_PER_TURN=" + env_value(env_data["MAX_WEB_FETCHES_PER_TURN"]),
-        "CHAT_DEBOUNCE_DELAY=" + env_value(env_data["CHAT_DEBOUNCE_DELAY"]),
         "EXPERT_ARCHIVE_DIR=" + maybe_quote(env_data["EXPERT_ARCHIVE_DIR"]),
         "EXPERT_INDEX_PATH=" + maybe_quote(env_data["EXPERT_INDEX_PATH"]),
         "EXPERT_MAIN_MAX_TOKENS=" + env_value(env_data["EXPERT_MAIN_MAX_TOKENS"]),
@@ -1075,7 +1073,6 @@ def ask_integrations(env_seed, integrations_seed, news_seed):
 
 def ask_runtime(env_seed):
     print_section("Runtime Tuning")
-    env_seed["CHAT_DEBOUNCE_DELAY"] = str(prompt_float("Chat debounce delay seconds", parse_float(env_seed.get("CHAT_DEBOUNCE_DELAY"), 4.0)))
     env_seed["TOOL_LOOP"] = str(prompt_int("Max tool loop count", parse_int(env_seed.get("TOOL_LOOP"), 15)))
     env_seed["MAX_TOOL_CALLS_PER_TURN"] = str(prompt_int("Max total tool calls per normal chat turn", parse_int(env_seed.get("MAX_TOOL_CALLS_PER_TURN"), 8)))
     env_seed["MAX_WEB_SEARCHES_PER_TURN"] = str(prompt_int("Max web searches per normal chat turn", parse_int(env_seed.get("MAX_WEB_SEARCHES_PER_TURN"), 2)))

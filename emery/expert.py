@@ -44,6 +44,7 @@ from emery.config import (
     EXPERT_MAX_SUBTASKS_PER_QUESTION,
     EXPERT_MIN_TARGET_SOURCES,
     MAIN_MODEL_URL,
+    MAIN_MODEL_HEADERS,
     MAIN_MODEL_REASONING_EFFORT,
     MODEL_ID,
     MODEL_NAME,
@@ -1214,7 +1215,7 @@ async def _query_main_model(prompt: str, system_prompt: str) -> str:
     }
     try:
         async with globals.main_model_lock:
-            response = await globals.http_client.post(MAIN_MODEL_URL, json=payload, timeout=900)
+            response = await globals.http_client.post(MAIN_MODEL_URL, json=payload, headers=MAIN_MODEL_HEADERS, timeout=900)
         if response.status_code != 200:
             logging.error("EXPERT: %s primary endpoint returned HTTP %s: %s", MODEL_NAME, response.status_code, safe_preview(response.text))
             return ""

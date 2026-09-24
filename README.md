@@ -328,7 +328,7 @@ Most other behavior is natural-language driven through the model and enabled too
 ### Personal context and memory
 
 - Persistent local memory in `data/memory/memory_store.json`
-- Persistent per-chat/thread scratchpad for intermediate facts, decisions, and open questions
+- Per-chat/thread scratchpad for intermediate facts, decisions, and open questions; notes are cleared automatically after the final response
 - Memory wipe and consolidation
 - Cross-chat recent-topic recall
 - Secondary-user segmented memory
@@ -522,7 +522,6 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 | `SKILL_APPROVAL_STORE_PATH` | `data/skills/skill_approvals.json` | Persistent staged skill-change store |
 | `SKILL_MAX_CHARS` | `12000` | Maximum procedure size for one skill |
 | `SKILL_MAX_RETRIEVAL_CHARS` | `8000` | Maximum skill context attached to one turn |
-| `CHAT_DEBOUNCE_DELAY` | `4.0` | Message batching delay |
 
 The production `host` backend keeps Emery's Telegram process containerized but
 delegates command processes to the host-side `hudson` user service in

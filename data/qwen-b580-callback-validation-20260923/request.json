@@ -1,0 +1,22 @@
+{
+  "batch_size": 2,
+  "photo_count": 2,
+  "elapsed_seconds": 78.577,
+  "photos": [
+    {
+      "type": "photo",
+      "index": 1,
+      "path": "/app/data/qwen-b580-callback-validation-20260923/image-1.png",
+      "bytes": 425227,
+      "at": 3809192.707957706
+    },
+    {
+      "type": "photo",
+      "index": 2,
+      "path": "/app/data/qwen-b580-callback-validation-20260923/image-2.png",
+      "bytes": 411171,
+      "at": 3809216.80283601
+    }
+  ],
+  "status_update_count": 10
+}

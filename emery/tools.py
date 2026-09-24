@@ -67,6 +67,7 @@ from emery.image_lifecycle import (
     set_current_image_job_active,
     start_image_generation,
     wait_for_image_resume,
+    wait_for_interactive_router_jobs,
 )
 from emery.image_profiles import (
     DEFAULT_IMAGE_PROFILE,
@@ -647,6 +648,8 @@ async def _generate_and_deliver_image(
         )
     except Exception as exc:
         error = exc
+        if isinstance(exc, ImageGenerationPaused) and exc.priority_preemption and image_state and not image_state.cancel_requested:
+            await pause_image_generation(image_state, priority=True)
         if isinstance(exc, ImageGenerationPaused) and image_state and image_state.paused:
             logging.info("IMAGE: paused chat_id=%s completed_this_segment=%d", chat_id, exc.completed_images)
             error = None
@@ -775,6 +778,9 @@ async def _run_image_queue(state) -> None:
                     state.main_model_restored = False
                 elif IMAGE_GENERATION_BACKEND != "comfyui":
                     state.pause_ready_event.set()
+                if state.priority_paused:
+                    await wait_for_interactive_router_jobs()
+                    await resume_image_generation(state)
                 continue
             if queue_drained or state.cancel_requested:
                 break

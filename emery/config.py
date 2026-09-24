@@ -360,6 +360,10 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Emery")
 MAIN_MODEL_URL = os.getenv("MAIN_MODEL_URL") or os.getenv("OLLAMA_URL", "http://127.0.0.1:8081/v1/chat/completions")
+MAIN_MODEL_HEADERS = {
+    "X-EmeryRouter-Source": "emerychat",
+    "X-EmeryRouter-Request-Type": "content",
+}
 OPEN_WEBUI_KEY = os.getenv("OPEN_WEBUI_KEY", "blank")
 THINK = _to_bool(os.getenv("ENABLE_THINKING") or os.getenv("THINK"), True)
 MAIN_MODEL_REASONING_EFFORT = os.getenv("MAIN_MODEL_REASONING_EFFORT", "medium").strip().lower()
@@ -548,7 +552,6 @@ MEALIE_MAX_URLS_PER_MESSAGE = _to_int(os.getenv("MEALIE_MAX_URLS_PER_MESSAGE"), 
 PORTAINER_URL = os.getenv("PORTAINER_URL", "").rstrip("/")
 PORTAINER_API_KEY = os.getenv("PORTAINER_API_KEY", "")
 PORTAINER_SSL_VERIFY = _to_bool(os.getenv("PORTAINER_SSL_VERIFY"), True)
-CHAT_DEBOUNCE_DELAY = _to_float(os.getenv("CHAT_DEBOUNCE_DELAY"), 4.0)
 HEARTBEAT_INTERVAL_SECONDS = _to_int(os.getenv("HEARTBEAT_INTERVAL_SECONDS"), 3600)
 HEARTBEAT_SILENCE_THRESHOLD_SECONDS = _to_int(os.getenv("HEARTBEAT_SILENCE_THRESHOLD_SECONDS"), 14400)
 HEARTBEAT_SILENT_RETRY_SECONDS = _to_int(os.getenv("HEARTBEAT_SILENT_RETRY_SECONDS"), 3600)

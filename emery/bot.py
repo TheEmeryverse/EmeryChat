@@ -853,6 +853,17 @@ async def handle_clear_notes_command(update: Update, context: ContextTypes.DEFAU
     )
     await update.message.reply_text(await clear_scratchpad())
 
+
+async def _clear_completed_turn_scratchpad(temporary_response_mode: bool) -> None:
+    """Discard working notes once a model turn has finished delivering."""
+    if temporary_response_mode:
+        return
+    try:
+        await clear_scratchpad()
+    except Exception as exc:
+        logging.warning("SCRATCHPAD: unable to clear notes after completed turn: %s", exc)
+
+
 async def handle_wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram handler for /wipe command."""
     if not is_user_allowed(update):
@@ -1107,26 +1118,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info("🧭 STEERING: queued message for chat=%s thread=%s", chat_id, turn_key[1])
         return
 
-    # --- DEBOUNCE LOGIC ---
-    # Cancel existing debounce task for this chat
-    if chat_id in globals.chat_debounce_tasks:
-        globals.chat_debounce_tasks[chat_id].cancel()
-        logging.debug(f"⏱️ DEBOUNCE: Cancelled timer for chat {chat_id}")
-
-    # Define the worker that will run after CHAT_DEBOUNCE_DELAY seconds
-    async def debounce_worker(delay):
+    # Start the main model response as soon as this message is received.
+    async def response_worker():
         try:
-            await asyncio.sleep(delay)
-            logging.debug(f"⏱️ DEBOUNCE: Delay of {delay}s expired, processing chat {chat_id}...")
             await run_engine_for_chat(update, context, model_to_use, is_input_voice)
-        except asyncio.CancelledError:
-            pass
         finally:
-            globals.chat_debounce_tasks.pop(chat_id, None)
+            turn_key = (
+                chat_id,
+                normalize_message_thread_id(
+                    chat_id,
+                    update.message.message_thread_id if update.message else None,
+                ),
+            )
+            active_turn = globals.active_turns.get(turn_key)
+            if active_turn is not None:
+                active_turn.accepting = False
+                globals.active_turns.pop(turn_key, None)
+            task = asyncio.current_task()
+            if globals.chat_response_tasks.get(chat_id) is task:
+                globals.chat_response_tasks.pop(chat_id, None)
 
-    # Start the debounce worker
-    from emery.config import CHAT_DEBOUNCE_DELAY
-    globals.chat_debounce_tasks[chat_id] = asyncio.create_task(debounce_worker(CHAT_DEBOUNCE_DELAY))
+    globals.chat_response_tasks[chat_id] = asyncio.create_task(response_worker())
 
 async def _deliver_pending_media(chat_id: int, reply_to_message_id: int | None = None) -> list:
     """Deliver model-approved media after the final text has been produced."""
@@ -1167,6 +1179,24 @@ async def _deliver_pending_media(chat_id: int, reply_to_message_id: int | None =
 async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, model_to_use: str, is_input_voice: bool) -> None:
     chat_id = update.effective_chat.id
     globals.chat_histories.setdefault(chat_id, deque())
+
+    turn_key = (
+        chat_id,
+        normalize_message_thread_id(
+            chat_id,
+            update.message.message_thread_id if update.message else None,
+        ),
+    )
+    steering_state = None
+    if ENABLE_LIVE_STEERING:
+        # Register before the first await so an immediate follow-up can steer
+        # this turn instead of starting a second model request.
+        steering_state = globals.ActiveTurnState(
+            chat_id=chat_id,
+            thread_id=turn_key[1],
+            max_pending=LIVE_STEERING_MAX_PENDING,
+        )
+        globals.active_turns[turn_key] = steering_state
 
     from emery.media import begin_media_turn, clear_media_turn
     begin_media_turn()
@@ -1392,23 +1422,9 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if status_store.get(status_key) is status_stack:
                     status_store.pop(status_key, None)
 
-    turn_key = (
-        chat_id,
-        normalize_message_thread_id(
-            chat_id,
-            update.message.message_thread_id if update.message else None,
-        ),
-    )
-    steering_state = None
-    if ENABLE_LIVE_STEERING:
-        steering_state = globals.ActiveTurnState(
-            chat_id=chat_id,
-            thread_id=turn_key[1],
-            max_pending=LIVE_STEERING_MAX_PENDING,
-        )
+    if steering_state is not None:
         steering_state.notify = handle_engine_event if status_stack else None
         steering_state.refresh_progress = refresh_live_progress if status_stack else None
-        globals.active_turns[turn_key] = steering_state
 
     try:
         from emery.engine import emery_engine
@@ -1463,6 +1479,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             "message_thread_id": globals.CURRENT_THREAD_ID.get(),
             "timestamp": datetime.now(USER_TIMEZONE)
         })
+        await _clear_completed_turn_scratchpad(temporary_response_mode)
         clear_media_turn()
         await _reanchor_paused_image_status(chat_id, current_thread_id)
         return
@@ -1537,6 +1554,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
     if media_msgs:
         assistant_entry["media_message_ids"] = [m.message_id for m in media_msgs if getattr(m, "message_id", None)]
     globals.chat_histories[chat_id].append(assistant_entry)
+    await _clear_completed_turn_scratchpad(temporary_response_mode)
     clear_media_turn()
 
     # Trigger background topic summarization
@@ -1757,6 +1775,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
             "content": response_text,
             "timestamp": datetime.now(USER_TIMEZONE)
         })
+        await _clear_completed_turn_scratchpad(temporary_response_mode)
         return
         
     globals.chat_histories[chat_id].append({
@@ -1775,6 +1794,7 @@ async def handle_user_reaction_trigger(chat_id: int, message_id: int, emojis: li
             last_entry = globals.chat_histories[chat_id][-1]
             last_entry["message_ids"] = [m.message_id for m in sent_msgs]
             last_entry["message_id"] = sent_msgs[-1].message_id
+            await _clear_completed_turn_scratchpad(temporary_response_mode)
     except Exception as e:
         logging.error(f"Failed to send reaction reply: {e}")
 

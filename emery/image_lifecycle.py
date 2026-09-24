@@ -69,6 +69,7 @@ class ImageGenerationState:
     progress_node: str | None = None
     pipeline_waiting: bool = False
     main_model_restored: bool = False
+    priority_paused: bool = False
     image_jobs: deque[ImageGenerationJob] = field(default_factory=deque)
     queued_image_requests: int = 0
     accepting_jobs: bool = True
@@ -209,11 +210,12 @@ def start_image_generation(bot, chat_id: int, thread_id: int | None, total: int)
     return state
 
 
-async def pause_image_generation(state: ImageGenerationState) -> bool:
+async def pause_image_generation(state: ImageGenerationState, *, priority: bool = False) -> bool:
     async with state.lock:
         if not state.active or state.cancel_requested or state.paused:
             return False
         state.paused = True
+        state.priority_paused = bool(priority)
         state.resume_event.clear()
         state.pause_event.set()
         text = _progress_text(state)
@@ -227,6 +229,7 @@ async def resume_image_generation(state: ImageGenerationState) -> bool:
         if not state.active or state.cancel_requested or not state.paused:
             return False
         state.paused = False
+        state.priority_paused = False
         state.resume_event.set()
         state.pause_event.clear()
         state.pause_ready_event.clear()
@@ -526,3 +529,21 @@ async def wait_for_active_image_generation(chat_id: int | None, thread_id: int |
     if state is not None:
         log.info("IMAGE LIFECYCLE: waiting for image runtime before main-model request chat_id=%s", chat_id)
         await state.done_event.wait()
+
+
+async def wait_for_interactive_router_jobs() -> None:
+    """Wait until Portal/Jellyfin work drains before auto-resuming an image."""
+    from emery.config import MAIN_MODEL_HEADERS, MAIN_MODEL_URL
+
+    url = MAIN_MODEL_URL.rsplit("/v1/chat/completions", 1)[0] + "/v1/queues/interactive"
+    while True:
+        try:
+            response = await globals.http_client.get(url, headers=MAIN_MODEL_HEADERS, timeout=10)
+            if response.status_code == 200:
+                if not int(response.json().get("pending", 0)):
+                    return
+            else:
+                log.warning("IMAGE LIFECYCLE: router priority status returned HTTP %s", response.status_code)
+        except Exception:
+            log.warning("IMAGE LIFECYCLE: router priority status unavailable", exc_info=True)
+        await asyncio.sleep(1.0)

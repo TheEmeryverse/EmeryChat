@@ -1,0 +1,6 @@
+model/
+software/ComfyUI/.git/
+software/ComfyUI/__pycache__/
+remote-qwen-encoder/.venv/
+remote-qwen-encoder/__pycache__/
+**/*.pyc

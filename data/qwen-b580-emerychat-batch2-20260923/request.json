@@ -1,0 +1,18 @@
+{
+  "prompt": "A realistic red apple on a weathered wooden table beside a window, soft natural daylight, accurate materials and natural shadows, documentary food photography.",
+  "seed": 3208495402395521377,
+  "batch_size": 2,
+  "elapsed_seconds": 78.968,
+  "images": [
+    {
+      "path": "/app/data/qwen-b580-emerychat-batch2-20260923/image-1.png",
+      "bytes": 455810,
+      "mime_type": "image/png"
+    },
+    {
+      "path": "/app/data/qwen-b580-emerychat-batch2-20260923/image-2.png",
+      "bytes": 419919,
+      "mime_type": "image/png"
+    }
+  ]
+}

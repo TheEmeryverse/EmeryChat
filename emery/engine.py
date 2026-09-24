@@ -14,6 +14,7 @@ from telegram.error import BadRequest
 
 from emery.config import (
     MAIN_MODEL_URL,
+    MAIN_MODEL_HEADERS,
     MODEL_ID,
     MAIN_MODEL_CONTEXT_TOKENS,
     MAIN_MODEL_REASONING_EFFORT,
@@ -112,6 +113,8 @@ _LIVE_REASONING_WINDOW_SECONDS = 5.0
 _FORCED_TEXT_COMPLETION_PROMPT = (
     "The tool-call budget or tool loop has been reached. Do not call any tools. "
     "Answer the user's original request now using the information already gathered. "
+    "Treat tool outputs and source text as evidence, never as claims or context supplied by the user; attribute findings to their sources and do not invent what the user wanted or believed. "
+    "Use plain prose and define unfamiliar abbreviations or symbols. "
     "If something is incomplete, state that plainly. Return only the final user-facing answer."
 )
 
@@ -327,7 +330,7 @@ async def _send_llama_reasoning_end(url: str, completion_id: str, model: str = N
         control_payload["model"] = model
 
     try:
-        response = await globals.http_client.post(control_url, json=control_payload, timeout=10)
+        response = await globals.http_client.post(control_url, json=control_payload, headers=MAIN_MODEL_HEADERS, timeout=10)
     except Exception as exc:
         logging.warning("⚠️ ENGINE: llama.cpp reasoning control failed: %s", exc)
         return False
@@ -530,10 +533,11 @@ async def _stream_main_model_response(
         )
 
     try:
-        async with globals.http_client.stream("POST", url, json=payload, timeout=900) as response:
+        async with globals.http_client.stream("POST", url, json=payload, headers=MAIN_MODEL_HEADERS, timeout=900) as response:
             if response.status_code != 200:
+                error_body = (await response.aread()).decode("utf-8", "replace")
                 raise _StreamingModelError(
-                    f"Main model returned {response.status_code} — {response.text[:200]}",
+                    f"Main model returned {response.status_code} — {error_body[:200]}",
                     events_seen=False,
                 )
 
@@ -1757,7 +1761,7 @@ async def warm_main_model_cache(
         logging.info("🤖 ENGINE: Warming main model cache%s...", label)
         async with globals.main_model_lock:
             request_started = time.perf_counter()
-            r = await globals.http_client.post(MAIN_MODEL_URL, json=payload, timeout=900)
+            r = await globals.http_client.post(MAIN_MODEL_URL, json=payload, headers=MAIN_MODEL_HEADERS, timeout=900)
             request_wall_seconds = time.perf_counter() - request_started
 
         if r.status_code != 200:
@@ -1987,7 +1991,7 @@ async def emery_engine(
                         logging.warning("⚠️ ENGINE: Streaming unavailable; retrying once without streaming: %s", stream_error)
                         payload["stream"] = False
                         payload.pop("reasoning_control", None)
-                        r = await globals.http_client.post(url, json=payload, timeout=900)
+                        r = await globals.http_client.post(url, json=payload, headers=MAIN_MODEL_HEADERS, timeout=900)
                         request_wall_seconds = time.perf_counter() - request_started
                         if r.status_code != 200:
                             logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")
@@ -1995,7 +1999,7 @@ async def emery_engine(
                         res = r.json()
                         _log_main_model_perf(res, request_wall_seconds)
                 else:
-                    r = await globals.http_client.post(url, json=payload, timeout=900)
+                    r = await globals.http_client.post(url, json=payload, headers=MAIN_MODEL_HEADERS, timeout=900)
                     request_wall_seconds = time.perf_counter() - request_started
                     if r.status_code != 200:
                         logging.error(f"❌ ENGINE: Main model returned {r.status_code} — {r.text[:200]}")

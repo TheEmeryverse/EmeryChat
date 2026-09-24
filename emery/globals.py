@@ -35,7 +35,7 @@ application = None      # Populated dynamically by main.py
 reolink_thread_trackers = {}  # Tracks camera alerts: camera_name -> {"message_id": int, "timestamp": datetime}
 chat_reply_targets = {}       # Tracks custom reply message ID per chat: chat_id -> message_id
 current_user_id = contextvars.ContextVar("current_user_id", default=None)
-chat_debounce_tasks = {}  # Tracks active debounce timers: chat_id -> asyncio.Task
+chat_response_tasks = {}  # Tracks active response tasks: chat_id -> asyncio.Task
 active_turns = {}  # Tracks active normal chat turns: (chat_id, thread_id) -> ActiveTurnState
 background_image_tasks = set()
 active_foreground_loops = {}  # Tracks foreground agent loops: loop_id -> metadata

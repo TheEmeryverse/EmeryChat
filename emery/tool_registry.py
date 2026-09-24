@@ -309,7 +309,7 @@ tools_schema.extend([
         "function": {
             "name": "clear_scratchpad",
             "description": (
-                "Delete every temporary working note for the current chat/thread. Use only when the user explicitly asks to clear, reset, or forget the scratchpad. Do not clear it merely because a task is complete."
+                "Delete every temporary working note for the current chat/thread. The application clears notes automatically after the final response; use this tool only when the user explicitly asks to clear, reset, or forget them sooner."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

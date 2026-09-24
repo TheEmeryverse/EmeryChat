@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "label": "ornith-1.5-35b-a3b-q4_k_m",
+  "url": "http://127.0.0.1:8081/v1/chat/completions",
+  "model": "local",
+  "created_at": "2026-09-20T01:48:21.967582+00:00",
+  "settings": {
+    "seed": 12345,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 512,
+    "thinking": true,
+    "repeats": 2
+  },
+  "records": [
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "list",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 11.54869,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 33.807483286425445,
+      "decode_tok_s": 45.21044044435758,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "list",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 11.393443,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 34.86264119369683,
+      "decode_tok_s": 45.319071986020084,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "list",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 11.546592,
+      "prompt_tokens": 4,
+      "completion_tokens": 512,
+      "prompt_tok_s": 34.71920840204843,
+      "decode_tok_s": 44.713483696641326,
+      "finish_reason": "length",
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      },
+      "response": ""
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "json",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 2.582203,
+      "prompt_tokens": 48,
+      "completion_tokens": 89,
+      "prompt_tok_s": 77.89526980974081,
+      "decode_tok_s": 44.8256435281449,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "json",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 2.178951,
+      "prompt_tokens": 4,
+      "completion_tokens": 89,
+      "prompt_tok_s": 35.86993561346558,
+      "decode_tok_s": 45.065067812685,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "json",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 2.069208,
+      "prompt_tokens": 4,
+      "completion_tokens": 89,
+      "prompt_tok_s": 35.40574989378275,
+      "decode_tok_s": 45.03727602271721,
+      "finish_reason": "stop",
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      },
+      "response": "{\"sum\": 42, \"product\": 425, \"even\": true}"
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "reasoning",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 3.285752,
+      "prompt_tokens": 51,
+      "completion_tokens": 121,
+      "prompt_tok_s": 79.66907652605335,
+      "decode_tok_s": 45.406077906234934,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes.\n\nExplanation: Each machine does 1/12 of the job per minute, so together they complete 2/12 = 1/6 per minute, finishing the whole job in 6 minutes."
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 2.955929,
+      "prompt_tokens": 4,
+      "completion_tokens": 121,
+      "prompt_tok_s": 35.69771177667511,
+      "decode_tok_s": 44.074868509975616,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes.\n\nExplanation: Each machine does 1/12 of the job per minute, so together they complete 2/12 = 1/6 per minute, finishing the whole job in 6 minutes."
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "reasoning",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 2.781934,
+      "prompt_tokens": 4,
+      "completion_tokens": 121,
+      "prompt_tok_s": 35.67956185498042,
+      "decode_tok_s": 44.9962484377865,
+      "finish_reason": "stop",
+      "quality": {
+        "contains_6_minutes": true
+      },
+      "response": "6 minutes.\n\nExplanation: Each machine does 1/12 of the job per minute, so together they complete 2/12 = 1/6 per minute, finishing the whole job in 6 minutes."
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "code",
+      "warmup": true,
+      "repeat": 0,
+      "wall_s": 5.771634,
+      "prompt_tokens": 46,
+      "completion_tokens": 233,
+      "prompt_tok_s": 74.88600234100154,
+      "decode_tok_s": 45.00984396328749,
+      "finish_reason": "stop",
+      "quality": {
+        "has_function": true,
+        "has_value_error": true
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size <= 0:\n        raise ValueError(\"size must be a positive integer\")\n    return [items[i:i + size] for i in range(0, len(items), size)]\n```"
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "code",
+      "warmup": false,
+      "repeat": 1,
+      "wall_s": 5.328003,
+      "prompt_tokens": 4,
+      "completion_tokens": 233,
+      "prompt_tok_s": 34.70384605373891,
+      "decode_tok_s": 45.51998042640841,
+      "finish_reason": "stop",
+      "quality": {
+        "has_function": true,
+        "has_value_error": true
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size <= 0:\n        raise ValueError(\"size must be a positive integer\")\n    return [items[i:i + size] for i in range(0, len(items), size)]\n```"
+    },
+    {
+      "label": "ornith-1.5-35b-a3b-q4_k_m",
+      "case": "code",
+      "warmup": false,
+      "repeat": 2,
+      "wall_s": 5.218659,
+      "prompt_tokens": 4,
+      "completion_tokens": 233,
+      "prompt_tok_s": 34.29325880265087,
+      "decode_tok_s": 45.49743106207673,
+      "finish_reason": "stop",
+      "quality": {
+        "has_function": true,
+        "has_value_error": true
+      },
+      "response": "```python\ndef chunked(items, size):\n    if size <= 0:\n        raise ValueError(\"size must be a positive integer\")\n    return [items[i:i + size] for i in range(0, len(items), size)]\n```"
+    }
+  ],
+  "summary": {
+    "code": {
+      "runs": 2,
+      "wall_s_median": 5.273331,
+      "wall_s_mean": 5.273331,
+      "prompt_tok_s_median": 34.498552428194884,
+      "decode_tok_s_median": 45.50870574424257,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 233.0,
+      "quality": {
+        "has_function": true,
+        "has_value_error": true
+      }
+    },
+    "json": {
+      "runs": 2,
+      "wall_s_median": 2.1240795,
+      "wall_s_mean": 2.1240795,
+      "prompt_tok_s_median": 35.63784275362416,
+      "decode_tok_s_median": 45.051171917701105,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 89.0,
+      "quality": {
+        "valid_json": true,
+        "correct_sum": true,
+        "correct_product": true,
+        "correct_even": true
+      }
+    },
+    "list": {
+      "runs": 2,
+      "wall_s_median": 11.4700175,
+      "wall_s_mean": 11.4700175,
+      "prompt_tok_s_median": 34.790924797872634,
+      "decode_tok_s_median": 45.016277841330705,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 512.0,
+      "quality": {
+        "numbered_items": 0,
+        "at_least_20_items": false
+      }
+    },
+    "reasoning": {
+      "runs": 2,
+      "wall_s_median": 2.8689315,
+      "wall_s_mean": 2.8689315,
+      "prompt_tok_s_median": 35.68863681582776,
+      "decode_tok_s_median": 44.53555847388105,
+      "prompt_tokens": 4,
+      "completion_tokens_median": 121.0,
+      "quality": {
+        "contains_6_minutes": true
+      }
+    }
+  }
+}

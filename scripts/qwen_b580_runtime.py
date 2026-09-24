@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import hmac
 import logging
 import os
 import signal
@@ -267,6 +268,10 @@ class Runtime:
         self.progress_watcher: _ProgressWatcher | None = None
         self.progress: dict[str, Any] = {}
         self.uploaded_image: dict[str, str] | None = None
+        self.priority_preemption = False
+        self.priority_hold = False
+        self.preempted_prompt_id: str | None = None
+        self.priority_preemption_done = threading.Event()
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -613,6 +618,11 @@ class Runtime:
 
     def prompt(self, body: bytes):
         with self.lock:
+            if self.priority_hold:
+                return HTTPStatus.CONFLICT, {}, b'{"error":"image_preempted"}'
+            if self.preempted_prompt_id:
+                self.preempted_prompt_id = None
+                return HTTPStatus.CONFLICT, {}, b'{"error":"image_preempted"}'
             if self.active_prompt_id is not None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, {}, b'{"error":"image runtime is busy"}'
             if self.process is not None and self.process.poll() is not None:
@@ -665,8 +675,16 @@ class Runtime:
     def history(self, prompt_id: str, path: str):
         with self.lock:
             if prompt_id != self.active_prompt_id or self.process is None:
+                if prompt_id == self.preempted_prompt_id:
+                    self.preempted_prompt_id = None
+                    return HTTPStatus.CONFLICT, {}, b'{"error":"image_preempted"}'
                 return HTTPStatus.NOT_FOUND, {}, b"{}"
             self.last_activity = time.monotonic()
+            if self.priority_preemption:
+                self._teardown_locked("priority model request preempted image")
+                self.priority_preemption = False
+                self.priority_preemption_done.set()
+                return HTTPStatus.CONFLICT, {}, b'{"error":"image_preempted"}'
             if self.process.poll() is not None:
                 self._teardown_locked("B580 ComfyUI exited during generation")
                 return HTTPStatus.BAD_GATEWAY, {}, b'{"error":"B580 ComfyUI exited"}'
@@ -687,6 +705,11 @@ class Runtime:
                 return HTTPStatus.NOT_FOUND, {}, b"{}", False
             if prompt_id and prompt_id != self.active_prompt_id:
                 return HTTPStatus.NOT_FOUND, {}, b"{}", False
+            if self.priority_preemption:
+                self._teardown_locked("priority model request preempted image output")
+                self.priority_preemption = False
+                self.priority_preemption_done.set()
+                return HTTPStatus.CONFLICT, {}, b'{"error":"image_preempted"}', False
             self.last_activity = time.monotonic()
             status, headers, body = self._proxy("GET", path)
             if status < 400:
@@ -713,6 +736,37 @@ class Runtime:
         with self.lock:
             if self.process is not None:
                 self._teardown_locked(reason)
+
+    def pause_for_priority(self, timeout: float = 150.0) -> bool:
+        with self.lock:
+            self.priority_hold = True
+            if self.process is None:
+                return True
+            prompt_id = self.active_prompt_id
+            if prompt_id is None:
+                self._teardown_locked("priority model request between image items")
+                return True
+            self.priority_preemption = True
+            self.priority_preemption_done.clear()
+        status, _, _ = self.cancel_active_prompt()
+        if status >= 400:
+            raise RuntimeError(f"ComfyUI interrupt returned HTTP {status}")
+        if self.priority_preemption_done.wait(timeout):
+            return True
+        # The image poller may have disconnected. Complete the same broker
+        # lifecycle here so the model cannot wait indefinitely behind VRAM.
+        with self.lock:
+            if self.process is not None:
+                self.preempted_prompt_id = prompt_id
+                self._teardown_locked("priority model request timed out waiting for image client")
+            self.priority_preemption = False
+            self.priority_preemption_done.set()
+        return True
+
+    def resume_priority(self) -> None:
+        with self.lock:
+            self.priority_hold = False
+            log.info("Priority model queue drained; image runtime may resume")
 
     def cancel_active_prompt(self):
         with self.lock:
@@ -799,6 +853,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         path = urlsplit(self.path).path
+        if path == "/priority/pause":
+            token_path = Path(os.environ.get("ROUTER_IMAGE_BROKER_TOKEN_FILE", ROOT / "data/router_broker_token"))
+            try:
+                expected = token_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                expected = os.environ.get("ROUTER_IMAGE_BROKER_TOKEN", "")
+            supplied = self.headers.get("Authorization", "")
+            if not expected or not hmac.compare_digest(supplied, f"Bearer {expected}"):
+                self._send(HTTPStatus.UNAUTHORIZED, {}, b'{"error":"unauthorized"}')
+                return
+            try:
+                RUNTIME.pause_for_priority()
+                self._send(HTTPStatus.OK, {}, b'{"status":"model_ready"}')
+            except Exception as exc:
+                log.exception("Priority GPU handoff failed")
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, {}, json.dumps({"error": str(exc)[:300]}).encode())
+            return
+        if path == "/priority/resume":
+            token_path = Path(os.environ.get("ROUTER_IMAGE_BROKER_TOKEN_FILE", ROOT / "data/router_broker_token"))
+            try:
+                expected = token_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                expected = os.environ.get("ROUTER_IMAGE_BROKER_TOKEN", "")
+            supplied = self.headers.get("Authorization", "")
+            if not expected or not hmac.compare_digest(supplied, f"Bearer {expected}"):
+                self._send(HTTPStatus.UNAUTHORIZED, {}, b'{"error":"unauthorized"}')
+                return
+            RUNTIME.resume_priority()
+            self._send(HTTPStatus.OK, {}, b'{"status":"image_runtime_resumed"}')
+            return
         if path == "/release":
             RUNTIME.release()
             self._send(HTTPStatus.OK, {}, b'{"status":"released"}')

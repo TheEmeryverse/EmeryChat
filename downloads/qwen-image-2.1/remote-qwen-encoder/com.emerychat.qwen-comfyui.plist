@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.emerychat.qwen-comfyui</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>set -a; . "/Volumes/External NVME/Qwen-ComfyUI/remote-qwen-image.env"; set +a; exec "/opt/homebrew/bin/uv" run --no-sync --python "/Volumes/External NVME/Qwen-ComfyUI/.venv/bin/python" main.py --listen 0.0.0.0 --port 8188 --lowvram --disable-auto-launch --disable-manager --base-directory "/Volumes/External NVME/Qwen-ComfyUI"</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Volumes/External NVME/Qwen-ComfyUI</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/Volumes/External NVME/Qwen-ComfyUI/comfyui-launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Volumes/External NVME/Qwen-ComfyUI/comfyui-launchd.err.log</string>
+</dict>
+</plist>
