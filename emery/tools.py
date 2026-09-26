@@ -1953,7 +1953,7 @@ async def fetch_web_content(
                     cleaned_text = cleaned_text[:summary_input_chars] + "\n...[source truncated for context budget]"
                 summary_prompt = (
                     f"Summarize this web page content. Extract key details, facts, numbers, dates, or relevant info. "
-                    f"Keep it objective, concise, and structured under 600 words.\n\n"
+                    f"Keep it objective, concise, and structured.\n\n"
                     f"Title: {title}\n"
                     f"URL: {current_url}\n\n"
                     f"Content:\n{cleaned_text}"

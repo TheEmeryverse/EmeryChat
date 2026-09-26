@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Exclusive Ornith/B580 Qwen Image runtime broker.
+"""Exclusive Nemotron/B580 Qwen Image runtime broker.
 
 Port 8188 remains the stable EmeryChat image endpoint. The actual ComfyUI
 process is launched only after a prompt arrives, on the modern XPU stack and
 an isolated runtime directory. Once the image is downloaded (or the request
-fails/idles), ComfyUI is stopped and Ornith is restored before the broker
+fails/idles), ComfyUI is stopped and the configured model server is restored before the broker
 returns to its idle state.
 
 The broker intentionally supports only the small ComfyUI API surface used by
@@ -45,7 +45,10 @@ PORT = int(os.environ.get("QWEN_RUNTIME_PORT", "8188"))
 BACKEND_PORT = int(os.environ.get("QWEN_RUNTIME_BACKEND_PORT", "8190"))
 BACKEND_URL = f"http://127.0.0.1:{BACKEND_PORT}"
 ENCODER_HEALTH_URL = os.environ.get("QWEN_RUNTIME_ENCODER_HEALTH_URL", "http://127.0.0.1:8086/health")
-ORNITH_UNIT = os.environ.get("QWEN_RUNTIME_ORNITH_UNIT", "llama-ornith-aot.service")
+MODEL_UNIT = os.environ.get(
+    "QWEN_RUNTIME_MODEL_UNIT",
+    os.environ.get("QWEN_RUNTIME_ORNITH_UNIT", "llama-nemotron-lightning.service"),
+)
 START_TIMEOUT_SECONDS = float(os.environ.get("QWEN_RUNTIME_START_TIMEOUT", "240"))
 IDLE_TIMEOUT_SECONDS = float(os.environ.get("QWEN_RUNTIME_IDLE_TIMEOUT", "300"))
 HTTP_TIMEOUT_SECONDS = float(os.environ.get("QWEN_RUNTIME_HTTP_TIMEOUT", "30"))
@@ -59,7 +62,7 @@ log = logging.getLogger("qwen-b580-runtime")
 
 def _run_systemctl(action: str) -> None:
     result = subprocess.run(
-        ["systemctl", "--user", action, ORNITH_UNIT],
+        ["systemctl", "--user", action, MODEL_UNIT],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -69,12 +72,12 @@ def _run_systemctl(action: str) -> None:
     )
     if result.returncode != 0:
         detail = (result.stdout or "").strip()[-800:]
-        raise RuntimeError(f"systemctl --user {action} {ORNITH_UNIT} failed: {detail}")
+        raise RuntimeError(f"systemctl --user {action} {MODEL_UNIT} failed: {detail}")
 
 
-def _ornith_active() -> bool:
+def _model_active() -> bool:
     result = subprocess.run(
-        ["systemctl", "--user", "is-active", "--quiet", ORNITH_UNIT],
+        ["systemctl", "--user", "is-active", "--quiet", MODEL_UNIT],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -281,7 +284,7 @@ class Runtime:
                 "backend": BACKEND_URL if active else None,
                 "prompt_id": self.active_prompt_id,
                 "started_mono_ns": self.started_mono_ns,
-                "ornith_active": _ornith_active(),
+                "model_active": _model_active(),
             }
 
     def progress_status(self, prompt_id: str) -> dict[str, Any]:
@@ -380,15 +383,15 @@ class Runtime:
         startup_started = time.monotonic()
         self._require_encoder_ready()
         log.info("GTX 1070 Qwen encoder is healthy and ready")
-        if _ornith_active():
-            log.info("Stopping Ornith before claiming B580")
+        if _model_active():
+            log.info("Stopping model server before claiming B580")
             _run_systemctl("stop")
         deadline = time.monotonic() + 45
-        while _ornith_active() and time.monotonic() < deadline:
+        while _model_active() and time.monotonic() < deadline:
             time.sleep(0.25)
-        if _ornith_active():
-            raise RuntimeError("Ornith did not stop before the B580 claim")
-        log.info("Ornith stopped; verifying B580 backend is free")
+        if _model_active():
+            raise RuntimeError("Model server did not stop before the B580 claim")
+        log.info("Model server stopped; verifying B580 backend is free")
         self._assert_backend_port_free()
 
         BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -451,7 +454,7 @@ class Runtime:
             log.info("B580 ComfyUI startup completed in %.3f seconds", time.monotonic() - startup_started)
         except Exception:
             self._stop_comfy_locked()
-            self._restore_ornith_locked()
+            self._restore_model_locked()
             raise
 
     def _stop_comfy_locked(self) -> None:
@@ -485,26 +488,26 @@ class Runtime:
         if watcher is not None:
             watcher.stop()
 
-    def _restore_ornith_locked(self) -> None:
-        if _ornith_active():
+    def _restore_model_locked(self) -> None:
+        if _model_active():
             return
         restore_started = time.monotonic()
-        log.info("Restoring Ornith after B580 image request")
+        log.info("Restoring model server after B580 image request")
         _run_systemctl("start")
         deadline = time.monotonic() + 90
         last_error = "not ready"
         while time.monotonic() < deadline:
-            if _ornith_active():
+            if _model_active():
                 try:
                     with _urlopen("GET", "http://127.0.0.1:8081/health", timeout=5) as response:
                         health = json.loads(response.read())
                     if health.get("status") == "ok":
-                        log.info("Ornith restored and healthy in %.3f seconds", time.monotonic() - restore_started)
+                        log.info("Model server restored and healthy in %.3f seconds", time.monotonic() - restore_started)
                         return
                 except (OSError, ValueError, HTTPError, URLError) as exc:
                     last_error = str(exc)
             time.sleep(0.5)
-        raise TimeoutError(f"Ornith did not become healthy after image request: {last_error}")
+        raise TimeoutError(f"Model server did not become healthy after image request: {last_error}")
 
     def _teardown_locked(self, reason: str) -> None:
         if self.stopping:
@@ -521,7 +524,7 @@ class Runtime:
             )
             self._cleanup_uploaded_image_locked()
             self._stop_comfy_locked()
-            self._restore_ornith_locked()
+            self._restore_model_locked()
         finally:
             self.active_prompt_id = None
             self.started_mono_ns = None

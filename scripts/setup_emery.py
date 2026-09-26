@@ -26,8 +26,8 @@ CAMERA_LOG_PATH = REPO_DIR / "data" / "logs" / "camera_log.md"
 DEFAULT_ENV = {
     "MODEL_NAME": "Emery",
     "MODEL_ID": "local",
-    "FAST_MODEL_ID": "gemma4:e4b",
-    "VISION_MODEL_ID": "gemma4:e4b",
+    "FAST_MODEL_ID": "lfm2.5:8b",
+    "VISION_MODEL_ID": "minicpm-v4.5:latest",
     "EMBEDDING_MODEL_ID": "nomic-embed-text",
     "MAIN_MODEL_URL": "http://127.0.0.1:8081/v1/chat/completions",
     "FAST_MODEL_URL": "http://127.0.0.1:8082/v1/chat/completions",

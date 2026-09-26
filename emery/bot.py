@@ -65,7 +65,7 @@ from emery.image_profiles import DIRECT_IMAGE_DEFAULT_PROFILE, get_image_profile
 from emery.telegram_utils import normalize_message_thread_id
 
 
-PREFILL_FALLBACK_STATUS = "Preparing response…"
+PREFILL_FALLBACK_STATUS = "Understanding…"
 
 TOOL_DISPLAY_NAMES = {
     "get_noaa_weather": "weather lookup",
@@ -1306,7 +1306,7 @@ async def run_engine_for_chat(update: Update, context: ContextTypes.DEFAULT_TYPE
             except (TypeError, ValueError):
                 percent = None
             if percent is not None:
-                await update_status_slot("reasoning", f"Preparing response: {percent}%")
+                await update_status_slot("reasoning", f"Understanding: {percent}%")
         elif event_type == "reasoning_summary":
             summary = str(event.get("text") or event.get("summary") or "").strip()
             if summary:

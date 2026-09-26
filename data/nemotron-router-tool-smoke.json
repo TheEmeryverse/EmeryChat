@@ -1,0 +1,49 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "We need to make one web search query for latest Bank of Japan news as of September 2026. The user wants to \"research the latest Bank of Japan news as of September 2026.\" So we need to search web for \"Bank of Japan September 2026 news\". Use web_search tool.",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "web_search",
+              "arguments": "{\"query\":\"Bank of Japan news September 2026\"}"
+            },
+            "id": "1nbLDgM1c49IZZXVyrJoozL2itTT4ZD9"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 1790313302,
+  "model": "/home/hudson/.cache/huggingface/hub/models--bartowski--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF/snapshots/f0eec2267ae843d9eb21ea3926ab0046da0a8628/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf",
+  "system_fingerprint": "b10988-9f31776c3",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 104,
+    "prompt_tokens": 321,
+    "total_tokens": 425,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-z0Vm3LkciB0JmDcSxElpb1srngKDkW9D",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 321,
+    "prompt_ms": 2833.511,
+    "prompt_per_token_ms": 8.82713707165109,
+    "prompt_per_second": 113.28701388489404,
+    "predicted_n": 104,
+    "predicted_ms": 3553.356,
+    "predicted_per_token_ms": 34.49860194174757,
+    "predicted_per_second": 28.986681886081776,
+    "draft_n": 150,
+    "draft_n_accepted": 80
+  }
+}

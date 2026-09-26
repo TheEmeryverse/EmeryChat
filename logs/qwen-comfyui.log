@@ -1,0 +1,128 @@
+[32m[INFO][0m setup plugin alembic.autogenerate.schemas
+[32m[INFO][0m setup plugin alembic.autogenerate.tables
+[32m[INFO][0m setup plugin alembic.autogenerate.types
+[32m[INFO][0m setup plugin alembic.autogenerate.constraints
+[32m[INFO][0m setup plugin alembic.autogenerate.defaults
+[32m[INFO][0m setup plugin alembic.autogenerate.comments
+[32m[INFO][0m setup plugin alembic.ext.checkconstraint_byname
+[32m[INFO][0m Setting base directory to: /home/hudson/EmeryChat/downloads/qwen-image-2.1/linux-comfyui
+[1m[33m[WARNING][0m WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.
+WARNING WARNING WARNING
+If you are on nvidia 20 series and above it is required that you update your pytorch to cu130 or higher.
+
+[32m[INFO][0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_', 'apply_rope_split_half', 'apply_rope_split_half1', 'apply_rope_split_half1_', 'apply_rope_split_half_', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'dequantize_w4a8_int8_weight', 'fp16_conv3d', 'fp16_linear', 'gemv_awq_w4a16', 'group_norm_silu_pad3d', 'int8_linear', 'na3d', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'quantize_w4a8_int8_weight', 'rms_adaln', 'rms_rope', 'rms_rope1', 'rms_rope1_', 'rms_rope_', 'rms_rope_split_half', 'rms_rope_split_half1', 'rms_rope_split_half1_', 'rms_rope_split_half_', 'rotate_int8_convrot_weight', 'scaled_mm_nvfp4', 'scaled_mm_svdquant_w4a4', 'sol_attn', 'stochastic_rounding_fp8', 'w4a8_int8_linear']}
+[32m[INFO][0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_', 'apply_rope_split_half', 'apply_rope_split_half1', 'apply_rope_split_half1_', 'apply_rope_split_half_', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'int8_linear', 'na3d', 'quantize_and_rotate_rowwise', 'quantize_int8_rowwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'rms_adaln', 'rms_rope', 'rms_rope1', 'rms_rope1_', 'rms_rope_', 'rms_rope_split_half', 'rms_rope_split_half1', 'rms_rope_split_half1_', 'rms_rope_split_half_', 'w4a8_int8_linear']}
+[32m[INFO][0m Found comfy_kitchen backend hip: {'available': False, 'disabled': False, 'unavailable_reason': 'PyTorch ROCm/HIP runtime not available', 'capabilities': []}
+[32m[INFO][0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope1_', 'apply_rope_', 'apply_rope_split_half', 'apply_rope_split_half1', 'apply_rope_split_half1_', 'apply_rope_split_half_', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_embedding', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'dequantize_w4a8_int8_weight', 'fp16_conv3d', 'fp16_linear', 'gemv_awq_w4a16', 'group_norm_silu_pad3d', 'int8_linear', 'na3d', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'quantize_w4a8_int8_weight', 'rms_adaln', 'rms_rope', 'rms_rope1', 'rms_rope1_', 'rms_rope_', 'rms_rope_split_half', 'rms_rope_split_half1', 'rms_rope_split_half1_', 'rms_rope_split_half_', 'rotate_int8_convrot_weight', 'scaled_mm_nvfp4', 'scaled_mm_svdquant_w4a4', 'sol_attn', 'stochastic_rounding_fp8', 'w4a8_int8_linear']}
+[32m[INFO][0m Checkpoint files will always be loaded safely.
+[32m[INFO][0m Total VRAM 8107 MB, total RAM 62152 MB
+[32m[INFO][0m pytorch version: 2.6.0+cu124
+[32m[INFO][0m Set vram state to: LOW_VRAM
+[32m[INFO][0m Device: cuda:0 NVIDIA GeForce GTX 1070 : cudaMallocAsync
+[32m[INFO][0m Using async weight offloading with 2 streams
+[32m[INFO][0m Enabled pinned memory 53959
+[32m[INFO][0m Using pytorch attention
+[1m[33m[WARNING][0m Unsupported Pytorch detected. DynamicVRAM support requires Pytorch version 2.8 or later (2.12+ is recommended). Falling back to legacy ModelPatcher. VRAM estimates may be unreliable especially on Windows
+[32m[INFO][0m Python version: 3.13.7 (main, Mar  3 2026, 12:19:54) [GCC 15.2.0]
+[32m[INFO][0m ComfyUI version: 0.37.0
+[32m[INFO][0m comfy-aimdo version: 0.5.5
+[32m[INFO][0m comfy-kitchen version: 0.2.35
+[32m[INFO][0m comfyui-frontend-package version: 1.53.6
+[32m[INFO][0m comfyui-workflow-templates version: 0.11.66
+[32m[INFO][0m comfyui-embedded-docs version: 0.5.12
+[32m[INFO][0m comfy-kitchen version: 0.2.35
+[32m[INFO][0m comfy-aimdo version: 0.5.5
+[32m[INFO][0m [Prompt Server] web root: /home/hudson/EmeryChat/.comfyui-python/comfyui_frontend_package/static
+[32m[INFO][0m Asset seeder disabled
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_latent.py", line 2, in <module>
+    import comfy_extras.nodes_post_processing
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_post_processing.py", line 9, in <module>
+    import kornia
+ModuleNotFoundError: No module named 'kornia'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_latent.py module for custom nodes: No module named 'kornia'
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_upscale_model.py", line 2, in <module>
+    from spandrel import ModelLoader, ImageModelDescriptor
+ModuleNotFoundError: No module named 'spandrel'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_upscale_model.py module for custom nodes: No module named 'spandrel'
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_post_processing.py", line 9, in <module>
+    import kornia
+ModuleNotFoundError: No module named 'kornia'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_post_processing.py module for custom nodes: No module named 'kornia'
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_canny.py", line 1, in <module>
+    from kornia.filters import canny
+ModuleNotFoundError: No module named 'kornia'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_canny.py module for custom nodes: No module named 'kornia'
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_morphology.py", line 6, in <module>
+    from kornia.morphology import dilation, erosion, opening, closing, gradient, top_hat, bottom_hat
+ModuleNotFoundError: No module named 'kornia'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_morphology.py module for custom nodes: No module named 'kornia'
+[1m[33m[WARNING][0m Traceback (most recent call last):
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_glsl.py", line 12, in <module>
+    import comfy_angle
+ModuleNotFoundError: No module named 'comfy_angle'
+
+[1m[33m[WARNING][0m Cannot import /home/hudson/EmeryChat/downloads/qwen-image-2.1/software/ComfyUI/comfy_extras/nodes_glsl.py module for custom nodes: No module named 'comfy_angle'
+[32m[INFO][0m ComfyUI-GGUF: Partial torch compile only, consider updating pytorch
+[32m[INFO][0m 
+Import times for custom nodes:
+[32m[INFO][0m    0.0 seconds: /home/hudson/EmeryChat/downloads/qwen-image-2.1/linux-comfyui/custom_nodes/remote_qwen_image21
+[32m[INFO][0m    0.0 seconds: /home/hudson/EmeryChat/downloads/qwen-image-2.1/linux-comfyui/custom_nodes/ComfyUI-GGUF
+[32m[INFO][0m 
+[1m[33m[WARNING][0m WARNING: some comfy_extras/ nodes did not import correctly. This may be because they are missing some dependencies.
+
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_latent.py
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_upscale_model.py
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_post_processing.py
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_canny.py
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_morphology.py
+[1m[33m[WARNING][0m IMPORT FAILED: nodes_glsl.py
+[1m[33m[WARNING][0m 
+This issue might be caused by new missing dependencies added the last time you updated ComfyUI.
+[1m[33m[WARNING][0m Please do a: pip install -r requirements.txt
+[1m[33m[WARNING][0m 
+[32m[INFO][0m Context impl SQLiteImpl.
+[32m[INFO][0m Will assume non-transactional DDL.
+[32m[INFO][0m Using RAM pressure cache.
+[32m[INFO][0m Starting server
+
+[32m[INFO][0m To see the GUI go to: http://0.0.0.0:8188

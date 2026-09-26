@@ -1,0 +1,39 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "42",
+        "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:** User asks \"What is 17 plus 25? Reply with just the number.\"\n2.  **Identify Core Task:** Simple arithmetic addition: 17 + 25.\n3.  **Perform Calculation:** 17 + 25 = 42.\n4.  **Check Constraint:** \"Reply with just the number.\" -> Must output only the number, no extra text.\n5.  **Formulate Output:** \"42\" (or just the digits 42). I'll output exactly \"42\".\n6.  **Final Check:** 17 + 25 = 42. Output matches constraint.\u2713\n"
+      }
+    }
+  ],
+  "created": 1790313086,
+  "model": "/home/hudson/.cache/huggingface/hub/models--bartowski--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF/snapshots/f0eec2267ae843d9eb21ea3926ab0046da0a8628/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf",
+  "system_fingerprint": "b10988-9f31776c3",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 161,
+    "prompt_tokens": 32,
+    "total_tokens": 193,
+    "prompt_tokens_details": {
+      "cached_tokens": 28
+    }
+  },
+  "id": "chatcmpl-u8SNh21uszdIfG3YZaObYtxdUT3G6DXx",
+  "timings": {
+    "cache_n": 28,
+    "prompt_n": 4,
+    "prompt_ms": 132.405,
+    "prompt_per_token_ms": 33.10125,
+    "prompt_per_second": 30.210339488690003,
+    "predicted_n": 161,
+    "predicted_ms": 4808.116,
+    "predicted_per_token_ms": 30.050725,
+    "predicted_per_second": 33.27706735860782,
+    "draft_n": 210,
+    "draft_n_accepted": 127
+  }
+}

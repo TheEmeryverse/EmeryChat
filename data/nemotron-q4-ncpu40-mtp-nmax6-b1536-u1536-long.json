@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "label": "nemotron-q4-ncpu40-mtp-nmax6-b1536-u1536-128k",
+  "url": "http://127.0.0.1:18081",
+  "created_at": "2026-09-25T04:57:58.402999+00:00",
+  "settings": {
+    "max_tokens": 128,
+    "temperature": 0.0,
+    "seed": 1718,
+    "sizes": [
+      32768
+    ],
+    "repeats": 0
+  },
+  "records": [
+    {
+      "label": "nemotron-q4-ncpu40-mtp-nmax6-b1536-u1536-128k",
+      "prompt_target": 32768,
+      "repeat": 0,
+      "cache_mode": "cold",
+      "prompt_tokens": 32775,
+      "cache_n": 0,
+      "completion_tokens": 128,
+      "prompt_tok_s": 879.185034771198,
+      "decode_tok_s": 48.75619865962683,
+      "prompt_ms": 37278.842000000004,
+      "decode_ms": 2604.797,
+      "draft_n": 108,
+      "draft_n_accepted": 108,
+      "wall_s": 40.022179,
+      "finish_reason": "limit",
+      "response_sha256": "fe9fa579e1fadb4da89fa0a7128d5f9949cdac21e1c821c2b64b1101607a672b",
+      "response_preview": "The benchmark records a stable marker sequence for throughput measurement.\nThe benchmark records a stable marker sequence for throughput measurement.\nThe benchm"
+    }
+  ]
+}

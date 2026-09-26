@@ -1,0 +1,49 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "We need latest news about Bank of Japan. Use web_search.",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "web_search",
+              "arguments": "{\"query\":\"Bank of Japan latest news 2025\"}"
+            },
+            "id": "6Wz7SZMOAiBGkNIyZcZZhL3cgBKG9ag6"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 1790312762,
+  "model": "/home/hudson/.cache/huggingface/hub/models--bartowski--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF/snapshots/f0eec2267ae843d9eb21ea3926ab0046da0a8628/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf",
+  "system_fingerprint": "b10988-9f31776c3",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 48,
+    "prompt_tokens": 307,
+    "total_tokens": 355,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-C6WkOGSzDaKv1vytHXcWZEPpm4j4P7Wb",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 307,
+    "prompt_ms": 2257.099,
+    "prompt_per_token_ms": 7.352114006514658,
+    "prompt_per_second": 136.01530105679902,
+    "predicted_n": 48,
+    "predicted_ms": 1272.997,
+    "predicted_per_token_ms": 27.085042553191492,
+    "predicted_per_second": 36.92074686743174,
+    "draft_n": 54,
+    "draft_n_accepted": 40
+  }
+}

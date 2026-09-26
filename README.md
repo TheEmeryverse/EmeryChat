@@ -137,7 +137,6 @@ Typical local setup:
 ```bash
 ollama pull gpt-oss:20b
 ollama pull qwen3.6:35b-a3b
-ollama pull gemma4:e4b
 ollama pull lfm2.5:8b
 ollama pull minicpm4.5:8b
 ollama pull nomic-embed-text
@@ -147,7 +146,7 @@ Recommended local model roles:
 
 - `gpt-oss:20b`: excellent primary model, especially strong at tool calling and routine orchestration.
 - `qwen3.6:35b-a3b`: capable larger primary model option for richer conversational turns and final synthesis.
-- `gemma4:e4b`: good vision model and great fast text model for delegated cleanup, summarization, and lightweight extraction.
+- Nemotron 3.5 Lightning 30B-A3B: current main model, served locally with llama.cpp and the B580 SYCL MTP profile.
 - `lfm2.5:8b`: excellent fast text model for coprocessor work when you want speed with strong instruction following.
 - `minicpm4.5:8b`: vision model for image descriptions and camera/security image analysis.
 - `nomic-embed-text`: embedding model for semantic memory retrieval.
@@ -470,9 +469,9 @@ Telegram access is fail-closed by default. Add your Telegram user ID to `config/
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FAST_MODEL_ID` | `gemma4:e4b` | Fast text coprocessor model; `lfm2.5:8b` is recommended for delegated text work |
+| `FAST_MODEL_ID` | `lfm2.5:8b` | Fast text coprocessor model for delegated text work |
 | `FAST_MODEL_URL` | `http://127.0.0.1:8082/v1/chat/completions` | Fast text coprocessor endpoint |
-| `VISION_MODEL_ID` | `gemma4:e4b` | Vision/multimodal model; use your local `minicpm4.5:8b` tag if that is your vision server model |
+| `VISION_MODEL_ID` | `minicpm-v4.5:latest` | Vision/multimodal model |
 | `VISION_OLLAMA_URL` | `http://localhost:11434/api/chat` | Vision model endpoint |
 | `EMBEDDING_MODEL_ID` | `nomic-embed-text` | Embedding model for semantic memory retrieval |
 | `EMBEDDING_OLLAMA_URL` | `http://localhost:11434/api/embed` | Ollama `/api/embed` or OpenAI-compatible `/v1/embeddings` endpoint |

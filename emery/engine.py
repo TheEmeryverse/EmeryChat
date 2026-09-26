@@ -44,7 +44,6 @@ globals = importlib.import_module("emery.globals")
 from emery.helpers import (
     get_stable_system_prompt,
     message_content_to_text,
-    normalize_gemma_thinking,
     clean_thinking_tags,
     query_fast_model,
     telegram_escape,
@@ -67,6 +66,7 @@ from emery.prompt_cache import (
     request_shape_hash as prompt_request_shape_hash,
     resolve_tooling,
     stable_hash,
+    mark_application_context,
 )
 from emery.telegram_utils import normalize_message_thread_id
 
@@ -82,7 +82,7 @@ def _extract_thinking_blocks(content: str) -> tuple[list[str], str]:
     if not content:
         return [], ""
 
-    normalized = normalize_gemma_thinking(content)
+    normalized = content
     pattern = re.compile(r'<[tT]hink>(.*?)</[tT]hink>', re.DOTALL)
     thoughts = [match.strip() for match in pattern.findall(normalized) if match.strip()]
     cleaned = pattern.sub('', normalized).strip()
@@ -130,7 +130,7 @@ class _ReasoningChunk(str):
 
 def _clean_reasoning_summary(text: str) -> str:
     """Keep the coprocessor's answer concise without the live-progress cap."""
-    cleaned = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
+    cleaned = clean_thinking_tags(str(text or "")).strip()
     cleaned = _strip_id_prefix(cleaned)
     cleaned = re.sub(r"^(?:summary|rationale)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -142,7 +142,7 @@ def _clean_reasoning_summary(text: str) -> str:
 
 def _clean_live_reasoning_summary(text: str) -> str:
     """Keep an interval update to one short, user-facing sentence."""
-    cleaned = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
+    cleaned = clean_thinking_tags(str(text or "")).strip()
     cleaned = _strip_id_prefix(cleaned)
     cleaned = re.sub(r"^(?:summary|rationale)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -396,7 +396,7 @@ async def _emit_engine_event(on_event, event: dict) -> None:
 
 def _sanitize_model_preamble(text: str) -> str:
     """Return a short, non-reasoning progress note suitable for Telegram."""
-    cleaned = clean_thinking_tags(normalize_gemma_thinking(str(text or ""))).strip()
+    cleaned = clean_thinking_tags(str(text or "")).strip()
     cleaned = re.sub(r"<\/?progress>", "", cleaned, flags=re.IGNORECASE)
     cleaned = _strip_id_prefix(cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -603,7 +603,7 @@ async def _stream_main_model_response(
                     if not progress_emitted:
                         tagged = re.search(
                             r"<progress>(.*?)</progress>",
-                            clean_thinking_tags(normalize_gemma_thinking(raw_content)),
+                            clean_thinking_tags(raw_content),
                             flags=re.DOTALL | re.IGNORECASE,
                         )
                         if tagged:
@@ -722,7 +722,7 @@ _MULTI_PART_PUBLIC_SUFFIXES = {
 
 def _clean_status_fragment(text: str, *, max_words: int = _MAX_SEARCH_STATUS_WORDS) -> str:
     text = str(text or "").strip()
-    text = clean_thinking_tags(normalize_gemma_thinking(text))
+    text = clean_thinking_tags(text)
     text = text.splitlines()[0] if text else ""
     text = re.sub(r"^[`\"'“”‘’\s]+|[`\"'“”‘’\s]+$", "", text)
     text = re.sub(
@@ -1185,16 +1185,17 @@ def _attach_history_context(
     else:
         target_index = user_indices[0] if user_indices else 0
     target = dict(messages[target_index])
+    marked_context = mark_application_context(context_text)
     content = target.get("content")
     if isinstance(content, list):
         target["content"] = [
-            {"type": "text", "text": context_text},
+            {"type": "text", "text": marked_context},
             *copy.deepcopy(content),
         ]
     elif content:
-        target["content"] = f"{context_text}\n\n{content}"
+        target["content"] = f"{marked_context}\n\n{content}"
     else:
-        target["content"] = context_text
+        target["content"] = marked_context
     messages[target_index] = target
 
 
@@ -1410,6 +1411,7 @@ def _build_main_model_payload(
         )
         turn_text = str(turn_text).strip()
         if turn_text:
+            turn_text = mark_application_context(turn_text, source="session and turn context")
             for index in range(len(ollama_history) - 1, -1, -1):
                 if ollama_history[index].get("role") == "user":
                     current = ollama_history[index].get("content") or ""
@@ -1420,12 +1422,12 @@ def _build_main_model_payload(
                         )
                         if text_part is not None:
                             text_part["text"] = (
-                                f"{text_part.get('text', '')}\n\n# Turn Context\n{turn_text}"
-                                if text_part.get("text") else f"# Turn Context\n{turn_text}"
+                                f"{text_part.get('text', '')}\n\n{turn_text}"
+                                if text_part.get("text") else turn_text
                             )
                     else:
                         ollama_history[index]["content"] = (
-                            f"{current}\n\n# Turn Context\n{turn_text}" if current else f"# Turn Context\n{turn_text}"
+                            f"{current}\n\n{turn_text}" if current else turn_text
                         )
                     break
 

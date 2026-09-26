@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "label": "nemotron-q4-ncpu40-mtp-nmax4-b1024-u1024-128k",
+  "url": "http://127.0.0.1:18081",
+  "created_at": "2026-09-25T04:52:40.540672+00:00",
+  "settings": {
+    "max_tokens": 128,
+    "temperature": 0.0,
+    "seed": 1718,
+    "sizes": [
+      32768
+    ],
+    "repeats": 2
+  },
+  "records": [
+    {
+      "label": "nemotron-q4-ncpu40-mtp-nmax4-b1024-u1024-128k",
+      "prompt_target": 32768,
+      "repeat": 0,
+      "cache_mode": "cold",
+      "prompt_tokens": 32775,
+      "cache_n": 0,
+      "completion_tokens": 128,
+      "prompt_tok_s": 810.4475153941754,
+      "decode_tok_s": 44.06192678295545,
+      "prompt_ms": 40440.62,
+      "decode_ms": 2882.3070000000002,
+      "draft_n": 101,
+      "draft_n_accepted": 101,
+      "wall_s": 43.453965,
+      "finish_reason": "limit",
+      "response_sha256": "fe9fa579e1fadb4da89fa0a7128d5f9949cdac21e1c821c2b64b1101607a672b",
+      "response_preview": "The benchmark records a stable marker sequence for throughput measurement.\nThe benchmark records a stable marker sequence for throughput measurement.\nThe benchm"
+    },
+    {
+      "label": "nemotron-q4-ncpu40-mtp-nmax4-b1024-u1024-128k",
+      "prompt_target": 32768,
+      "repeat": 1,
+      "cache_mode": "warm",
+      "prompt_tokens": 4,
+      "cache_n": 32771,
+      "completion_tokens": 128,
+      "prompt_tok_s": 21.54383092401491,
+      "decode_tok_s": 43.912758143050475,
+      "prompt_ms": 185.668,
+      "decode_ms": 2892.098,
+      "draft_n": 101,
+      "draft_n_accepted": 101,
+      "wall_s": 3.101421,
+      "finish_reason": "limit",
+      "response_sha256": "fe9fa579e1fadb4da89fa0a7128d5f9949cdac21e1c821c2b64b1101607a672b",
+      "response_preview": "The benchmark records a stable marker sequence for throughput measurement.\nThe benchmark records a stable marker sequence for throughput measurement.\nThe benchm"
+    },
+    {
+      "label": "nemotron-q4-ncpu40-mtp-nmax4-b1024-u1024-128k",
+      "prompt_target": 32768,
+      "repeat": 2,
+      "cache_mode": "warm",
+      "prompt_tokens": 4,
+      "cache_n": 32771,
+      "completion_tokens": 128,
+      "prompt_tok_s": 20.18214384823028,
+      "decode_tok_s": 44.1797985609909,
+      "prompt_ms": 198.195,
+      "decode_ms": 2874.617,
+      "draft_n": 101,
+      "draft_n_accepted": 101,
+      "wall_s": 3.096418,
+      "finish_reason": "limit",
+      "response_sha256": "fe9fa579e1fadb4da89fa0a7128d5f9949cdac21e1c821c2b64b1101607a672b",
+      "response_preview": "The benchmark records a stable marker sequence for throughput measurement.\nThe benchmark records a stable marker sequence for throughput measurement.\nThe benchm"
+    }
+  ]
+}
